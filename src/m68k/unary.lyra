@@ -1,9 +1,11 @@
 module m68k
 //! The single-operand instructions of group 4: NEGX, CLR, NEG, NOT and TST `<ea>` at a
-//! byte, word or long (bits 11–8 `0000`, `0010`, `0100`, `0110`, `1010`; size bits 7–6).
+//! byte, word or long (bits 11–8 `0000`, `0010`, `0100`, `0110`, `1010`; size bits 7–6),
+//! and TAS, where TST's size bits are `11`.
 //!
 //! **CLR reads before it writes**, as a read-modify-write, though the value read is thrown
-//! away: a CLR of a hardware register is a read of it too. TST only reads.
+//! away: a CLR of a hardware register is a read of it too. TST only reads. TAS's read and
+//! write are one indivisible bus cycle ([Bus]'s `test_and_set_byte`).
 
 /// Whether `op` is one of these, `alterable` saying its ea is a data alterable mode.
 let is_unary = pure (op: u16, alterable: bool) -> bool => {
@@ -50,4 +52,28 @@ let unary_result = pure (kind: u16, value: u32, size: i64, sr: u16) -> AluResult
     0x6 => logic(~v & size_mask(size), size, sr),
     _ => logic(v, size, sr),
   }
+}
+
+/// TAS <ea>: test a byte — N and Z from it, V and C cleared, X kept — and set its bit 7.
+/// In memory the two are one read-modify-write cycle, after which the chip prefetches.
+let test_and_set<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
+  let mode = source_mode(op)
+  let reg = source_reg(op)
+  if mode == 0 {
+    let value = cpu.d[reg] & 0xFF
+    prefetch(cpu, bus)
+    if cpu.faulted { return Executed }
+    cpu.sr = logic(value, BYTE, cpu.sr).sr
+    write_data_register(cpu, reg, BYTE, value | 0x80)
+    return Executed
+  }
+  let at = locate(cpu, bus, mode, reg, BYTE, true)
+  let addr = match at {
+    InMemory(a) => a,
+    _ => 0,
+  }
+  let value = u32(cpu_test_and_set_byte(cpu, bus, addr, data_fc(cpu)))
+  set_flags(cpu, logic(value, BYTE, cpu.sr).sr)
+  prefetch(cpu, bus)
+  Executed
 }

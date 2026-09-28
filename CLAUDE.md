@@ -29,7 +29,9 @@ frame-at-a-time shortcuts from the start:
   modelled and exceptions (address error, bus error, traps) writing their stack frames in
   the hardware's order. Checked against SingleStepTests, which record every transaction.
 - **Time lives in the bus**: an access costs 4 cycles plus the bus's wait states (VDP, Z80
-  bus arbitration); the CPU keeps no clock.
+  bus arbitration); the CPU keeps no clock. TAS's write-back is the bus's too: the
+  read-modify-write is its own `Bus` method, so the Genesis bus can drop the write, as the
+  console does.
 - **VDP by access slot** (FIFO, DMA, mid-line effects), Z80/68000 bus sharing, cartridge
   hardware (SRAM, EEPROM, the SSF2 mapper), regions, TMSS, 3- and 6-button pads.
 - **Out of scope unless decided otherwise**: Sega CD, 32X; the SVP (Virtua Racing) is late.
@@ -81,27 +83,28 @@ src/m68k/            the 68000 (module m68k):
   arith.lyra         ADD/SUB/AND/OR/EOR/CMP in every form: register, memory, address
                      register, extended, CMPM, immediate (group 0), quick (group 5)
   shift.lyra         ASx/LSx/ROXx/ROx, register and memory forms, a bit at a time
-  flow.lyra          Bcc/BRA/BSR, DBcc, Scc, JMP, JSR, RTS, RTR, LEA, PEA; the queue refill
+  flow.lyra          Bcc/BRA/BSR, DBcc, Scc, JMP, JSR, RTS, RTR, LEA, PEA, LINK, UNLK;
+                     the queue refill
   exception.lyra     TRAP, TRAPV, CHK, RTE, SR/CCR moves and immediates, MOVE USP, RESET;
                      the 6-byte group 1/2 frame, set_sr (stack switch on S)
   muldiv.lyra        MULU, MULS, DIVU, DIVS; data-dependent timing (Cwik's division model)
   bcd.lyra           ABCD, SBCD, NBCD, with the chip's undocumented N and V
   bits.lyra          BTST, BCHG, BCLR, BSET, dynamic and static
   registers.lyra     SWAP, EXT, EXG
-  unary.lyra         NEGX, CLR, NEG, NOT, TST (CLR reads before it writes)
+  unary.lyra         NEGX, CLR, NEG, NOT, TST (CLR reads before it writes), TAS
 tests/fetch.sh       download the pinned suite
 tests/cpu.sh         run the suite, one line per instruction file
 ```
 
 ## Status
 
-The 68000 passes every test in 117 of the suite's 124 files (943,603 tests, address errors
+The 68000 passes every test in 120 of the suite's 124 files (967,798 tests, address errors
 included): NOP, MOVEQ, MOVE, MOVEA, ADD/SUB/AND/OR/EOR/CMP with their A, X, M, I and Q
 forms, all shifts and rotates, control flow (Bcc, BSR, DBcc, Scc, JMP, JSR, RTS, RTR, LEA,
-PEA), the exception group (TRAP, TRAPV, CHK, RTE, SR/CCR moves and immediates, MOVE USP,
-RESET), multiply/divide, BCD, the bit operations (BTST, BCHG, BCLR, BSET), SWAP, EXT,
-EXG, NEG, NEGX, NOT, CLR and TST. The divide-by-zero frame's PC rests on the suite's
-single such test (see `divide_by_zero`).
+PEA, LINK, UNLK), the exception group (TRAP, TRAPV, CHK, RTE, SR/CCR moves and
+immediates, MOVE USP, RESET), multiply/divide, BCD, the bit operations (BTST, BCHG, BCLR,
+BSET), SWAP, EXT, EXG, NEG, NEGX, NOT, CLR, TST and TAS. The divide-by-zero frame's PC
+rests on the suite's single such test (see `divide_by_zero`).
 
 Not yet: interrupts (the IPL input and autovectored acknowledge — wanted with the VDP),
 trace (the T bit), and the illegal-instruction and line A/F exceptions, which wait for

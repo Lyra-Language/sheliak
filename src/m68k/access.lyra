@@ -37,6 +37,17 @@ pub let cpu_read_byte<b> where b: Bus = (
   bus.read_byte(addr, fc)
 }
 
+/// TAS's indivisible read-modify-write of a byte ([Bus]): the byte as it was.
+pub let cpu_test_and_set_byte<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  addr: u32,
+  fc: u8
+) -> u8 => {
+  if cpu.faulted { return 0 }
+  bus.test_and_set_byte(addr, fc)
+}
+
 /// A word write by the CPU. At an odd address it is an address error instead.
 pub let cpu_write_word<b> where b: Bus = (
   cpu: mut Cpu,

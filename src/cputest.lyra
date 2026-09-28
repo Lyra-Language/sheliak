@@ -191,6 +191,14 @@ impl Bus for TestBus {
     self.ram.insert(addr & 0xFFFFFF, value)
     self.access("w", fc, addr, ".b", u32(value))
   }
+  test_and_set_byte = (self, addr, fc) => {
+    // The files log it as one 10-cycle `t` transaction with the byte written.
+    let value = self.byte(addr)
+    self.ram.insert(addr & 0xFFFFFF, value | 0x80)
+    self.log.push("t 10 ${fc} ${addr & 0xFFFFFF} .b ${value | 0x80}")
+    self.cycles += 10
+    value
+  }
   idle = (self, n) => {
     // One entry per stretch of idle cycles, as the files list them: a -(An) source's two
     // and an exception's four stay two entries even when adjacent.

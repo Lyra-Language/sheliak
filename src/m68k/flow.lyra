@@ -1,6 +1,7 @@
 module m68k
 //! Control flow: Bcc/BRA/BSR (group 6), DBcc and Scc (group 5, size bits `11`), JMP, JSR,
-//! RTS, RTR, and LEA/PEA, whose address calculation is JMP's.
+//! RTS, RTR, LEA/PEA, whose address calculation is JMP's, and LINK/UNLK, the stack frames
+//! of a call.
 //!
 //! **A transfer refills the whole queue.** The target's first word is read into IRD and the
 //! next into IRC — two reads, which is why every taken branch ends the same way — and an
@@ -173,6 +174,30 @@ let push_effective_address<b> where b: Bus = (
     prefetch(cpu, bus)
     push_long(cpu, bus, addr)
   }
+  Executed
+}
+
+/// LINK An, #d16: push An, point An at it, and move SP by the displacement. The
+/// displacement is taken through the queue first; the prefetch comes last. LINK A7 pushes
+/// the stack pointer as it is after the push.
+let link<b> where b: Bus = (cpu: mut Cpu, bus: mut b, an: i64) -> Outcome => {
+  let displacement = sign_extend_word(take_extension(cpu, bus))
+  let pushed = if an == 7 { cpu.a[7].wrapping_sub(4) } else { cpu.a[an] }
+  push_long(cpu, bus, pushed)
+  if !cpu.faulted {
+    cpu.a[an] = cpu.a[7]
+    cpu.a[7] = cpu.a[7].wrapping_add(displacement)
+  }
+  prefetch(cpu, bus)
+  Executed
+}
+
+/// UNLK An: SP back to An, and An popped from there.
+let unlink<b> where b: Bus = (cpu: mut Cpu, bus: mut b, an: i64) -> Outcome => {
+  cpu.a[7] = cpu.a[an]
+  let restored = pop_long(cpu, bus)
+  if !cpu.faulted { cpu.a[an] = restored }
+  prefetch(cpu, bus)
   Executed
 }
 
