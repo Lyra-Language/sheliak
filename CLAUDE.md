@@ -58,6 +58,9 @@ frame-at-a-time shortcuts from the start:
 - **A test is only skipped with an upstream report behind it**: `KNOWN_BAD` in
   `src/cputest.lyra` names each one and the issue that says its data is wrong, and the
   runner counts them apart. Two so far (ASL.b 1583 and 1761, SingleStepTests issue #4).
+- **The suite runs every test in supervisor mode**, so the privilege violation is untested
+  there: it follows Motorola's documentation and the frame TRAP's tests confirm, and is to
+  be checked against real software.
 - **Test data is downloaded, never committed or shipped**: SingleStepTests declares no
   licence; `tests/fetch.sh` pins it to a commit under `build/`.
 - **Hot paths do not allocate** (`noalloc` where it can be said): the 68000 alone is ~7.6
@@ -79,15 +82,22 @@ src/m68k/            the 68000 (module m68k):
                      register, extended, CMPM, immediate (group 0), quick (group 5)
   shift.lyra         ASx/LSx/ROXx/ROx, register and memory forms, a bit at a time
   flow.lyra          Bcc/BRA/BSR, DBcc, Scc, JMP, JSR, RTS, RTR, LEA, PEA; the queue refill
+  exception.lyra     TRAP, TRAPV, CHK, RTE, SR/CCR moves and immediates, MOVE USP, RESET;
+                     the 6-byte group 1/2 frame, set_sr (stack switch on S)
 tests/fetch.sh       download the pinned suite
 tests/cpu.sh         run the suite, one line per instruction file
 ```
 
 ## Status
 
-The 68000 passes every test in 71 of the suite's 125 files (572,613 tests, address errors
+The 68000 passes every test in 87 of the suite's 125 files (701,653 tests, address errors
 included): NOP, MOVEQ, MOVE, MOVEA, ADD/SUB/AND/OR/EOR/CMP with their A, X, M, I and Q
-forms, all shifts and rotates, and control flow (Bcc, BSR, DBcc, Scc, JMP, JSR, RTS, RTR,
-LEA, PEA). Every other opcode answers `Unimplemented`, which the runner counts apart from
+forms, all shifts and rotates, control flow (Bcc, BSR, DBcc, Scc, JMP, JSR, RTS, RTR, LEA,
+PEA), and the exception group (TRAP, TRAPV, CHK, RTE, SR/CCR moves and immediates, MOVE
+USP, RESET).
+
+Not yet: interrupts (the IPL input and autovectored acknowledge — wanted with the VDP),
+trace (the T bit), and the illegal-instruction and line A/F exceptions, which wait for
+`Unimplemented` to mean only a genuinely illegal opcode. Every other opcode answers `Unimplemented`, which the runner counts apart from
 failures. `CPUTEST_FLAGS=--no-address-errors` skips tests that end in one, to get an
 instruction's ordinary path right first.

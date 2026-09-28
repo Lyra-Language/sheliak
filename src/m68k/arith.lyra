@@ -47,6 +47,11 @@ let cmp_eor_group<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outco
 /// name the operation; the rest of group 0 (bit operations, MOVEP, the CCR/SR forms) is
 /// not here yet.
 let immediate<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
+  match op {
+    0x003C | 0x007C | 0x023C | 0x027C | 0x0A3C | 0x0A7C =>
+      return status_immediate(cpu, bus, op),
+    _ => {},
+  }
   let size_bits = (op >> 6) & 3
   if size_bits == 3 || (op & 0x0100) != 0 { return Unimplemented(op) }
   let mode = source_mode(op)

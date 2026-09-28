@@ -165,13 +165,29 @@ let moveq<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
   Executed
 }
 
-/// Group 4, the miscellany, as far as it is implemented: NOP, RTS, RTR, JMP, JSR, LEA, PEA.
+/// Group 4, the miscellany, as far as it is implemented: NOP, the returns, TRAP, TRAPV,
+/// RESET, MOVE USP, the SR and CCR moves, CHK, JMP, JSR, LEA, PEA.
 let miscellaneous<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
-  if op == 0x4E71 { return nop(cpu, bus) }
-  if op == 0x4E75 { return return_from_subroutine(cpu, bus) }
-  if op == 0x4E77 { return return_and_restore(cpu, bus) }
+  match op {
+    0x4E70 => return reset_peripherals(cpu, bus),
+    0x4E71 => return nop(cpu, bus),
+    0x4E73 => return return_from_exception(cpu, bus),
+    0x4E75 => return return_from_subroutine(cpu, bus),
+    0x4E76 => return trap_on_overflow(cpu, bus),
+    0x4E77 => return return_and_restore(cpu, bus),
+    _ => {},
+  }
+  if (op & 0xFFF0) == 0x4E40 { return trap(cpu, bus, op) }
+  if (op & 0xFFF0) == 0x4E60 { return move_user_stack(cpu, bus, op) }
   let mode = source_mode(op)
-  let control = mode == 2 || mode == 5 || mode == 6 || (mode == 7 && source_reg(op) <= 3)
+  let reg = source_reg(op)
+  let data = mode != 1 && (mode != 7 || reg <= 4)
+  let alterable = mode != 1 && (mode != 7 || reg <= 1)
+  if (op & 0xFFC0) == 0x40C0 && alterable { return move_from_status(cpu, bus, op) }
+  if (op & 0xFFC0) == 0x44C0 && data { return move_to_status(cpu, bus, op, false) }
+  if (op & 0xFFC0) == 0x46C0 && data { return move_to_status(cpu, bus, op, true) }
+  if (op & 0xF1C0) == 0x4180 && data { return check_bounds(cpu, bus, op) }
+  let control = mode == 2 || mode == 5 || mode == 6 || (mode == 7 && reg <= 3)
   if !control { return Unimplemented(op) }
   if (op & 0xFFC0) == 0x4EC0 { return jump(cpu, bus, op) }
   if (op & 0xFFC0) == 0x4E80 { return jump_subroutine(cpu, bus, op) }

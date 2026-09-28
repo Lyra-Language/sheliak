@@ -1,0 +1,196 @@
+module m68k
+//! Exceptions and the status register: TRAP, TRAPV, CHK, RTE, MOVE to/from SR, MOVE to CCR,
+//! ANDI/ORI/EORI to CCR and SR, MOVE USP, RESET, and the privilege violation.
+//!
+//! **The group 1 and 2 frame is six bytes** — SR and the PC — written PC low, SR, PC high,
+//! into supervisor mode (S set, T cleared, A7 switched to the supervisor stack). The
+//! vector is read and the handler's first two words fetched, exactly as the address error's
+//! 14-byte frame ends ([jump_to_vector]).
+//!
+//! **Writing SR or CCR refetches the queue** from the next instruction's address: the chip
+//! does not trust what it prefetched under the old mode, so a MOVE to SR or an ANDI to CCR
+//! ends in a full two-read refill, with the new mode's function code.
+//!
+//! **The privilege violation is not in the test suite**, which starts every test in
+//! supervisor mode. It follows Motorola's documentation and the frame the TRAP tests
+//! confirm; check it against real software before relying on its timing.
+
+/// TRAP #n: exception 32 + n, after four idle cycles, returning to the next instruction.
+let trap<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
+  cpu_idle(cpu, bus, 4)
+  group_exception(cpu, bus, VECTOR_TRAP_0 + u32(op & 0xF), cpu.pc.wrapping_add(2))
+  Executed
+}
+
+/// TRAPV: exception 7 if V is set, after the prefetch.
+let trap_on_overflow<b> where b: Bus = (cpu: mut Cpu, bus: mut b) -> Outcome => {
+  prefetch(cpu, bus)
+  if (cpu.sr & SR_V) != 0 { group_exception(cpu, bus, VECTOR_TRAPV, cpu.pc) }
+  Executed
+}
+
+/// CHK <ea>, Dn: exception 6 unless 0 ≤ Dn.w ≤ bound (signed words).
+///
+/// The chip tests "above the bound" first and traps after four idle cycles; otherwise it
+/// tests "negative" and traps after six. N ends set for a negative Dn and clear for one
+/// above the bound, and is *kept* when Dn is in range; Z is set when Dn is zero; V and C
+/// are cleared and X kept. (Motorola calls Z, V and C undefined; these are what every test
+/// shows.)
+let check_bounds<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
+  let source = locate(cpu, bus, source_mode(op), source_reg(op), WORD, true)
+  let bound = i16(read_operand(cpu, bus, source, WORD) & 0xFFFF)
+  prefetch(cpu, bus)
+  if cpu.faulted { return Executed }
+  let value = i16(cpu.d[destination_reg(op)] & 0xFFFF)
+  var sr = cpu.sr & ~(SR_Z | SR_V | SR_C)
+  if value == 0 { sr = sr | SR_Z }
+  if value < 0 { sr = sr | SR_N } else if value > bound { sr = sr & ~SR_N }
+  cpu.sr = sr
+  if value > bound {
+    cpu_idle(cpu, bus, 4)
+    group_exception(cpu, bus, VECTOR_CHK, cpu.pc)
+  } else if value < 0 {
+    cpu_idle(cpu, bus, 6)
+    group_exception(cpu, bus, VECTOR_CHK, cpu.pc)
+  } else {
+    cpu_idle(cpu, bus, 6)
+  }
+  Executed
+}
+
+/// RTE: pop SR and the PC — the PC's high word, then SR, then the low word — and resume
+/// there in whatever mode the popped SR names.
+let return_from_exception<b> where b: Bus = (cpu: mut Cpu, bus: mut b) -> Outcome => {
+  if !supervisor(cpu) { return privilege_violation(cpu, bus) }
+  let sp = cpu.a[7]
+  let fc = data_fc(cpu)
+  let high = u32(cpu_read_word(cpu, bus, sp.wrapping_add(2), fc))
+  let sr = cpu_read_word(cpu, bus, sp, fc)
+  let low = u32(cpu_read_word(cpu, bus, sp.wrapping_add(4), fc))
+  if cpu.faulted { return Executed }
+  cpu.a[7] = sp.wrapping_add(6)
+  set_sr(cpu, sr)
+  jump_to(cpu, bus, (high << 16) | low)
+  Executed
+}
+
+/// MOVE <ea>, SR (privileged) and MOVE <ea>, CCR: read the word, four idle cycles, set the
+/// register, refetch the queue.
+let move_to_status<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  op: u16,
+  whole: bool
+) -> Outcome => {
+  if whole && !supervisor(cpu) { return privilege_violation(cpu, bus) }
+  let source = locate(cpu, bus, source_mode(op), source_reg(op), WORD, true)
+  let value = u16(read_operand(cpu, bus, source, WORD) & 0xFFFF)
+  cpu_idle(cpu, bus, 4)
+  if cpu.faulted { return Executed }
+  if whole { set_sr(cpu, value) } else { cpu.sr = (cpu.sr & 0xFF00) | (value & 0x1F) }
+  jump_to(cpu, bus, cpu.pc.wrapping_add(2))
+  Executed
+}
+
+/// MOVE SR, <ea>: not privileged on the 68000. To memory the chip reads the word first.
+let move_from_status<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
+  let value = u32(cpu.sr)
+  if source_mode(op) == 0 {
+    prefetch(cpu, bus)
+    cpu_idle(cpu, bus, 2)
+    if !cpu.faulted { write_data_register(cpu, source_reg(op), WORD, value) }
+    return Executed
+  }
+  let at = locate(cpu, bus, source_mode(op), source_reg(op), WORD, true)
+  read_operand(cpu, bus, at, WORD)
+  prefetch(cpu, bus)
+  write_operand(cpu, bus, at, WORD, value)
+  Executed
+}
+
+/// ANDI, ORI, EORI to CCR (`0x003C`, `0x023C`, `0x0A3C`) or SR (`0x007C`…, privileged): the
+/// immediate taken through the queue, eight idle cycles, the queue refetched.
+let status_immediate<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
+  let whole = (op & 0x0040) != 0
+  if whole && !supervisor(cpu) { return privilege_violation(cpu, bus) }
+  let operand = take_extension(cpu, bus)
+  cpu_idle(cpu, bus, 8)
+  if cpu.faulted { return Executed }
+  let current = if whole { cpu.sr } else { cpu.sr & 0xFF }
+  let result = match (op >> 8) & 0xF {
+    0x0 => current | operand,
+    0x2 => current & operand,
+    _ => current ~ operand,
+  }
+  if whole { set_sr(cpu, result) } else { cpu.sr = (cpu.sr & 0xFF00) | (result & 0x1F) }
+  jump_to(cpu, bus, cpu.pc.wrapping_add(2))
+  Executed
+}
+
+/// MOVE An, USP (bit 3 clear) or MOVE USP, An (privileged).
+let move_user_stack<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
+  if !supervisor(cpu) { return privilege_violation(cpu, bus) }
+  prefetch(cpu, bus)
+  if cpu.faulted { return Executed }
+  let an = source_reg(op)
+  if (op & 0x0008) == 0 { cpu.inactive_sp = cpu.a[an] } else { cpu.a[an] = cpu.inactive_sp }
+  Executed
+}
+
+/// RESET (privileged): asserts the reset line for 124 cycles.
+let reset_peripherals<b> where b: Bus = (cpu: mut Cpu, bus: mut b) -> Outcome => {
+  if !supervisor(cpu) { return privilege_violation(cpu, bus) }
+  cpu_idle(cpu, bus, 4)
+  cpu_idle(cpu, bus, 124)
+  prefetch(cpu, bus)
+  Executed
+}
+
+// ── Exception processing ─────────────────────────────────────────────────────
+
+/// Exception vector numbers.
+pub const VECTOR_ILLEGAL_INSTRUCTION: u32 = 4
+pub const VECTOR_CHK: u32 = 6
+pub const VECTOR_TRAPV: u32 = 7
+pub const VECTOR_PRIVILEGE_VIOLATION: u32 = 8
+pub const VECTOR_TRAP_0: u32 = 32
+
+/// A privileged instruction in user mode: exception 8, returning to the instruction itself.
+/// Untested by the suite (see the module header).
+let privilege_violation<b> where b: Bus = (cpu: mut Cpu, bus: mut b) -> Outcome => {
+  cpu_idle(cpu, bus, 4)
+  group_exception(cpu, bus, VECTOR_PRIVILEGE_VIOLATION, cpu.pc)
+  Executed
+}
+
+/// Exception `vector` with `return_pc` in its frame: into supervisor mode, SR and PC pushed
+/// (PC low, SR, PC high), the handler started.
+let group_exception<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  vector: u32,
+  return_pc: u32
+) -> void => {
+  if cpu.faulted { return }
+  let old_sr = cpu.sr
+  enter_supervisor(cpu)
+  let sp = cpu.a[7]
+  let fc = FC_SUPERVISOR_DATA
+  cpu_write_word(cpu, bus, sp.wrapping_sub(2), fc, u16(return_pc & 0xFFFF))
+  cpu_write_word(cpu, bus, sp.wrapping_sub(6), fc, old_sr)
+  cpu_write_word(cpu, bus, sp.wrapping_sub(4), fc, u16(return_pc >> 16))
+  cpu.a[7] = sp.wrapping_sub(6)
+  jump_to_vector(cpu, bus, vector)
+}
+
+/// Set the whole status register — its implemented bits, T, S, the interrupt mask and the
+/// condition codes — switching A7 between the stacks when S changes.
+let set_sr = (cpu: mut Cpu, value: u16) -> void => {
+  let was_supervisor = supervisor(cpu)
+  cpu.sr = value & 0xA71F
+  if supervisor(cpu) != was_supervisor {
+    let sp = cpu.a[7]
+    cpu.a[7] = cpu.inactive_sp
+    cpu.inactive_sp = sp
+  }
+}
