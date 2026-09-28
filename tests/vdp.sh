@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+#
+# Check Sheliak's VDP against BlastEm: every test ROM (src/vdproms.lyra) is run on both,
+# to its parking loop, and the VDP's memories, registers, address and code registers and
+# the start of work RAM are compared.
+#
+#   tests/vdp.sh               # every ROM
+#   tests/vdp.sh fill copy     # just these
+#
+# **BlastEm is the oracle, downloaded and built here, never committed or shipped**: GPLv3,
+# so it is run as a separate program, the way the 68000 suite is downloaded as data. Pinned
+# to one revision, built once into build/deps/blastem/. Needs a C compiler, make, python3,
+# pkg-config and SDL2 (`brew install sdl2`). One line of its UI code is patched so the
+# no-OpenGL build compiles (render_sdl.c reads an OpenGL-only field); nothing it emulates is
+# touched. It runs off-screen on SDL's dummy drivers, with a scratch HOME so it writes no
+# configuration of yours, driven through its debugger (`-t -d`, commands on stdin).
+set -euo pipefail
+
+readonly REVISION="9b71c8bd20654e8ac27b457fa55a8bc3b1d9446f"
+readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly DEPS="$ROOT/build/deps/blastem"
+readonly BLASTEM="$DEPS/blastem-$REVISION/blastem"
+readonly WORK="$ROOT/build/vdp"
+
+fetch_blastem() {
+  if [ -x "$BLASTEM" ] && [ "$(cat "$DEPS/REVISION" 2>/dev/null)" = "$REVISION" ]; then
+    return
+  fi
+  rm -rf "$DEPS"
+  mkdir -p "$DEPS"
+  curl -fsSL --retry 2 -o "$DEPS/blastem.tar.gz" \
+    "https://www.retrodev.com/repos/blastem/archive/$REVISION.tar.gz"
+  tar -xzf "$DEPS/blastem.tar.gz" -C "$DEPS"
+  rm -f "$DEPS/blastem.tar.gz"
+  python3 - "$DEPS/blastem-$REVISION/render_sdl.c" <<'EOF'
+import sys
+path = sys.argv[1]
+source = open(path).read()
+line = ("\tprocess_framebuffer(which < FRAMEBUFFER_USER_START ? texture_buf : "
+        "extras[which - FRAMEBUFFER_USER_START].texture_buf, which, width);")
+assert source.count(line) == 1, "render_sdl.c changed; revisit the NOGL patch"
+source = source.replace(line, "#ifdef DISABLE_OPENGL\n\tprocess_framebuffer(texture_buf, which, width);\n#else\n" + line + "\n#endif")
+open(path, "w").write(source)
+EOF
+  echo "building BlastEm $REVISION (once; a few minutes)"
+  (cd "$DEPS/blastem-$REVISION" && make NOGL=1 LIBS=sdl2 blastem -j8 >"$DEPS/build.log" 2>&1) ||
+    { tail -20 "$DEPS/build.log"; exit 1; }
+  printf '%s' "$REVISION" >"$DEPS/REVISION"
+}
+
+# Run ROM on BlastEm to PARK, then two frames more — the program is parked, so nothing new is
+# written, and whatever the VDP still had in hand (its FIFO, a DMA running in the access
+# slots) completes — saving the settled state into OUT. Sheliak has no timing yet, so the
+# settled state is what the two can agree on.
+run_blastem() {
+  local rom="$1" park="$2" out="$3"
+  mkdir -p "$out" "$WORK/home"
+  cat >"$out/script.txt" <<EOF
+advance 0x$park
+frames 2
+save/b "$out/vram.bin" vdp:vram
+save/w "$out/cram.le" vdp:cram
+save/w "$out/vsram.le" vdp:vsram
+save/b "$out/regs.bin" vdp:reg
+save/b "$out/ram.bin" [0xFF0000] 256
+print vdp:address
+print vdp:cd
+quit
+EOF
+  SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy HOME="$WORK/home" \
+    "$BLASTEM" -t -d "$rom" <"$out/script.txt" >"$out/stdout.txt" 2>&1 &
+  local pid=$!
+  { sleep 30; kill "$pid"; } 2>/dev/null &
+  local watchdog=$!
+  wait "$pid" || { echo "  BlastEm failed on $(basename "$rom")"; return 1; }
+  kill "$watchdog" 2>/dev/null || true
+  wait "$watchdog" 2>/dev/null || true
+  # `save/w` writes host-order (little-endian) words; Sheliak dumps big-endian.
+  python3 - "$out" <<'EOF'
+import sys
+out = sys.argv[1]
+for name in ("cram", "vsram"):
+    data = open(f"{out}/{name}.le", "rb").read()
+    open(f"{out}/{name}.bin", "wb").write(bytes(b for i in range(0, len(data), 2) for b in (data[i + 1], data[i])))
+EOF
+  local address cd
+  address="$(sed -n 's/.*vdp:address: \([0-9]*\).*/\1/p' "$out/stdout.txt")"
+  cd="$(sed -n 's/.*vdp:cd: \([0-9]*\).*/\1/p' "$out/stdout.txt")"
+  printf 'address %s\ncd %s\n' "$address" "$cd" >"$out/state.txt"
+}
+
+fetch_blastem
+"$ROOT/build.sh"
+"$ROOT/build/vdproms" "$WORK/roms" >/dev/null
+
+if [ $# -gt 0 ]; then names=("$@"); else
+  names=()
+  for rom in "$WORK/roms"/*.bin; do names+=("$(basename "$rom" .bin)"); done
+fi
+
+failed=0
+for name in "${names[@]}"; do
+  rom="$WORK/roms/$name.bin"
+  park="$(cat "$WORK/roms/$name.park")"
+  rm -rf "$WORK/blastem/$name" "$WORK/sheliak/$name"
+  run_blastem "$rom" "$park" "$WORK/blastem/$name" || { failed=$((failed + 1)); continue; }
+  "$ROOT/build/vdpcheck" "$rom" "$park" "$WORK/sheliak/$name" || { failed=$((failed + 1)); continue; }
+  differs=()
+  for file in vram.bin cram.bin vsram.bin regs.bin ram.bin state.txt; do
+    cmp -s "$WORK/blastem/$name/$file" "$WORK/sheliak/$name/$file" || differs+=("$file")
+  done
+  if [ ${#differs[@]} -eq 0 ]; then
+    echo "$name: matches"
+  else
+    echo "$name: differs in ${differs[*]}"
+    failed=$((failed + 1))
+  fi
+done
+echo "vdp: $((${#names[@]} - failed)) of ${#names[@]} match BlastEm"
+[ "$failed" -eq 0 ]

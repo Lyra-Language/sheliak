@@ -164,6 +164,29 @@ pub let usp = pure (cpu: Cpu) -> u32 =>
 pub let ssp = pure (cpu: Cpu) -> u32 =>
   if supervisor(cpu) { cpu.a[7] } else { cpu.inactive_sp }
 
+/// Power-on or the RESET line: supervisor mode, interrupts masked, T clear, then SSP from
+/// address 0, the PC from address 4, and the queue filled from there. 40 cycles, Yacht's
+/// `(n-)*5 nn nF nf nV nv np n np`; every read has the supervisor program function code.
+/// Data and address registers keep whatever they held, as the chip's do.
+pub let reset<b> where b: Bus = (cpu: mut Cpu, bus: mut b) -> void => {
+  cpu.sr = 0x2700
+  cpu.stopped = false
+  cpu.faulted = false
+  cpu.nmi = false
+  cpu.ipl = 0
+  bus.idle(14)
+  let fc = FC_SUPERVISOR_PROGRAM
+  let ssp_high = u32(bus.read_word(0, fc))
+  let ssp_low = u32(bus.read_word(2, fc))
+  let pc_high = u32(bus.read_word(4, fc))
+  let pc_low = u32(bus.read_word(6, fc))
+  cpu.a[7] = (ssp_high << 16) | ssp_low
+  cpu.pc = (pc_high << 16) | pc_low
+  cpu.ird = bus.read_word(cpu.pc, fc)
+  bus.idle(2)
+  cpu.irc = bus.read_word(cpu.pc.wrapping_add(2), fc)
+}
+
 /// A CPU in the given state — what a test, a save state or a reset starts from. `usp` and
 /// `ssp` are placed by `sr`'s S bit.
 pub let cpu_with = pure (

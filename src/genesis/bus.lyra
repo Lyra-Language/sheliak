@@ -1,0 +1,142 @@
+module genesis
+//! The Genesis as a composition: the 68000's view of the machine — cartridge ROM, work RAM,
+//! the VDP's ports — wired as the console wires them. A chip is a module (`m68k`, `vdp`);
+//! this is where they meet (CLAUDE.md's rule).
+//!
+//! **What is here is what the VDP's first slice needs**: ROM at 000000–3FFFFF, work RAM at
+//! E00000–FFFFFF (64 KB, mirrored), the VDP at C00000–C0001F, the version register, and the
+//! TMSS register taking its write. No wait states, no Z80, no sound, no controllers, no
+//! interrupts yet: every access costs its four cycles and nothing more.
+
+import m68k.{ Bus }
+import vdp.{
+  Vdp,
+  new_vdp,
+  write_control,
+  write_data,
+  read_data,
+  read_status,
+  dma_active,
+  dma_source,
+  dma_write
+}
+
+/// The machine's memory map, as the 68000 reaches it.
+pub struct GenesisBus {
+  /// The cartridge, as loaded; reads past its end answer zero.
+  rom: []u8,
+  /// 64 KB of work RAM.
+  ram: []u8,
+  vdp: Vdp,
+  /// Cycles elapsed, counted from the accesses and idles the 68000 makes.
+  cycles: i64,
+}
+
+/// The version register's value: an overseas (US) NTSC console with no expansion unit and
+/// no TMSS — version 0, so a ROM that checks for TMSS writes nothing to it.
+const VERSION: u8 = 0xA0
+
+/// A machine with `rom` in the cartridge slot and everything else at power-on.
+pub let genesis_bus = pure (rom: []u8) -> GenesisBus => GenesisBus {
+  rom: rom,
+  ram: [0; 65536],
+  vdp: new_vdp(),
+  cycles: 0,
+}
+
+impl Bus for GenesisBus {
+  read_word = (self, addr, fc) => {
+    self.cycles += 4
+    let a = addr & 0xFFFFFF
+    if a >= 0xC00000 && a < 0xC00020 { return self.read_vdp(a) }
+    self.peek_word(a)
+  }
+  read_byte = (self, addr, fc) => {
+    self.cycles += 4
+    let a = addr & 0xFFFFFF
+    // A byte of a VDP port is a word access to it: the port acts once, and the byte
+    // is the half the address names.
+    let word = if a >= 0xC00000 && a < 0xC00020 { self.read_vdp(a & 0xFFFFFE) } else { self.peek_word(a & 0xFFFFFE) }
+    if (a & 1) == 0 { u8(word >> 8) } else { u8(word & 0xFF) }
+  }
+  write_word = (self, addr, fc, value) => {
+    self.cycles += 4
+    let a = addr & 0xFFFFFF
+    if a >= 0xE00000 {
+      let at = i64(a & 0xFFFE)
+      self.ram[at] = u8(value >> 8)
+      self.ram[at + 1] = u8(value & 0xFF)
+      return
+    }
+    if a >= 0xC00000 && a < 0xC00020 { self.write_vdp(a, value) }
+  }
+  write_byte = (self, addr, fc, value) => {
+    self.cycles += 4
+    let a = addr & 0xFFFFFF
+    if a >= 0xE00000 {
+      self.ram[i64(a & 0xFFFF)] = value
+      return
+    }
+    // A byte written to a VDP port is that byte in both halves of a word. (C00011–17, the
+    // PSG, is not a VDP port and is ignored until the PSG is built.)
+    if a >= 0xC00000 && a < 0xC00010 { self.write_vdp(
+      a & 0xFFFFFE,
+      (u16(value) << 8) | u16(value)
+    ) }
+  }
+  test_and_set_byte = (self, addr, fc) => {
+    // The Genesis never completes TAS's write: the read-modify-write cycle is not one its
+    // bus arbiter supports, so only the read happens.
+    self.cycles += 10
+    let a = addr & 0xFFFFFF
+    let word = self.peek_word(a & 0xFFFFFE)
+    if (a & 1) == 0 { u8(word >> 8) } else { u8(word & 0xFF) }
+  }
+  interrupt_level = (self) => 0
+  acknowledge_interrupt = (self, level) => {
+    self.cycles += 4
+    24 + u32(level)
+  }
+  idle = (self, n) => { self.cycles += n }
+}
+
+/// The word at an even address outside the VDP, with no bus cycle: ROM, work RAM, the
+/// version register. Also what a 68000 → VDP DMA reads, which is why it takes no time here.
+let peek_word = pure (self: GenesisBus, a: u32) -> u16 => {
+  if a < 0x400000 {
+    let at = i64(a & 0x3FFFFE)
+    if at + 1 < self.rom.len() { return (u16(self.rom[at]) << 8) | u16(self.rom[at + 1]) }
+    return 0
+  }
+  if a >= 0xE00000 {
+    let at = i64(a & 0xFFFE)
+    return (u16(self.ram[at]) << 8) | u16(self.ram[at + 1])
+  }
+  if a >= 0xA10000 && a < 0xA10002 { return (u16(VERSION) << 8) | u16(VERSION) }
+  0
+}
+
+/// A word read from the VDP's ports: data (C00000–03), control (C00004–07), HV counter
+/// (C00008–0F, zero until the VDP has a beam).
+let read_vdp = (self: mut GenesisBus, a: u32) -> u16 => match (a >> 2) & 7 {
+  0 => read_data(self.vdp),
+  1 => read_status(self.vdp),
+  _ => 0,
+}
+
+/// A word written to the VDP's ports. A control write may start a 68000 → VDP transfer,
+/// which the bus feeds from its own memory, word by word, here — instantly, until the VDP
+/// has the access slots that pace it and the 68000 is frozen for it.
+let write_vdp = (self: mut GenesisBus, a: u32, value: u16) -> void => {
+  match (a >> 2) & 7 {
+    0 => write_data(self.vdp, value),
+    1 => {
+      write_control(self.vdp, value)
+      for dma_active(self.vdp) {
+        let word = self.peek_word(dma_source(self.vdp) & 0xFFFFFE)
+        dma_write(self.vdp, word)
+      }
+    },
+    _ => {},
+  }
+}

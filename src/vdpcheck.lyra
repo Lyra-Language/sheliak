@@ -1,0 +1,99 @@
+// vdpcheck — runs one VDP test ROM on Sheliak and dumps what tests/vdp.sh compares.
+//
+//   build/vdpcheck ROM PARK_ADDRESS OUT_DIR
+//
+// Resets the 68000 on a Genesis bus holding ROM and steps it until the PC reaches
+// PARK_ADDRESS (hex) — the ROM's closing `bra.s *` — then writes, into OUT_DIR, the files
+// BlastEm's debugger is asked for: vram.bin, cram.bin, vsram.bin (words big-endian),
+// regs.bin, ram.bin (the first 256 bytes of work RAM), and state.txt (address and code
+// registers). Exits 1 if the ROM never parks (a step limit), or takes an exception.
+
+import std.io.{ read_bytes, write_bytes, write_file, create_dir_all }
+import m68k.{ step, reset, cpu_with }
+import genesis.{ GenesisBus, genesis_bus }
+
+const STEP_LIMIT: i64 = 1000000
+const ERROR_LOOP: u32 = 0x1FC
+
+let main = () -> u8 => {
+  let args = program_args()
+  if args.len() < 4 {
+    println("usage: vdpcheck ROM PARK_ADDRESS OUT_DIR")
+    return 2
+  }
+  let loaded = read_bytes(args[1])
+  let Some(rom) = loaded else {
+    println("vdpcheck: cannot read ${args[1]}")
+    return 1
+  }
+  let park = parse_hex(args[2].trim())
+  var bus = genesis_bus(rom)
+  var cpu = cpu_with(
+    #[0, 0, 0, 0, 0, 0, 0, 0],
+    #[0, 0, 0, 0, 0, 0, 0],
+    0,
+    0,
+    0x2700,
+    0,
+    0,
+    0
+  )
+  reset(cpu, bus)
+  var steps = 0
+  for cpu.pc != park {
+    if cpu.pc == ERROR_LOOP {
+      println("vdpcheck: ${args[1]} took an exception (the vector's loop at 0x1FC)")
+      return 1
+    }
+    if steps >= STEP_LIMIT {
+      println("vdpcheck: ${args[1]} did not park at 0x${park.to_hex()} in ${STEP_LIMIT} steps")
+      return 1
+    }
+    step(cpu, bus)
+    steps += 1
+  }
+  dump(bus, args[3])
+}
+
+/// The VDP's state and the start of work RAM, as files.
+let dump = (bus: GenesisBus, out: string) -> u8 => {
+  if !create_dir_all(out) { return 1 }
+  let v = bus.vdp
+  var cram: []u8 = []
+  for c in v.cram {
+    cram.push(u8(c >> 8))
+    cram.push(u8(c & 0xFF))
+  }
+  var vsram: []u8 = []
+  for s in v.vsram {
+    vsram.push(u8(s >> 8))
+    vsram.push(u8(s & 0xFF))
+  }
+  var regs: []u8 = []
+  for r in v.regs { regs.push(r) }
+  let ram = [i in 0..<256 | bus.ram[i]]
+  let written = write_bytes(
+    "${out}/vram.bin",
+    v.vram
+  ) && write_bytes("${out}/cram.bin", cram) &&
+    write_bytes("${out}/vsram.bin", vsram) && write_bytes("${out}/regs.bin", regs) &&
+    write_bytes("${out}/ram.bin", ram) &&
+    write_file("${out}/state.txt", "address ${v.address}\ncd ${u32(v.code)}\n")
+  if written { 0 } else { 1 }
+}
+
+/// A hexadecimal number, with or without `0x`.
+let parse_hex = pure (text: string) -> u32 => {
+  var value: u32 = 0
+  for c in text {
+    let digit: u32 = match c {
+      '0'..<='9' => u32(i64(c) - i64('0')),
+      'a'..<='f' => u32(i64(c) - i64('a') + 10),
+      'A'..<='F' => u32(i64(c) - i64('A') + 10),
+      _ => 0xFF,
+    }
+    if digit == 0xFF { continue }
+    value = (value << 4) | digit
+  }
+  value
+}

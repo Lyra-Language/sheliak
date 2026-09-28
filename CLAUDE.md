@@ -11,12 +11,14 @@ non-commercial is linked in. Lives in the Lyra workspace beside `lyra/`; the wor
 
 ```bash
 ../lyra/build.sh            # the compiler, with std/ beside it
-./build.sh                  # -> build/cputest, build/legaltest
+./build.sh                  # -> build/: cputest, legaltest, scenariotest, vdproms, vdpcheck
 tests/fetch.sh              # SingleStepTests 68000 suite -> build/deps/680x0 (~200 MB, once)
 tests/cpu.sh                # every 68000 test file (~1M tests, ~17 s)
 tests/cpu.sh MOVE.l DIVS    # just these
 tests/legal.sh              # all 65,536 opcodes: legality against Musashi, illegal exceptions
 tests/scenarios.sh          # interrupt, STOP and trace scenarios on a scripted bus
+tests/vdp.sh                # VDP test ROMs on Sheliak and BlastEm, compared (needs SDL2)
+tests/vdp.sh fill copy      # just these
 ```
 
 ## Accuracy Target
@@ -82,6 +84,20 @@ frame-at-a-time shortcuts from the start:
   `step` — so a pending interrupt is taken at the next step, after the trace, as Motorola
   ranks them. Not after an illegal opcode or a privilege violation (`Cpu.untraced`); after
   TRAP, TRAPV, CHK or divide-by-zero it follows that exception, into its handler.
+- **BlastEm is the VDP's oracle, as SingleStepTests is the 68000's** (`tests/vdp.sh`):
+  test ROMs run on both to a parking loop, and the VDP's memories, registers, address and
+  code registers and the start of work RAM must match byte for byte. BlastEm is GPLv3, so
+  it is **downloaded, built and run as a separate program** — pinned, under `build/deps/`,
+  never linked, committed or shipped. Its source may be read to understand what the
+  hardware does, never copied. Where it and the classic documents (genvdp.txt) disagree,
+  it is the authority, and the decision is recorded where the code makes it.
+- **The test ROMs are ours**, written by `src/vdproms.lyra` with a hand-encoded handful of
+  68000 instructions, so the harness needs no assembler. Each sets every register first (as
+  a game's start-up does, so neither emulator's power-on values matter), waits for each DMA
+  to finish before touching the VDP again (as a program must), and parks in `bra.s *`.
+- **Until the VDP has timing, it is compared settled**: BlastEm runs two frames past the
+  parking loop, so its FIFO drains and any DMA completes, while Sheliak's VDP does every
+  access at once. The timing slice brings the comparison forward to the instant.
 - **Hot paths do not allocate** (`noalloc` where it can be said): the 68000 alone is ~7.6
   million cycles a second.
 
@@ -94,7 +110,7 @@ src/cputest.lyra     68000 test runner: one SingleStepTests file on stdin
 src/legaltest.lyra   every opcode through the core, against a legality reference on stdin
 src/scenariotest.lyra  interrupts, STOP and trace, scenario by scenario, on a scripted bus
 src/m68k/            the 68000 (module m68k):
-  cpu.lyra           Cpu, the Bus trait, step and decode, the prefetch, flags
+  cpu.lyra           Cpu, the Bus trait, reset, step and decode, the prefetch, flags
   legal.lyra         is_legal: which opcodes the 68000 has
   access.lyra        fault-aware accesses; the address error exception
   ea.lyra            effective addresses: locate, read_operand, write_operand
@@ -114,10 +130,17 @@ src/m68k/            the 68000 (module m68k):
   registers.lyra     SWAP, EXT, EXG
   unary.lyra         NEGX, CLR, NEG, NOT, TST (CLR reads before it writes), TAS
   movem.lyra         MOVEM (with the extra read), MOVEP
+src/vdp/             the VDP (module vdp):
+  vdp.lyra           memories, registers, the control and data ports, status, DMA
+src/genesis/         the machine (module genesis):
+  bus.lyra           the 68000's memory map: ROM, work RAM, the VDP ports, version, TMSS
+src/vdproms.lyra     writes the VDP test ROMs (and each one's parking address)
+src/vdpcheck.lyra    runs one test ROM on Sheliak and dumps the VDP for comparison
 tests/fetch.sh       download the pinned suite
 tests/cpu.sh         run the suite, one line per instruction file
 tests/legal.sh       fetch Musashi's table, expand it (musashi_legal.py), run legaltest
 tests/scenarios.sh   run scenariotest
+tests/vdp.sh         fetch and build BlastEm (pinned), run every VDP test ROM on both, compare
 ```
 
 ## Status
@@ -130,11 +153,23 @@ included, every instruction the chip has (the two known-bad tests aside). Every 
 needs a bus that can raise one.
 
 What the recorded suite cannot check rests on documentation: the illegal-instruction,
-privilege-violation, trace and interrupt sequences on Motorola's tables and Yacht, with the
-TRAP and TRAPV frames the suite does test; the divide-by-zero frame's PC on a single test. **The interrupt
-has one open cycle count**: the idle after the acknowledge is 4 cycles (Motorola's 44 in
-all) where Clock Signal takes 6 — to settle against hardware once the VDP raises real
-interrupts.
+privilege-violation, trace, interrupt and reset sequences on Motorola's tables and Yacht,
+with the TRAP and TRAPV frames the suite does test; the divide-by-zero frame's PC on a
+single test. **The interrupt has one open cycle count**: the idle after the acknowledge is
+4 cycles (Motorola's 44 in all) where Clock Signal takes 6 — to settle against hardware
+once the VDP raises real interrupts.
 
 `CPUTEST_FLAGS=--no-address-errors` skips tests that end in an address error, to get an
 instruction's ordinary path right first.
+
+**The VDP has its programming interface** (`tests/vdp.sh`, 11 ROMs matching BlastEm):
+VRAM, CRAM, VSRAM, the 24 registers, the control port's command words and pending latch,
+the data port and its auto-increment, the status register's fixed bits, and DMA — VRAM
+fill, VRAM copy, and 68000 → VDP transfers the bus feeds — all taking effect at once.
+Not yet, in the order they are wanted: **rendering** (planes, window, sprites, priority,
+shadow/highlight, with frame dumps compared against BlastEm's), then **timing** (the access
+slots, the FIFO's waiting, DMA's pace and the 68000's freeze, the HV counter, the status
+register's live bits, the H and V interrupts), then the corners — 128 KB VRAM mode, the
+8-bit VRAM read (code `1100`), CRAM and VSRAM as DMA targets beyond what the ROMs cover,
+mode 4. **Open**: the VDP's registers at power-on, which the ROMs sidestep and BlastEm
+answers (register 10 = FF) with no hardware citation.

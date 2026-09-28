@@ -1,0 +1,424 @@
+// vdproms — writes the VDP test ROMs that tests/vdp.sh runs on BlastEm and on Sheliak.
+//
+//   build/vdproms OUT_DIR
+//
+// Each ROM is a Genesis cartridge that programs the VDP through its ports in straight-line
+// code and then parks in a `bra.s *`; beside each `NAME.bin` goes `NAME.park`, that loop's
+// address in hex, which is where both emulators stop and dump the VDP. The code is encoded
+// here by hand — a handful of 68000 instructions, each named for what it encodes — so the
+// harness needs no assembler.
+
+import std.io.{ write_bytes, write_file, create_dir_all }
+
+const CODE: u32 = 0x200
+const ERROR_LOOP: u32 = 0x1FC
+const ROM_SIZE: i64 = 0x30000
+/// Where the 68000 → VDP DMA source tables sit in ROM.
+const TABLE: u32 = 0x1000
+/// A table straddling the 128 KB boundary a DMA source cannot cross.
+const BOUNDARY_TABLE: u32 = 0x1FFF0
+
+const VDP_DATA: u32 = 0xC00000
+const VDP_CONTROL: u32 = 0xC00004
+const RAM: u32 = 0xFF0000
+
+let main = () -> u8 => {
+  let args = program_args()
+  if args.len() < 2 {
+    println("usage: vdproms OUT_DIR")
+    return 2
+  }
+  let out = args[1]
+  if !create_dir_all(out) {
+    println("vdproms: cannot create ${out}")
+    return 1
+  }
+  for name in TESTS {
+    var a = Asm { code: [] }
+    tmss(a)
+    // Every register set first, as a game's start-up does, so what the VDP holds at power-on
+    // — which differs between emulators, and is not well documented for the hardware — plays
+    // no part. Mode 5 (register 1 bit 2) throughout.
+    if name != "registers" {
+      for r in 0..<24 { a.reg(r, if r == 1 { 0x04 } else { 0 }) }
+    }
+    body(name, a)
+    let park = CODE + u32(a.code.len())
+    a.w(0x60FE)
+    if !write_bytes(
+      "${out}/${name}.bin",
+      rom(a)
+    ) || !write_file("${out}/${name}.park", park.to_hex()) {
+      println("vdproms: cannot write ${name}")
+      return 1
+    }
+  }
+  println("vdproms: ${TESTS.len()} ROMs in ${out}")
+  0
+}
+
+const TESTS: []string = [
+  "registers",
+  "register_bits",
+  "vram_words",
+  "cram_vsram",
+  "commands",
+  "byte_ports",
+  "reads",
+  "fill",
+  "copy",
+  "dma_68k",
+  "dma_disabled",
+]
+
+/// The code of the test `name`. (A `match` rather than a table of functions: each takes the
+/// encoder by `mut`, which a function value cannot pass.)
+let body = (name: string, a: mut Asm) -> void => match name {
+  "registers" => registers(a),
+  "register_bits" => register_bits(a),
+  "vram_words" => vram_words(a),
+  "cram_vsram" => cram_vsram(a),
+  "commands" => commands(a),
+  "byte_ports" => byte_ports(a),
+  "reads" => reads(a),
+  "fill" => fill(a),
+  "copy" => copy(a),
+  "dma_68k" => transfers(a),
+  _ => dma_disabled(a),
+}
+
+// ── The tests ────────────────────────────────────────────────────────────────
+
+/// Every register written — mode 5 kept (register 1 bit 2), the rest arbitrary — and the
+/// nonexistent 24–31 written too, which must change nothing.
+let registers = (a: mut Asm) -> void => {
+  for r in 0..<32 {
+    let value = if r == 1 { 0x54 } else { (r * 37 + 11) & 0xFF }
+    a.reg(r, value)
+  }
+}
+
+/// Every register written with every bit set, to see which bits each one keeps.
+let register_bits = (a: mut Asm) -> void => {
+  for r in 0..<24 { a.reg(r, 0xFF) }
+}
+
+/// VRAM word writes: consecutive, at an odd address (bytes swapped), with increments of
+/// 1, 2 and 0x80, and wrapping past FFFF.
+let vram_words = (a: mut Asm) -> void => {
+  a.reg(1, 0x04)
+  a.reg(15, 2)
+  a.command(0x1, 0x0000)
+  for i in 0..<8 { a.data(u16(0x1100 + i * 0x0101)) }
+  a.command(0x1, 0x8001)
+  a.data(0xABCD)
+  a.data(0x1234)
+  a.reg(15, 1)
+  a.command(0x1, 0x2000)
+  for i in 0..<4 { a.data(u16(0xA0A1 + i)) }
+  a.reg(15, 0x80)
+  a.command(0x1, 0x3000)
+  for i in 0..<4 { a.data(u16(0x5000 + i)) }
+  a.reg(15, 2)
+  a.command(0x1, 0xFFFC)
+  for i in 0..<4 { a.data(u16(0xE000 + i)) }
+}
+
+/// CRAM past its 64 words (the address wraps into it again), VSRAM past its 40 (ignored).
+let cram_vsram = (a: mut Asm) -> void => {
+  a.reg(1, 0x04)
+  a.reg(15, 2)
+  a.command(0x3, 0x0000)
+  for i in 0..<66 { a.data(u16(0x0FFF - i * 0x0111)) }
+  a.command(0x5, 0x0000)
+  for i in 0..<42 { a.data(u16(0x0100 + i * 0x0031)) }
+}
+
+/// Half a command: after a full VRAM write at C000, a first half alone moves only address
+/// bits 13–0. A register-shaped word while a command is pending is its second half. A
+/// register write sets code bits 1–0 to `10`, so a data write after it stores nothing.
+let commands = (a: mut Asm) -> void => {
+  a.reg(1, 0x04)
+  a.reg(15, 2)
+  a.command(0x1, 0xC000)
+  a.data(0x1111)
+  a.control(0x4100)
+  a.data(0x2222)
+  a.control(0x4200)
+  a.control(0x8F04)
+  a.data(0x3333)
+  a.data(0x4444)
+  a.reg(15, 2)
+  a.data(0x5555)
+}
+
+/// Byte writes to the ports: the byte in both halves of a word.
+let byte_ports = (a: mut Asm) -> void => {
+  a.reg(1, 0x04)
+  a.control_byte(0x87)
+  a.reg(15, 2)
+  a.command(0x1, 0x0400)
+  a.data_byte(0x5A)
+  a.data_byte(0xC3)
+  a.command(0x3, 0x0010)
+  a.data_byte(0x0E)
+}
+
+/// Reads back from each memory into work RAM: VRAM (even and odd address), CRAM, VSRAM
+/// (inside and past its 40 words), and a read after a write command (nothing).
+let reads = (a: mut Asm) -> void => {
+  a.reg(1, 0x04)
+  a.reg(15, 2)
+  a.command(0x1, 0x0800)
+  for i in 0..<4 { a.data(u16(0x1234 + i * 0x1111)) }
+  a.command(0x3, 0x0020)
+  for i in 0..<2 { a.data(u16(0x0ACE - i * 0x0202)) }
+  a.command(0x5, 0x0040)
+  for i in 0..<4 { a.data(u16(0x03FF - i * 0x0101)) }
+  var slot = 0
+  a.command(0x0, 0x0800)
+  for _ in 0..<3 {
+    a.read_to(RAM + u32(slot))
+    slot += 2
+  }
+  a.command(0x0, 0x0803)
+  a.read_to(RAM + u32(slot))
+  slot += 2
+  a.command(0x8, 0x0020)
+  for _ in 0..<2 {
+    a.read_to(RAM + u32(slot))
+    slot += 2
+  }
+  a.command(0x4, 0x0040)
+  for _ in 0..<2 {
+    a.read_to(RAM + u32(slot))
+    slot += 2
+  }
+  a.command(0x4, 0x004E)
+  for _ in 0..<2 {
+    a.read_to(RAM + u32(slot))
+    slot += 2
+  }
+  a.command(0x1, 0x0800)
+  a.read_to(RAM + u32(slot))
+}
+
+/// VRAM fills: increment 1 from an even address, increment 2 from an odd one.
+let fill = (a: mut Asm) -> void => {
+  a.reg(1, 0x14)
+  a.reg(15, 1)
+  a.dma_length(0x20)
+  a.reg(23, 0x80)
+  a.command(0x21, 0x0100)
+  a.data(0xABCD)
+  a.wait_dma()
+  a.reg(15, 2)
+  a.dma_length(0x10)
+  a.reg(23, 0x80)
+  a.command(0x21, 0x0201)
+  a.data(0x5678)
+  a.wait_dma()
+}
+
+/// VRAM copy: 0x30 bytes from 0x0400 to 0x0600, increment 1, then to 0x0701, increment 2.
+let copy = (a: mut Asm) -> void => {
+  a.reg(1, 0x14)
+  a.reg(15, 2)
+  a.command(0x1, 0x0400)
+  for i in 0..<0x18 { a.data(u16(0x0102 + i * 0x0202)) }
+  a.reg(15, 1)
+  a.dma_length(0x30)
+  a.dma_source_bytes(0x0400)
+  a.reg(23, 0xC0)
+  a.command(0x30, 0x0600)
+  a.wait_dma()
+  a.reg(15, 2)
+  a.dma_length(0x10)
+  a.dma_source_bytes(0x0404)
+  a.reg(23, 0xC0)
+  a.command(0x30, 0x0701)
+  a.wait_dma()
+}
+
+/// 68000 → VDP transfers from the ROM table: to VRAM (even, then odd address), CRAM and
+/// VSRAM; one whose source crosses the 128 KB boundary; and one from work RAM.
+let transfers = (a: mut Asm) -> void => {
+  a.reg(1, 0x14)
+  a.reg(15, 2)
+  a.dma_68k(TABLE, 0x10, 0x1, 0x1000)
+  a.dma_68k(TABLE, 0x08, 0x1, 0x1101)
+  a.dma_68k(TABLE, 0x20, 0x3, 0x0000)
+  a.dma_68k(TABLE, 0x14, 0x5, 0x0000)
+  a.dma_68k(BOUNDARY_TABLE, 0x10, 0x1, 0x2000)
+  for i in 0..<8 { a.move_w_imm_abs(u16(0xBEE0 + i), RAM + 0x1000 + u32(2 * i)) }
+  a.dma_68k(RAM + 0x1000, 0x08, 0x1, 0x3000)
+}
+
+/// A DMA command with register 1's DMA enable clear: an ordinary write command.
+let dma_disabled = (a: mut Asm) -> void => {
+  a.reg(1, 0x04)
+  a.reg(15, 2)
+  a.dma_length(0x10)
+  a.reg(23, 0x80)
+  a.command(0x21, 0x0500)
+  a.data(0x9876)
+  a.data(0x5432)
+}
+
+// ── A cartridge ──────────────────────────────────────────────────────────────
+
+/// The ROM image: vectors, header, the code at CODE, the DMA tables, zero padding.
+let rom = (a: Asm) -> []u8 => {
+  var image: []u8 = [0; ROM_SIZE]
+  put_long(image, 0, 0x00FFFE00)
+  put_long(image, 4, CODE)
+  for v in 2..<64 { put_long(image, v * 4, ERROR_LOOP) }
+  let header = "SEGA MEGA DRIVE "
+  for i, c in header { image[0x100 + i] = u8(i64(c)) }
+  put_long(image, 0x1A0, 0)
+  put_long(image, 0x1A4, u32(ROM_SIZE - 1))
+  put_long(image, 0x1A8, 0xFF0000)
+  put_long(image, 0x1AC, 0xFFFFFF)
+  for i, c in "JUE" { image[0x1F0 + i] = u8(i64(c)) }
+  put_word(image, i64(ERROR_LOOP), 0x60FE)
+  for i, b in a.code { image[i64(CODE) + i] = b }
+  for i in 0..<0x40 {
+    put_word(image, i64(TABLE) + 2 * i, u16(0x0102 + i * 0x0303))
+    put_word(image, i64(BOUNDARY_TABLE) + 2 * i, u16(0x7700 + i))
+  }
+  image
+}
+
+let put_word = (image: mut []u8, at: i64, value: u16) -> void => {
+  image[at] = u8(value >> 8)
+  image[at + 1] = u8(value & 0xFF)
+}
+
+let put_long = (image: mut []u8, at: i64, value: u32) -> void => {
+  put_word(image, at, u16(value >> 16))
+  put_word(image, at + 2, u16(value & 0xFFFF))
+}
+
+/// The TMSS handshake a cartridge makes: if the version register's low nibble is non-zero,
+/// write "SEGA" to A14000, or the VDP stays locked.
+let tmss = (a: mut Asm) -> void => {
+  a.w(0x1039)
+  a.l(0xA10001)
+  a.w(0x0200)
+  a.w(0x000F)
+  a.w(0x670A)
+  a.move_l_imm_abs(0x53454741, 0xA14000)
+}
+
+// ── The encoder ──────────────────────────────────────────────────────────────
+
+struct Asm {
+  code: []u8,
+}
+
+let w = (self: mut Asm, word: u16) -> void => {
+  self.code.push(u8(word >> 8))
+  self.code.push(u8(word & 0xFF))
+}
+
+let l = (self: mut Asm, long: u32) -> void => {
+  self.w(u16(long >> 16))
+  self.w(u16(long & 0xFFFF))
+}
+
+/// move.w #imm, (xxx).l
+let move_w_imm_abs = (self: mut Asm, imm: u16, addr: u32) -> void => {
+  self.w(0x33FC)
+  self.w(imm)
+  self.l(addr)
+}
+
+/// move.l #imm, (xxx).l
+let move_l_imm_abs = (self: mut Asm, imm: u32, addr: u32) -> void => {
+  self.w(0x23FC)
+  self.l(imm)
+  self.l(addr)
+}
+
+/// move.b #imm, (xxx).l
+let move_b_imm_abs = (self: mut Asm, imm: u8, addr: u32) -> void => {
+  self.w(0x13FC)
+  self.w(u16(imm))
+  self.l(addr)
+}
+
+/// move.w (xxx).l, (xxx).l
+let move_w_abs_abs = (self: mut Asm, from: u32, to: u32) -> void => {
+  self.w(0x33F9)
+  self.l(from)
+  self.l(to)
+}
+
+/// A word to the control port.
+let control = (self: mut Asm, word: u16) -> void => self.move_w_imm_abs(word, VDP_CONTROL)
+
+let control_byte = (self: mut Asm, byte: u8) -> void =>
+  self.move_b_imm_abs(byte, VDP_CONTROL)
+
+/// A word to the data port.
+let data = (self: mut Asm, word: u16) -> void => self.move_w_imm_abs(word, VDP_DATA)
+
+let data_byte = (self: mut Asm, byte: u8) -> void => self.move_b_imm_abs(byte, VDP_DATA)
+
+/// A word from the data port, stored at `to`.
+let read_to = (self: mut Asm, to: u32) -> void => self.move_w_abs_abs(VDP_DATA, to)
+
+/// Register `r` set to `value`.
+let reg = (self: mut Asm, r: i64, value: i64) -> void =>
+  self.control(u16(0x8000 | ((r & 0x1F) << 8) | (value & 0xFF)))
+
+/// The command word for code `cd` (6 bits) and a 16-bit address, as one long write.
+let command = (self: mut Asm, cd: i64, address: u32) -> void => {
+  let high_half = u32(((cd & 3) << 14) | i64(address & 0x3FFF))
+  let low_half = u32(((cd >> 2) << 4) | i64((address >> 14) & 3))
+  self.move_l_imm_abs((high_half << 16) | low_half, VDP_CONTROL)
+}
+
+/// DMA length, registers 19–20.
+let dma_length = (self: mut Asm, length: i64) -> void => {
+  self.reg(19, length & 0xFF)
+  self.reg(20, (length >> 8) & 0xFF)
+}
+
+/// A VRAM copy's source byte address, registers 21–22.
+let dma_source_bytes = (self: mut Asm, source: i64) -> void => {
+  self.reg(21, source & 0xFF)
+  self.reg(22, (source >> 8) & 0xFF)
+}
+
+/// A 68000 → VDP transfer of `words` words from `source` into the memory `target` names
+/// (1 VRAM, 3 CRAM, 5 VSRAM) at `address`.
+let dma_68k = (
+  self: mut Asm,
+  source: u32,
+  words: i64,
+  target: i64,
+  address: u32
+) -> void => {
+  self.dma_length(words)
+  let s = i64(source >> 1)
+  self.reg(21, s & 0xFF)
+  self.reg(22, (s >> 8) & 0xFF)
+  self.reg(23, (s >> 16) & 0x7F)
+  self.command(0x20 | target, address)
+  self.wait_dma()
+}
+
+/// Wait while the status register says a DMA is running (bit 1), as a program must before
+/// touching the VDP again — a fill or copy runs on while the 68000 does:
+///
+///     loop: move.w $C00004, d0
+///           btst   #1, d0
+///           bne.s  loop
+let wait_dma = (self: mut Asm) -> void => {
+  self.w(0x3039)
+  self.l(VDP_CONTROL)
+  self.w(0x0800)
+  self.w(0x0001)
+  self.w(0x66F4)
+}
