@@ -49,6 +49,10 @@ frame-at-a-time shortcuts from the start:
   authority on which is which.
 - **The frame gets the faulting opcode**, passed to `address_error` by `step`: an
   instruction that prefetched before faulting has the next opcode in IRD.
+- **The frame's PC is the chip's internal PC, four bytes ahead of the word being fetched**
+  — `cpu.pc` reads at `pc + 4`, so a refill from an odd target sets `pc = target - 4` first
+  (`jump_to`). The status word's I/N bit is set for an instruction-fetch fault, clear for a
+  data access.
 - **Hardware arithmetic wraps**: Lyra traps on overflow, so register arithmetic is
   `wrapping_*`, and conversions (`u8(x)` truncates, `i8(u8)` reinterprets) are explicit.
 - **A test is only skipped with an upstream report behind it**: `KNOWN_BAD` in
@@ -74,14 +78,16 @@ src/m68k/            the 68000 (module m68k):
   arith.lyra         ADD/SUB/AND/OR/EOR/CMP in every form: register, memory, address
                      register, extended, CMPM, immediate (group 0), quick (group 5)
   shift.lyra         ASx/LSx/ROXx/ROx, register and memory forms, a bit at a time
+  flow.lyra          Bcc/BRA/BSR, DBcc, Scc, JMP, JSR, RTS, RTR, LEA, PEA; the queue refill
 tests/fetch.sh       download the pinned suite
 tests/cpu.sh         run the suite, one line per instruction file
 ```
 
 ## Status
 
-The 68000 passes every test in 61 of the suite's 125 files (491,963 tests, address errors
+The 68000 passes every test in 71 of the suite's 125 files (572,613 tests, address errors
 included): NOP, MOVEQ, MOVE, MOVEA, ADD/SUB/AND/OR/EOR/CMP with their A, X, M, I and Q
-forms, and all shifts and rotates. Every other opcode answers `Unimplemented`, which the runner counts apart from
+forms, all shifts and rotates, and control flow (Bcc, BSR, DBcc, Scc, JMP, JSR, RTS, RTR,
+LEA, PEA). Every other opcode answers `Unimplemented`, which the runner counts apart from
 failures. `CPUTEST_FLAGS=--no-address-errors` skips tests that end in one, to get an
 instruction's ordinary path right first.

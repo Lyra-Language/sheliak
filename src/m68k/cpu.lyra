@@ -87,9 +87,9 @@ let execute<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => 
   match op >> 12 {
     0x0 => immediate(cpu, bus, op),
     0x1 | 0x2 | 0x3 => move_family(cpu, bus, op),
-    0x4 => if op == 0x4E71 { nop(cpu, bus) } else { Unimplemented(op) },
-    0x5 =>
-      if ((op >> 6) & 3) != 3 { add_sub_quick(cpu, bus, op) } else { Unimplemented(op) },
+    0x4 => miscellaneous(cpu, bus, op),
+    0x5 => quick_or_condition(cpu, bus, op),
+    0x6 => branch(cpu, bus, op),
     0x7 => if (op & 0x0100) == 0 { moveq(cpu, bus, op) } else { Unimplemented(op) },
     0x8 => arith_group(cpu, bus, op, Or),
     0x9 => arith_group(cpu, bus, op, Sub),
@@ -163,6 +163,31 @@ let moveq<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
   set_logic_flags(cpu, value, 0x80000000)
   prefetch(cpu, bus)
   Executed
+}
+
+/// Group 4, the miscellany, as far as it is implemented: NOP, RTS, RTR, JMP, JSR, LEA, PEA.
+let miscellaneous<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
+  if op == 0x4E71 { return nop(cpu, bus) }
+  if op == 0x4E75 { return return_from_subroutine(cpu, bus) }
+  if op == 0x4E77 { return return_and_restore(cpu, bus) }
+  let mode = source_mode(op)
+  let control = mode == 2 || mode == 5 || mode == 6 || (mode == 7 && source_reg(op) <= 3)
+  if !control { return Unimplemented(op) }
+  if (op & 0xFFC0) == 0x4EC0 { return jump(cpu, bus, op) }
+  if (op & 0xFFC0) == 0x4E80 { return jump_subroutine(cpu, bus, op) }
+  if (op & 0xFFC0) == 0x4840 { return push_effective_address(cpu, bus, op) }
+  if (op & 0xF1C0) == 0x41C0 { return load_effective_address(cpu, bus, op) }
+  Unimplemented(op)
+}
+
+/// Group 5: ADDQ/SUBQ with a size, DBcc and Scc with size bits `11`.
+let quick_or_condition<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  op: u16
+) -> Outcome => {
+  if ((op >> 6) & 3) == 3 { return set_or_decrement(cpu, bus, op) }
+  add_sub_quick(cpu, bus, op)
 }
 
 /// Opcode groups 1–3: MOVE, or MOVEA when the destination is an address register (which a

@@ -1,0 +1,307 @@
+module m68k
+//! Control flow: Bcc/BRA/BSR (group 6), DBcc and Scc (group 5, size bits `11`), JMP, JSR,
+//! RTS, RTR, and LEA/PEA, whose address calculation is JMP's.
+//!
+//! **A transfer refills the whole queue.** The target's first word is read into IRD and the
+//! next into IRC — two reads, which is why every taken branch ends the same way — and an
+//! odd target is an address error on the first of them. JSR pushes its return address
+//! *between* the two.
+//!
+//! **JMP, JSR, LEA and PEA use their displacement straight from IRC.** A MOVE source takes
+//! an extension word through the queue, reading the word after it; these compute an address
+//! and are done with the instruction stream, so the chip does not fetch past it.
+
+/// Group 6: Bcc, BRA (condition 0) and BSR (condition 1). An 8-bit displacement of 0 means a
+/// 16-bit one follows in IRC; the base is the address after the opcode.
+let branch<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
+  let cc = i64((op >> 8) & 0xF)
+  let short = u32(i32(i8(op & 0xFF)))
+  let wide = (op & 0xFF) == 0
+  let base = cpu.pc.wrapping_add(2)
+  let displacement = if wide { sign_extend_word(cpu.irc) } else { short }
+  let target = base.wrapping_add(displacement)
+  if cc == 1 {
+    let return_to = base.wrapping_add(if wide { 2 } else { 0 })
+    cpu_idle(cpu, bus, 2)
+    push_long(cpu, bus, return_to)
+    jump_to(cpu, bus, target)
+    return Executed
+  }
+  if cc == 0 || condition(cc, cpu.sr) {
+    cpu_idle(cpu, bus, 2)
+    jump_to(cpu, bus, target)
+    return Executed
+  }
+  cpu_idle(cpu, bus, 4)
+  if wide { take_extension(cpu, bus) }
+  prefetch(cpu, bus)
+  Executed
+}
+
+/// Group 5 with size bits `11`: DBcc (ea mode 1) or Scc.
+let set_or_decrement<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
+  let cc = i64((op >> 8) & 0xF)
+  if source_mode(op) == 1 { return decrement_and_branch(cpu, bus, source_reg(op), cc) }
+  set_on_condition(cpu, bus, op, cc)
+}
+
+/// DBcc Dn, disp: when the condition is false, Dn's low word counts down and the branch is
+/// taken unless it passed zero (reached -1).
+let decrement_and_branch<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  dn: i64,
+  cc: i64
+) -> Outcome => {
+  let target = cpu.pc.wrapping_add(2).wrapping_add(sign_extend_word(cpu.irc))
+  if condition(cc, cpu.sr) {
+    cpu_idle(cpu, bus, 4)
+    take_extension(cpu, bus)
+    prefetch(cpu, bus)
+    return Executed
+  }
+  let counter = u16(cpu.d[dn] & 0xFFFF).wrapping_sub(1)
+  write_data_register(cpu, dn, WORD, u32(counter))
+  if counter != 0xFFFF {
+    cpu_idle(cpu, bus, 2)
+    jump_to(cpu, bus, target)
+    return Executed
+  }
+  cpu_idle(cpu, bus, 2)
+  take_extension(cpu, bus)
+  prefetch(cpu, bus)
+  Executed
+}
+
+/// Scc <ea>: all ones if the condition holds, all zeros if not, a byte. To memory the chip
+/// reads the byte first and writes it after the prefetch.
+let set_on_condition<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  op: u16,
+  cc: i64
+) -> Outcome => {
+  let value: u32 = if condition(cc, cpu.sr) { 0xFF } else { 0 }
+  if source_mode(op) == 0 {
+    prefetch(cpu, bus)
+    if value != 0 { cpu_idle(cpu, bus, 2) }
+    if !cpu.faulted { write_data_register(cpu, source_reg(op), BYTE, value) }
+    return Executed
+  }
+  let at = locate(cpu, bus, source_mode(op), source_reg(op), BYTE, true)
+  read_operand(cpu, bus, at, BYTE)
+  prefetch(cpu, bus)
+  write_operand(cpu, bus, at, BYTE, value)
+  Executed
+}
+
+/// JMP <ea>.
+let jump<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
+  let target = control_address(cpu, bus, source_mode(op), source_reg(op))
+  jump_to(cpu, bus, target)
+  Executed
+}
+
+/// JSR <ea>: the return address — after the opcode and its extension words — is pushed
+/// between the refill's two reads.
+let jump_subroutine<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
+  let mode = source_mode(op)
+  let reg = source_reg(op)
+  let return_to = cpu.pc.wrapping_add(2).wrapping_add(u32(2 * extension_words(mode, reg)))
+  let target = control_address(cpu, bus, mode, reg)
+  let fc = program_fc(cpu)
+  if !cpu.faulted { cpu.pc = target.wrapping_sub(4) }
+  let head = cpu_read_word(cpu, bus, target, fc)
+  push_long(cpu, bus, return_to)
+  let next = cpu_read_word(cpu, bus, target.wrapping_add(2), fc)
+  if !cpu.faulted {
+    cpu.ird = head
+    cpu.irc = next
+    cpu.pc = target
+  }
+  Executed
+}
+
+/// RTS: pop the return address and go there.
+let return_from_subroutine<b> where b: Bus = (cpu: mut Cpu, bus: mut b) -> Outcome => {
+  let target = pop_long(cpu, bus)
+  jump_to(cpu, bus, target)
+  Executed
+}
+
+/// RTR: pop the condition codes, then the return address. The chip reads the address's
+/// high word, then the CCR word below it, then the low word.
+let return_and_restore<b> where b: Bus = (cpu: mut Cpu, bus: mut b) -> Outcome => {
+  let sp = cpu.a[7]
+  let fc = data_fc(cpu)
+  let high = u32(cpu_read_word(cpu, bus, sp.wrapping_add(2), fc))
+  let ccr = cpu_read_word(cpu, bus, sp, fc)
+  let low = u32(cpu_read_word(cpu, bus, sp.wrapping_add(4), fc))
+  if cpu.faulted { return Executed }
+  cpu.a[7] = sp.wrapping_add(6)
+  cpu.sr = (cpu.sr & 0xFF00) | (ccr & 0x1F)
+  jump_to(cpu, bus, (high << 16) | low)
+  Executed
+}
+
+/// LEA <ea>, An.
+let load_effective_address<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  op: u16
+) -> Outcome => {
+  let addr = effective_address(cpu, bus, source_mode(op), source_reg(op))
+  prefetch(cpu, bus)
+  if !cpu.faulted { cpu.a[destination_reg(op)] = addr }
+  Executed
+}
+
+/// PEA <ea>: the address pushed after the prefetch — or, for an absolute address, before
+/// it.
+let push_effective_address<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  op: u16
+) -> Outcome => {
+  let mode = source_mode(op)
+  let reg = source_reg(op)
+  let addr = effective_address(cpu, bus, mode, reg)
+  if mode == 7 && reg <= 1 {
+    push_long(cpu, bus, addr)
+    prefetch(cpu, bus)
+  } else {
+    prefetch(cpu, bus)
+    push_long(cpu, bus, addr)
+  }
+  Executed
+}
+
+// ── Shared steps ─────────────────────────────────────────────────────────────
+
+/// Refill the queue from `target` — its first word into IRD, the next into IRC — and move
+/// PC there. An odd target is an address error on the first read.
+///
+/// **PC is set to `target - 4` for the fetch**, since the chip's own PC runs four bytes ahead
+/// of the word it fetches — the same relation [prefetch] has, reading at `pc + 4`. That is
+/// the PC an address error pushes: the frame of a branch to an odd address holds the target
+/// less four, in every such test.
+let jump_to<b> where b: Bus = (cpu: mut Cpu, bus: mut b, target: u32) -> void => {
+  let fc = program_fc(cpu)
+  if !cpu.faulted { cpu.pc = target.wrapping_sub(4) }
+  let head = cpu_read_word(cpu, bus, target, fc)
+  let next = cpu_read_word(cpu, bus, target.wrapping_add(2), fc)
+  if !cpu.faulted {
+    cpu.ird = head
+    cpu.irc = next
+    cpu.pc = target
+  }
+}
+
+/// The address a JMP or JSR goes to, the displacement or short address taken from IRC
+/// without fetching past it (the instruction stream ends here). An absolute long takes its
+/// high word through the queue and its low word from IRC.
+let control_address<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  mode: i64,
+  reg: i64
+) -> u32 => {
+  match mode {
+    2 => cpu.a[reg],
+    5 => {
+      cpu_idle(cpu, bus, 2)
+      cpu.a[reg].wrapping_add(sign_extend_word(cpu.irc))
+    },
+    6 => {
+      cpu_idle(cpu, bus, 6)
+      indexed(cpu, cpu.a[reg], cpu.irc)
+    },
+    _ => match reg {
+      0 => {
+        cpu_idle(cpu, bus, 2)
+        sign_extend_word(cpu.irc)
+      },
+      1 => {
+        let high = u32(take_extension(cpu, bus))
+        (high << 16) | u32(cpu.irc)
+      },
+      2 => {
+        cpu_idle(cpu, bus, 2)
+        cpu.pc.wrapping_add(2).wrapping_add(sign_extend_word(cpu.irc))
+      },
+      _ => {
+        cpu_idle(cpu, bus, 6)
+        indexed(cpu, cpu.pc.wrapping_add(2), cpu.irc)
+      },
+    },
+  }
+}
+
+/// The address LEA and PEA compute: [locate]'s calculation — extension words through the
+/// queue — with two further idle cycles for the indexed modes.
+let effective_address<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  mode: i64,
+  reg: i64
+) -> u32 => {
+  let at = locate(cpu, bus, mode, reg, LONG, true)
+  if mode == 6 || (mode == 7 && reg == 3) { cpu_idle(cpu, bus, 2) }
+  match at {
+    InMemory(addr) => addr,
+    _ => 0,
+  }
+}
+
+/// How many extension words a control addressing mode has.
+let extension_words = pure (mode: i64, reg: i64) -> i64 => match mode {
+  5 | 6 => 1,
+  7 => if reg == 1 { 2 } else { 1 },
+  _ => 0,
+}
+
+/// Push a long onto the active stack: the high word at the new SP, then the low word.
+let push_long<b> where b: Bus = (cpu: mut Cpu, bus: mut b, value: u32) -> void => {
+  if cpu.faulted { return }
+  let sp = cpu.a[7].wrapping_sub(4)
+  let fc = data_fc(cpu)
+  cpu_write_word(cpu, bus, sp, fc, u16(value >> 16))
+  cpu_write_word(cpu, bus, sp.wrapping_add(2), fc, u16(value & 0xFFFF))
+  if !cpu.faulted { cpu.a[7] = sp }
+}
+
+/// Pop a long off the active stack: high word, then low.
+let pop_long<b> where b: Bus = (cpu: mut Cpu, bus: mut b) -> u32 => {
+  let sp = cpu.a[7]
+  let fc = data_fc(cpu)
+  let high = u32(cpu_read_word(cpu, bus, sp, fc))
+  let low = u32(cpu_read_word(cpu, bus, sp.wrapping_add(2), fc))
+  if !cpu.faulted { cpu.a[7] = sp.wrapping_add(4) }
+  (high << 16) | low
+}
+
+/// Whether condition `cc` (the 4-bit field of Bcc, DBcc and Scc) holds for `sr`.
+let condition = pure (cc: i64, sr: u16) -> bool => {
+  let c = (sr & SR_C) != 0
+  let v = (sr & SR_V) != 0
+  let z = (sr & SR_Z) != 0
+  let n = (sr & SR_N) != 0
+  match cc {
+    0 => true,
+    1 => false,
+    2 => !c && !z,
+    3 => c || z,
+    4 => !c,
+    5 => c,
+    6 => !z,
+    7 => z,
+    8 => !v,
+    9 => v,
+    10 => !n,
+    11 => n,
+    12 => n == v,
+    13 => n != v,
+    14 => !z && n == v,
+    _ => z || n != v,
+  }
+}

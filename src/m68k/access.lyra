@@ -99,14 +99,15 @@ pub let address_error<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> v
 pub const VECTOR_ADDRESS_ERROR: u32 = 3
 
 /// Record an address error on the access at `addr`: the status word's R/W bit (set for a
-/// read) and the function code. Its I/N bit says whether the CPU was running an
-/// instruction (0) or already processing an exception (1) — not what kind of access
-/// faulted — so a fault here, inside an instruction, leaves it clear.
+/// read), its I/N bit, and the function code. I/N is set when the faulted access was an
+/// instruction fetch — a jump or branch to an odd address — and clear for a data access,
+/// which every MOVE and ALU fault is.
 let fault = (cpu: mut Cpu, addr: u32, read: bool, fc: u8) -> void => {
   cpu.faulted = true
   cpu.fault_address = addr
   let rw: u16 = if read { 0x10 } else { 0 }
-  cpu.fault_status = rw | u16(fc)
+  let fetch: u16 = if fc == FC_USER_PROGRAM || fc == FC_SUPERVISOR_PROGRAM { 0x08 } else { 0 }
+  cpu.fault_status = rw | fetch | u16(fc)
 }
 
 /// Supervisor mode for exception processing: S set, T cleared, and A7 switched to the
