@@ -85,18 +85,19 @@ src/m68k/            the 68000 (module m68k):
   exception.lyra     TRAP, TRAPV, CHK, RTE, SR/CCR moves and immediates, MOVE USP, RESET;
                      the 6-byte group 1/2 frame, set_sr (stack switch on S)
   muldiv.lyra        MULU, MULS, DIVU, DIVS; data-dependent timing (Cwik's division model)
+  bcd.lyra           ABCD, SBCD, NBCD, with the chip's undocumented N and V
 tests/fetch.sh       download the pinned suite
 tests/cpu.sh         run the suite, one line per instruction file
 ```
 
 ## Status
 
-The 68000 passes every test in 91 of the suite's 125 files (733,913 tests, address errors
+The 68000 passes every test in 94 of the suite's 125 files (758,108 tests, address errors
 included): NOP, MOVEQ, MOVE, MOVEA, ADD/SUB/AND/OR/EOR/CMP with their A, X, M, I and Q
 forms, all shifts and rotates, control flow (Bcc, BSR, DBcc, Scc, JMP, JSR, RTS, RTR, LEA,
 PEA), the exception group (TRAP, TRAPV, CHK, RTE, SR/CCR moves and immediates, MOVE USP,
-RESET), and multiply/divide. The divide-by-zero frame's PC rests on the suite's single such
-test (see `divide_by_zero`).
+RESET), multiply/divide, and BCD. The divide-by-zero frame's PC rests on the suite's
+single such test (see `divide_by_zero`).
 
 Not yet: interrupts (the IPL input and autovectored acknowledge — wanted with the VDP),
 trace (the T bit), and the illegal-instruction and line A/F exceptions, which wait for

@@ -187,6 +187,7 @@ let miscellaneous<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outco
   if (op & 0xFFC0) == 0x44C0 && data { return move_to_status(cpu, bus, op, false) }
   if (op & 0xFFC0) == 0x46C0 && data { return move_to_status(cpu, bus, op, true) }
   if (op & 0xF1C0) == 0x4180 && data { return check_bounds(cpu, bus, op) }
+  if (op & 0xFFC0) == 0x4800 && alterable { return negate_bcd(cpu, bus, op) }
   let control = mode == 2 || mode == 5 || mode == 6 || (mode == 7 && reg <= 3)
   if !control { return Unimplemented(op) }
   if (op & 0xFFC0) == 0x4EC0 { return jump(cpu, bus, op) }

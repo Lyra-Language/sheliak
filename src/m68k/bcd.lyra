@@ -1,0 +1,109 @@
+module m68k
+//! Packed decimal: ABCD, SBCD (Dy,Dx or -(Ay),-(Ax)) and NBCD <ea> — a byte of two decimal
+//! digits, added, subtracted or negated through X.
+//!
+//! The addressing and timing are ADDX's and SUBX's byte forms; the arithmetic is binary with
+//! a decimal correction of each nibble. **N and V are undefined in Motorola's manual but not
+//! on the chip**, which sets them from the corrected result against the uncorrected one;
+//! the tests record what it does, and [bcd_add] and [bcd_sub] reproduce it. Z, as for
+//! ADDX, is only ever cleared.
+
+/// ABCD (group 12) or SBCD (group 8), op-mode 4 with ea mode 0 or 1.
+let bcd_arithmetic<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  op: u16,
+  subtract: bool
+) -> Outcome => {
+  let rx = destination_reg(op)
+  let ry = source_reg(op)
+  if source_mode(op) == 0 {
+    let r = bcd(subtract, cpu.d[rx] & 0xFF, cpu.d[ry] & 0xFF, cpu.sr)
+    prefetch(cpu, bus)
+    cpu_idle(cpu, bus, 2)
+    if !cpu.faulted {
+      write_data_register(cpu, rx, BYTE, r.value)
+      cpu.sr = r.sr
+    }
+    return Executed
+  }
+  cpu_idle(cpu, bus, 2)
+  let src = read_predecrement(cpu, bus, ry, BYTE)
+  let dest = read_predecrement(cpu, bus, rx, BYTE)
+  let r = bcd(subtract, dest, src, cpu.sr)
+  set_flags(cpu, r.sr)
+  prefetch(cpu, bus)
+  write_memory(cpu, bus, cpu.a[rx], BYTE, r.value)
+  Executed
+}
+
+/// NBCD <ea>: 0 − <ea> − X in decimal.
+let negate_bcd<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
+  if source_mode(op) == 0 {
+    let dn = source_reg(op)
+    let r = bcd_sub(0, cpu.d[dn] & 0xFF, cpu.sr)
+    prefetch(cpu, bus)
+    cpu_idle(cpu, bus, 2)
+    if !cpu.faulted {
+      write_data_register(cpu, dn, BYTE, r.value)
+      cpu.sr = r.sr
+    }
+    return Executed
+  }
+  let at = locate(cpu, bus, source_mode(op), source_reg(op), BYTE, true)
+  let value = read_operand(cpu, bus, at, BYTE)
+  let r = bcd_sub(0, value, cpu.sr)
+  set_flags(cpu, r.sr)
+  prefetch(cpu, bus)
+  write_operand(cpu, bus, at, BYTE, r.value)
+  Executed
+}
+
+let bcd = pure (subtract: bool, dest: u32, src: u32, sr: u16) -> AluResult =>
+  if subtract { bcd_sub(dest, src, sr) } else { bcd_add(dest, src, sr) }
+
+/// `dest + src + X` in decimal: +6 when the low digit's sum passes 9, +0x60 when the
+/// whole passes **0x9F** (not 0x99 — the chip's threshold, which differs only for invalid
+/// digits). C and X are the carry out of the corrected byte; N its top bit; V set when the
+/// correction turned that bit on.
+let bcd_add = pure (dest: u32, src: u32, sr: u16) -> AluResult => {
+  let d = i64(dest & 0xFF)
+  let s = i64(src & 0xFF)
+  let x: i64 = if (sr & SR_X) != 0 { 1 } else { 0 }
+  let binary = d + s + x
+  let low = (d & 0x0F) + (s & 0x0F) + x
+  var result = low + (d & 0xF0) + (s & 0xF0) + (((9 - low) >> 4) & 0x06)
+  result += ((0x9F - result) >> 4) & 0x60
+  let value = u32(result & 0xFF)
+  let overflow = (binary & 0x80) == 0 && (value & 0x80) != 0
+  AluResult { value: value, sr: bcd_flags(sr, value, result > 0xFF, overflow) }
+}
+
+/// `dest − src − X` in decimal: −6 when the low digit borrowed, −0x60 when the *binary*
+/// difference borrowed out of the byte. C and X are the borrow of the binary difference less
+/// the low correction; N the result's top bit; V set when the correction turned it off.
+/// Signed arithmetic throughout, so a borrow is a negative number and `>>` carries its sign.
+let bcd_sub = pure (dest: u32, src: u32, sr: u16) -> AluResult => {
+  let d = i64(dest & 0xFF)
+  let s = i64(src & 0xFF)
+  let x: i64 = if (sr & SR_X) != 0 { 1 } else { 0 }
+  let binary = d - s - x
+  let top = (d & 0xF0) - (s & 0xF0) - (0x60 & (binary >> 4))
+  let low = (d & 0x0F) - (s & 0x0F) - x
+  let low_correction = 0x06 & (low >> 4)
+  let result = top + low - low_correction
+  let borrow = ((binary - low_correction) & 0x300) != 0
+  let value = u32(result & 0xFF)
+  let overflow = (binary & 0x80) != 0 && (result & 0x80) == 0
+  AluResult { value: value, sr: bcd_flags(sr, value, borrow, overflow) }
+}
+
+/// X and C from the decimal carry, N from the result, V as given, Z only ever cleared.
+let bcd_flags = pure (sr: u16, value: u32, carry: bool, overflow: bool) -> u16 => {
+  var out = sr & ~(SR_X | SR_N | SR_V | SR_C)
+  if carry { out = out | SR_X | SR_C }
+  if overflow { out = out | SR_V }
+  if (value & 0x80) != 0 { out = out | SR_N }
+  if value != 0 { out = out & ~SR_Z }
+  out
+}

@@ -29,8 +29,11 @@ let arith_group<b> where b: Bus = (
   let size = opmode_size(opmode)
   if opmode < 4 { return to_data_register(cpu, bus, op, alu_op, size) }
   if source_mode(op) > 1 { return to_memory(cpu, bus, op, alu_op, size) }
-  if !is_add_sub { return Unimplemented(op) }
-  extended(cpu, bus, op, alu_op == Sub, size)
+  if is_add_sub { return extended(cpu, bus, op, alu_op == Sub, size) }
+  // AND and OR spend op-mode 4 with a register ea on ABCD and SBCD; the rest (EXG) is not
+  // here yet.
+  if opmode == 4 { return bcd_arithmetic(cpu, bus, op, alu_op == Or) }
+  Unimplemented(op)
 }
 
 /// Group 11: CMP `<ea>,Dn` (op-mode 0–2), CMPA (3, 7), and at 4–6 EOR `Dn,<ea>` — or CMPM
