@@ -1,0 +1,229 @@
+module m68k
+//! Effective addresses: where an instruction's operand is, and reading and writing it.
+//!
+//! **Locating is separate from accessing** because instructions interleave them
+//! differently: MOVE locates its source, reads it, then locates its destination; an
+//! arithmetic instruction reads, computes, and writes back to one location. [locate] does
+//! the address calculation — extension words taken through the prefetch queue, index
+//! registers, (An)+ and -(An) — with its idle cycles; [read_operand] and [write_operand]
+//! then make the accesses.
+//!
+//! Extension words come from IRC: [take_extension] hands IRC over and refills it from the
+//! next address, which is the same bus read the prefetch makes. A 68000 instruction's
+//! extension words are therefore read *as the instruction runs*, interleaved with its
+//! operand accesses, which is why the order here is the order on the bus.
+
+/// Operand sizes, in bytes.
+pub const BYTE: i64 = 1
+pub const WORD: i64 = 2
+pub const LONG: i64 = 4
+
+/// Where an operand is.
+pub data Location =
+  /// Dn.
+  InDataRegister(i64)
+  /// An.
+  | InAddressRegister(i64)
+  /// Memory at this address (32 bits kept; the bus sees 24).
+  | InMemory(u32)
+  /// (An)+ or -(An): memory at the address, and An's new value, which is committed only
+  /// when the access succeeds — an address error leaves An as it was.
+  | Stepping(u32, i64, u32)
+  /// #imm: already read from the instruction stream.
+  | Immediate(u32)
+
+/// Work out where the operand of `mode`/`reg` (the 6-bit field's halves) of `size` is,
+/// fetching its extension words and applying (An)+ and -(An).
+///
+/// `as_source` is the difference between a source and MOVE's destination, which the chip
+/// computes differently. A source's -(An) costs two idle cycles, and its (An)+ or -(An)
+/// changes An *now*, during the address calculation — so An is changed even if the read
+/// then faults. MOVE's destination -(An) has no idle cycles, and its An changes only once
+/// the write has succeeded ([Stepping]).
+pub let locate<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  mode: i64,
+  reg: i64,
+  size: i64,
+  as_source: bool
+) -> Location => match mode {
+  0 => InDataRegister(reg),
+  1 => InAddressRegister(reg),
+  2 => InMemory(cpu.a[reg]),
+  3 => {
+    let addr = cpu.a[reg]
+    let after = addr.wrapping_add(u32(step_size(reg, size)))
+    if as_source { advance(cpu, reg, after, addr) } else { Stepping(addr, reg, after) }
+  },
+  4 => {
+    if as_source { cpu_idle(cpu, bus, 2) }
+    let addr = cpu.a[reg].wrapping_sub(u32(step_size(reg, size)))
+    if as_source { advance(cpu, reg, addr, addr) } else { Stepping(addr, reg, addr) }
+  },
+  5 => {
+    let base = cpu.a[reg]
+    InMemory(base.wrapping_add(sign_extend_word(take_extension(cpu, bus))))
+  },
+  6 => {
+    cpu_idle(cpu, bus, 2)
+    let base = cpu.a[reg]
+    InMemory(indexed(cpu, base, take_extension(cpu, bus)))
+  },
+  _ => match reg {
+    0 => InMemory(sign_extend_word(take_extension(cpu, bus))),
+    1 => {
+      let high = u32(take_extension(cpu, bus))
+      let low = u32(take_extension(cpu, bus))
+      InMemory((high << 16) | low)
+    },
+    2 => {
+      let base = cpu.pc.wrapping_add(2)
+      InMemory(base.wrapping_add(sign_extend_word(take_extension(cpu, bus))))
+    },
+    3 => {
+      cpu_idle(cpu, bus, 2)
+      let base = cpu.pc.wrapping_add(2)
+      InMemory(indexed(cpu, base, take_extension(cpu, bus)))
+    },
+    _ => {
+      if size == LONG {
+        let high = u32(take_extension(cpu, bus))
+        let low = u32(take_extension(cpu, bus))
+        Immediate((high << 16) | low)
+      } else {
+        let word = u32(take_extension(cpu, bus))
+        Immediate(if size == BYTE { word & 0xFF } else { word })
+      }
+    },
+  },
+}
+
+/// The operand at `at`, zero-extended to 32 bits. A long in memory is two word reads,
+/// high first.
+pub let read_operand<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  at: Location,
+  size: i64
+) -> u32 => match at {
+  InDataRegister(r) => cpu.d[r] & size_mask(size),
+  InAddressRegister(r) => cpu.a[r] & size_mask(size),
+  Immediate(v) => v,
+  InMemory(addr) => read_memory(cpu, bus, addr, size),
+  Stepping(addr, reg, after) => {
+    let value = read_memory(cpu, bus, addr, size)
+    commit_step(cpu, reg, after)
+    value
+  },
+}
+
+/// Write the low `size` bytes of `value` to `at`. A data register keeps its other bytes;
+/// an address register takes all 32 bits (the caller sign-extends). A long in memory is
+/// two word writes, high first.
+pub let write_operand<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  at: Location,
+  size: i64,
+  value: u32
+) -> void => {
+  if cpu.faulted { return }
+  store(cpu, bus, at, size, value)
+}
+
+/// [write_operand]'s body, once no fault is pending.
+let store<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  at: Location,
+  size: i64,
+  value: u32
+) -> void => match at {
+  InDataRegister(r) => {
+    let mask = size_mask(size)
+    cpu.d[r] = (cpu.d[r] & ~mask) | (value & mask)
+  },
+  InAddressRegister(r) => { cpu.a[r] = value },
+  Immediate(_) => {},
+  InMemory(addr) => write_memory(cpu, bus, addr, size, value),
+  Stepping(addr, reg, after) => {
+    write_memory(cpu, bus, addr, size, value)
+    commit_step(cpu, reg, after)
+  },
+}
+
+/// A source's (An)+ or -(An): An changes now, and the operand is at `addr`.
+let advance = (cpu: mut Cpu, reg: i64, after: u32, addr: u32) -> Location => {
+  if !cpu.faulted { cpu.a[reg] = after }
+  InMemory(addr)
+}
+
+/// (An)+ or -(An)'s new An, unless the access faulted.
+let commit_step = (cpu: mut Cpu, reg: i64, after: u32) -> void => {
+  if !cpu.faulted { cpu.a[reg] = after }
+}
+
+/// A byte, word or long read from memory; a long is two word reads, high first.
+let read_memory<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  addr: u32,
+  size: i64
+) -> u32 => {
+  let fc = data_fc(cpu)
+  if size == BYTE { return u32(cpu_read_byte(cpu, bus, addr, fc)) }
+  if size == WORD { return u32(cpu_read_word(cpu, bus, addr, fc)) }
+  let high = u32(cpu_read_word(cpu, bus, addr, fc))
+  let low = u32(cpu_read_word(cpu, bus, addr.wrapping_add(2), fc))
+  (high << 16) | low
+}
+
+/// A byte, word or long write to memory; a long is two word writes, high first.
+let write_memory<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  addr: u32,
+  size: i64,
+  value: u32
+) -> void => {
+  let fc = data_fc(cpu)
+  if size == BYTE { return cpu_write_byte(cpu, bus, addr, fc, u8(value & 0xFF)) }
+  if size == WORD { return cpu_write_word(cpu, bus, addr, fc, u16(value & 0xFFFF)) }
+  cpu_write_word(cpu, bus, addr, fc, u16(value >> 16))
+  cpu_write_word(cpu, bus, addr.wrapping_add(2), fc, u16(value & 0xFFFF))
+}
+
+/// Hand over IRC as an extension word and read the next word into it: the same bus read a
+/// prefetch makes, four cycles.
+pub let take_extension<b> where b: Bus = (cpu: mut Cpu, bus: mut b) -> u16 => {
+  if cpu.faulted { return 0 }
+  let word = cpu.irc
+  cpu.irc = cpu_read_word(cpu, bus, cpu.pc.wrapping_add(4), program_fc(cpu))
+  cpu.pc = cpu.pc.wrapping_add(2)
+  word
+}
+
+/// d8(base, Xn): the brief extension word's index register (data or address, word
+/// sign-extended or long) plus its signed 8-bit displacement.
+let indexed = pure (cpu: Cpu, base: u32, ext: u16) -> u32 => {
+  let reg = i64((ext >> 12) & 7)
+  let whole = if (ext & 0x8000) != 0 { cpu.a[reg] } else { cpu.d[reg] }
+  let offset = if (ext & 0x0800) != 0 { whole } else { sign_extend_word(u16(whole & 0xFFFF)) }
+  let displacement = u32(i32(i8(ext & 0xFF)))
+  base.wrapping_add(offset).wrapping_add(displacement)
+}
+
+/// How far (An)+ and -(An) move An: the operand size, except that A7 moves by 2 for a
+/// byte, keeping the stack pointer even.
+let step_size = pure (reg: i64, size: i64) -> i64 =>
+  if reg == 7 && size == BYTE { 2 } else { size }
+
+let size_mask = pure (size: i64) -> u32 =>
+  if size == BYTE { 0xFF } else if size == WORD { 0xFFFF } else { 0xFFFFFFFF }
+
+pub let sign_extend_word = pure (w: u16) -> u32 => u32(i32(i16(w)))
+
+/// The function code of a data access in the current mode.
+let data_fc = pure (cpu: Cpu) -> u8 =>
+  if supervisor(cpu) { FC_SUPERVISOR_DATA } else { FC_USER_DATA }

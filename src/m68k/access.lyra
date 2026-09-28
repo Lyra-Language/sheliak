@@ -1,0 +1,133 @@
+module m68k
+//! The CPU's side of the bus, and the address error.
+//!
+//! **Every access an instruction makes goes through here**, so there is one place that
+//! notices an address error: a word or long access at an odd address. The 68000 never puts
+//! that access on the bus. It abandons the instruction where it stands — registers and
+//! flags it has already changed stay changed, nothing after the fault happens — and runs
+//! exception 3. Lyra has no unwinding, so the fault is state: [cpu_read_word] and friends
+//! record it and answer zero, and once it is pending every access and idle does nothing,
+//! so the rest of the instruction runs to its end without touching the bus. [step] then
+//! runs [address_error]. An instruction that writes a register or the flags directly, not
+//! through an access, checks `cpu.faulted` first.
+
+/// A word read by the CPU. At an odd address it is an address error instead.
+pub let cpu_read_word<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  addr: u32,
+  fc: u8
+) -> u16 => {
+  if cpu.faulted { return 0 }
+  if (addr & 1) != 0 {
+    fault(cpu, addr, true, fc)
+    return 0
+  }
+  bus.read_word(addr, fc)
+}
+
+/// A byte read by the CPU: any address will do.
+pub let cpu_read_byte<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  addr: u32,
+  fc: u8
+) -> u8 => {
+  if cpu.faulted { return 0 }
+  bus.read_byte(addr, fc)
+}
+
+/// A word write by the CPU. At an odd address it is an address error instead.
+pub let cpu_write_word<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  addr: u32,
+  fc: u8,
+  value: u16
+) -> void => {
+  if cpu.faulted { return }
+  if (addr & 1) != 0 { return fault(cpu, addr, false, fc) }
+  bus.write_word(addr, fc, value)
+}
+
+/// A byte write by the CPU.
+pub let cpu_write_byte<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  addr: u32,
+  fc: u8,
+  value: u8
+) -> void => {
+  if cpu.faulted { return }
+  bus.write_byte(addr, fc, value)
+}
+
+/// Internal cycles, with nothing on the bus.
+pub let cpu_idle<b> where b: Bus = (cpu: mut Cpu, bus: mut b, cycles: i64) -> void => {
+  if !cpu.faulted { bus.idle(cycles) }
+}
+
+/// Exception 3, after an instruction faulted: into supervisor mode, the 14-byte group-0
+/// frame pushed in the chip's order, the vector read, and the handler's first two words
+/// prefetched.
+///
+/// The frame, from the new stack pointer up: the special status word (R/W, I/N and the
+/// function code of the faulted access, the rest from IRD), the access address, IRD, the SR,
+/// the PC. The chip writes it out of order — PC low, SR, PC high, IRD, address low, status,
+/// address high — and the tests check the order. `op` is the faulted instruction's opcode:
+/// IRD may already hold the next one, if the instruction prefetched before it faulted.
+pub let address_error<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> void => {
+  cpu.faulted = false
+  let old_sr = cpu.sr
+  let pc = cpu.pc
+  enter_supervisor(cpu)
+  bus.idle(4)
+  let sp = cpu.a[7]
+  let fc = FC_SUPERVISOR_DATA
+  bus.write_word(sp.wrapping_sub(2), fc, u16(pc & 0xFFFF))
+  bus.write_word(sp.wrapping_sub(6), fc, old_sr)
+  bus.write_word(sp.wrapping_sub(4), fc, u16(pc >> 16))
+  bus.write_word(sp.wrapping_sub(8), fc, op)
+  bus.write_word(sp.wrapping_sub(10), fc, u16(cpu.fault_address & 0xFFFF))
+  bus.write_word(sp.wrapping_sub(14), fc, (op & 0xFFE0) | cpu.fault_status)
+  bus.write_word(sp.wrapping_sub(12), fc, u16(cpu.fault_address >> 16))
+  cpu.a[7] = sp.wrapping_sub(14)
+  jump_to_vector(cpu, bus, VECTOR_ADDRESS_ERROR)
+}
+
+/// Exception vector numbers.
+pub const VECTOR_ADDRESS_ERROR: u32 = 3
+
+/// Record an address error on the access at `addr`: the status word's R/W bit (set for a
+/// read) and the function code. Its I/N bit says whether the CPU was running an
+/// instruction (0) or already processing an exception (1) — not what kind of access
+/// faulted — so a fault here, inside an instruction, leaves it clear.
+let fault = (cpu: mut Cpu, addr: u32, read: bool, fc: u8) -> void => {
+  cpu.faulted = true
+  cpu.fault_address = addr
+  let rw: u16 = if read { 0x10 } else { 0 }
+  cpu.fault_status = rw | u16(fc)
+}
+
+/// Supervisor mode for exception processing: S set, T cleared, and A7 switched to the
+/// supervisor stack if it was the user one.
+let enter_supervisor = (cpu: mut Cpu) -> void => {
+  if !supervisor(cpu) {
+    let user_sp = cpu.a[7]
+    cpu.a[7] = cpu.inactive_sp
+    cpu.inactive_sp = user_sp
+  }
+  cpu.sr = (cpu.sr | SR_S) & ~SR_T
+}
+
+/// Read exception `vector`'s handler address and start it: the vector's two words, then
+/// the handler's first two words into the prefetch queue.
+let jump_to_vector<b> where b: Bus = (cpu: mut Cpu, bus: mut b, vector: u32) -> void => {
+  let fc = FC_SUPERVISOR_DATA
+  let high = u32(bus.read_word(vector * 4, fc))
+  let low = u32(bus.read_word(vector * 4 + 2, fc))
+  cpu.pc = (high << 16) | low
+  cpu.ird = bus.read_word(cpu.pc, FC_SUPERVISOR_PROGRAM)
+  bus.idle(2)
+  cpu.irc = bus.read_word(cpu.pc.wrapping_add(2), FC_SUPERVISOR_PROGRAM)
+}

@@ -1,0 +1,109 @@
+module m68k
+//! MOVE and MOVEA: the most common instructions, and the ones every addressing mode meets.
+
+/// MOVE.size <ea>, <ea>: read the source, set N and Z from it (V and C cleared, X kept),
+/// write it to the destination, prefetch. Two destinations have the chip's own order:
+/// -(An) is written after the prefetch ([move_to_predecrement]), and (xxx).L after a
+/// memory source uses its second address word before fetching it
+/// ([move_to_absolute_long]).
+let move<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16, size: i64) -> Outcome => {
+  let source = locate(cpu, bus, source_mode(op), source_reg(op), size, true)
+  let value = read_operand(cpu, bus, source, size)
+  if destination_mode(op) == 4 {
+    return move_to_predecrement(cpu, bus, destination_reg(op), size, value)
+  }
+  if destination_mode(op) == 7 && destination_reg(op) == 1 && is_memory(source) {
+    return move_to_absolute_long(cpu, bus, size, value)
+  }
+  let destination = locate(
+    cpu,
+    bus,
+    destination_mode(op),
+    destination_reg(op),
+    size,
+    false
+  )
+  set_logic_flags(cpu, value, sign_bit(size))
+  write_operand(cpu, bus, destination, size, value)
+  prefetch(cpu, bus)
+  Executed
+}
+
+/// MOVE's -(An) destination: the prefetch comes first, and An is decremented *before* each
+/// write, so an address error leaves it decremented. A long goes in two halves, low word
+/// first — An down 2, low word; An down 2, high word — so a fault on the first half leaves
+/// An only 2 lower.
+let move_to_predecrement<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  reg: i64,
+  size: i64,
+  value: u32
+) -> Outcome => {
+  set_logic_flags(cpu, value, sign_bit(size))
+  prefetch(cpu, bus)
+  if cpu.faulted { return Executed }
+  let fc = data_fc(cpu)
+  if size == LONG {
+    cpu.a[reg] = cpu.a[reg].wrapping_sub(2)
+    cpu_write_word(cpu, bus, cpu.a[reg], fc, u16(value & 0xFFFF))
+    if cpu.faulted { return Executed }
+    cpu.a[reg] = cpu.a[reg].wrapping_sub(2)
+    cpu_write_word(cpu, bus, cpu.a[reg], fc, u16(value >> 16))
+  } else {
+    cpu.a[reg] = cpu.a[reg].wrapping_sub(u32(step_size(reg, size)))
+    write_memory(cpu, bus, cpu.a[reg], size, value)
+  }
+  Executed
+}
+
+/// MOVE's (xxx).L destination after a memory source, whose order is the chip's own: the
+/// high address word is taken through the queue, the low word is used *straight from IRC*,
+/// the write happens, and only then is IRC refilled — before the ordinary prefetch. From a
+/// register or an immediate the order is the ordinary one.
+let move_to_absolute_long<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  size: i64,
+  value: u32
+) -> Outcome => {
+  let high = u32(take_extension(cpu, bus))
+  let addr = (high << 16) | u32(cpu.irc)
+  set_logic_flags(cpu, value, sign_bit(size))
+  write_operand(cpu, bus, InMemory(addr), size, value)
+  take_extension(cpu, bus)
+  prefetch(cpu, bus)
+  Executed
+}
+
+/// MOVEA.size <ea>, An: a word source is sign-extended to 32 bits; the flags are untouched.
+let movea<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16, size: i64) -> Outcome => {
+  let source = locate(cpu, bus, source_mode(op), source_reg(op), size, true)
+  let value = read_operand(cpu, bus, source, size)
+  let full = if size == WORD { sign_extend_word(u16(value & 0xFFFF)) } else { value }
+  if !cpu.faulted { cpu.a[destination_reg(op)] = full }
+  prefetch(cpu, bus)
+  Executed
+}
+
+/// The operation size MOVE encodes in bits 13–12: 01 byte, 11 word, 10 long.
+let move_size = pure (op: u16) -> i64 => match (op >> 12) & 3 {
+  1 => BYTE,
+  3 => WORD,
+  _ => LONG,
+}
+
+let source_mode = pure (op: u16) -> i64 => i64((op >> 3) & 7)
+let source_reg = pure (op: u16) -> i64 => i64(op & 7)
+let destination_mode = pure (op: u16) -> i64 => i64((op >> 6) & 7)
+let destination_reg = pure (op: u16) -> i64 => i64((op >> 9) & 7)
+
+/// The top bit of a value of `size`.
+let sign_bit = pure (size: i64) -> u32 =>
+  if size == BYTE { 0x80 } else if size == WORD { 0x8000 } else { 0x80000000 }
+
+let is_memory = pure (at: Location) -> bool => match at {
+  InMemory(_) => true,
+  Stepping(_, _, _) => true,
+  _ => false,
+}

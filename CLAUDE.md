@@ -40,6 +40,15 @@ frame-at-a-time shortcuts from the start:
   and SN76489 written here are the Master System's and Game Gear's too.
 - **Every chip is tested headlessly.** Per-instruction suites for CPUs; a headless runner
   (ROM → frames and audio dumped) for the whole machine. Nothing is verified by eye alone.
+- **An address error is state, not control flow** (`src/m68k/access.lyra`): every access
+  goes through `cpu_read_word` and friends, which record the fault and then do nothing, so
+  the instruction runs to its end off the bus and `step` runs exception 3. Code that writes
+  a register or the flags directly checks `cpu.faulted` first. What the chip has already
+  changed when it faults stays changed — a source's (An)+/-(An) is applied during address
+  calculation, MOVE's destination (An)+ only after its write — and the tests are the
+  authority on which is which.
+- **The frame gets the faulting opcode**, passed to `address_error` by `step`: an
+  instruction that prefetched before faulting has the next opcode in IRD.
 - **Hardware arithmetic wraps**: Lyra traps on overflow, so register arithmetic is
   `wrapping_*`, and conversions (`u8(x)` truncates, `i8(u8)` reinterprets) are explicit.
 - **Test data is downloaded, never committed or shipped**: SingleStepTests declares no
@@ -53,12 +62,18 @@ Module paths resolve under `src/` (the entry file's directory), so entry points 
 
 ```
 src/cputest.lyra     68000 test runner: one SingleStepTests file on stdin
-src/m68k/            the 68000 (module m68k): Cpu, the Bus trait, step
+src/m68k/            the 68000 (module m68k):
+  cpu.lyra           Cpu, the Bus trait, step and decode, the prefetch, flags
+  access.lyra        fault-aware accesses; the address error exception
+  ea.lyra            effective addresses: locate, read_operand, write_operand
+  move.lyra          MOVE, MOVEA (with the -(An) and (xxx).L destination orders)
 tests/fetch.sh       download the pinned suite
 tests/cpu.sh         run the suite, one line per instruction file
 ```
 
 ## Status
 
-The 68000 core runs NOP and MOVEQ; every other opcode answers `Unimplemented`, which the
-runner counts apart from failures.
+The 68000 passes every test for NOP, MOVEQ, MOVE.b/.w/.l and MOVEA.w/.l (56,455), address
+errors included; every other opcode answers `Unimplemented`, which the runner counts apart
+from failures. `CPUTEST_FLAGS=--no-address-errors` skips tests that end in one, to get an
+instruction's ordinary path right first.

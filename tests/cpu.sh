@@ -4,6 +4,7 @@
 #
 #   tests/cpu.sh                 # all 125 instruction files
 #   tests/cpu.sh NOP MOVE.l      # just these
+#   CPUTEST_FLAGS=--no-address-errors tests/cpu.sh MOVE.w   # skip tests ending in one
 #
 # Builds cputest and fetches the suite first if needed. One line per file, then a total;
 # exits 1 if any test failed (unimplemented opcodes are counted separately, not failed).
@@ -25,6 +26,7 @@ fi
 status=0
 for file in "${files[@]}"; do
   name="$(basename "$file" .json.gz)"
-  gzip -dc "$file" | "$ROOT/build/cputest" "$name" || status=1
+  # shellcheck disable=SC2086 # the flags are meant to split
+  gzip -dc "$file" | "$ROOT/build/cputest" "$name" ${CPUTEST_FLAGS:-} || status=1
 done
 exit "$status"

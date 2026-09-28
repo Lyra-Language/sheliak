@@ -1,6 +1,7 @@
 // cputest — runs one SingleStepTests 68000 file against the m68k core.
 //
 //   gzip -dc build/deps/680x0/68000/v1/NOP.json.gz | build/cputest NOP
+//   … | build/cputest MOVE.w --no-address-errors   # skip tests that end in one
 //   tests/cpu.sh [NAME…]                      # every file, or the named ones
 //
 // Each test gives the CPU and RAM before one instruction and after it, the instruction's
@@ -23,6 +24,10 @@ const SHOWN_FAILURES: i64 = 5
 let main = () -> u8 => {
   let args = program_args()
   let name = if args.len() > 1 { args[1] } else { "stdin" }
+  var skip_address_errors = false
+  for a in args {
+    if a == "--no-address-errors" { skip_address_errors = true }
+  }
   let parsed = parse_json(read_stdin())
   if let Err(e) = parsed {
     println("${name}: not JSON: ${e.message} at byte ${e.offset}")
@@ -31,7 +36,12 @@ let main = () -> u8 => {
   var passed = 0
   var failed = 0
   var unimplemented = 0
+  var skipped = 0
   for test in parsed.unwrap_or(JsonNull).elements() {
+    if skip_address_errors && ends_in_address_error(test) {
+      skipped += 1
+      continue
+    }
     match run(test) {
       Pass => { passed += 1 },
       NotImplemented => { unimplemented += 1 },
@@ -41,7 +51,8 @@ let main = () -> u8 => {
       },
     }
   }
-  println("${name}: ${passed} passed, ${failed} failed, ${unimplemented} unimplemented")
+  let skip_note = if skipped > 0 { ", ${skipped} address errors skipped" } else { "" }
+  println("${name}: ${passed} passed, ${failed} failed, ${unimplemented} unimplemented${skip_note}")
   if failed > 0 { 1 } else { 0 }
 }
 
@@ -101,6 +112,17 @@ let run = (test: JsonValue) -> Verdict => {
   Pass
 }
 
+/// Whether the test's instruction raised an address error: exception processing reads the
+/// vector for exception 3 at address 12.
+let ends_in_address_error = pure (test: JsonValue) -> bool => {
+  for t in test.field("transactions").unwrap_or(JsonNull).elements() {
+    if t.element(0).unwrap_or(JsonNull).as_text() == Some("r") && number(t, 3) == 12 {
+      return true
+    }
+  }
+  false
+}
+
 /// A CPU from a test's `initial` or `final` state.
 let load_cpu = pure (state: JsonValue) -> Cpu => {
   let prefetch = state.field("prefetch").unwrap_or(JsonNull)
@@ -149,18 +171,9 @@ impl Bus for TestBus {
     self.access("w", fc, addr, ".b", u32(value))
   }
   idle = (self, n) => {
-    // The files merge adjacent idle stretches into one entry, so the log does too.
-    let last = self.log.len() - 1
-    if last >= 0 && self.log[last].starts_with("n ") {
-      let before = self.log[last]
-        .strip_prefix("n ")
-        .unwrap_or("0")
-        .parse_i64()
-        .unwrap_or(0)
-      self.log[last] = "n ${before + n}"
-    } else {
-      self.log.push("n ${n}")
-    }
+    // One entry per stretch of idle cycles, as the files list them: a -(An) source's two
+    // and an exception's four stay two entries even when adjacent.
+    self.log.push("n ${n}")
     self.cycles += n
   }
 }
