@@ -1,0 +1,53 @@
+module m68k
+//! The single-operand instructions of group 4: NEGX, CLR, NEG, NOT and TST `<ea>` at a
+//! byte, word or long (bits 11–8 `0000`, `0010`, `0100`, `0110`, `1010`; size bits 7–6).
+//!
+//! **CLR reads before it writes**, as a read-modify-write, though the value read is thrown
+//! away: a CLR of a hardware register is a read of it too. TST only reads.
+
+/// Whether `op` is one of these, `alterable` saying its ea is a data alterable mode.
+let is_unary = pure (op: u16, alterable: bool) -> bool => {
+  if !alterable || ((op >> 6) & 3) == 3 { return false }
+  let kind = (op >> 8) & 0xF
+  kind == 0x0 || kind == 0x2 || kind == 0x4 || kind == 0x6 || kind == 0xA
+}
+
+/// NEGX, CLR, NEG, NOT or TST: a register's result after the prefetch (and two idle cycles
+/// for a long, except TST's); memory's read, the prefetch, then the write.
+let unary<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
+  let kind = (op >> 8) & 0xF
+  let size = opmode_size((op >> 6) & 3)
+  let mode = source_mode(op)
+  let reg = source_reg(op)
+  if mode == 0 {
+    let r = unary_result(kind, cpu.d[reg], size, cpu.sr)
+    prefetch(cpu, bus)
+    if size == LONG && kind != 0xA { cpu_idle(cpu, bus, 2) }
+    if cpu.faulted { return Executed }
+    if kind != 0xA { write_data_register(cpu, reg, size, r.value) }
+    cpu.sr = r.sr
+    return Executed
+  }
+  let at = locate(cpu, bus, mode, reg, size, true)
+  let value = read_operand(cpu, bus, at, size)
+  let r = unary_result(kind, value, size, cpu.sr)
+  set_flags(cpu, r.sr)
+  prefetch(cpu, bus)
+  if kind != 0xA { write_back(cpu, bus, at, size, r.value) }
+  Executed
+}
+
+/// The result and flags of operation `kind` on `value`: NEGX (`0 − value − X`, Z only
+/// ever cleared, as SUBX), CLR (zero: Z set, N, V and C cleared, X kept), NEG (`0 −
+/// value`), NOT (the complement, flags as a logical operation) and TST (`value` itself,
+/// its flags the same way).
+let unary_result = pure (kind: u16, value: u32, size: i64, sr: u16) -> AluResult => {
+  let v = value & size_mask(size)
+  match kind {
+    0x0 => alu_extended(true, 0, v, size, sr),
+    0x2 => logic(0, size, sr),
+    0x4 => alu(Sub, 0, v, size, sr),
+    0x6 => logic(~v & size_mask(size), size, sr),
+    _ => logic(v, size, sr),
+  }
+}

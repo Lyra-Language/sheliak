@@ -166,7 +166,8 @@ let moveq<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
 }
 
 /// Group 4, the miscellany, as far as it is implemented: NOP, the returns, TRAP, TRAPV,
-/// RESET, MOVE USP, the SR and CCR moves, CHK, NBCD, SWAP, EXT, JMP, JSR, LEA, PEA.
+/// RESET, MOVE USP, the SR and CCR moves, CHK, NBCD, NEGX, CLR, NEG, NOT, TST, SWAP, EXT,
+/// JMP, JSR, LEA, PEA.
 let miscellaneous<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
   match op {
     0x4E70 => return reset_peripherals(cpu, bus),
@@ -188,6 +189,7 @@ let miscellaneous<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outco
   if (op & 0xFFC0) == 0x46C0 && data { return move_to_status(cpu, bus, op, true) }
   if (op & 0xF1C0) == 0x4180 && data { return check_bounds(cpu, bus, op) }
   if (op & 0xFFC0) == 0x4800 && alterable { return negate_bcd(cpu, bus, op) }
+  if is_unary(op, alterable) { return unary(cpu, bus, op) }
   if (op & 0xFFF8) == 0x4840 { return swap_halves(cpu, bus, reg) }
   if (op & 0xFFF8) == 0x4880 { return extend_sign(cpu, bus, reg, WORD) }
   if (op & 0xFFF8) == 0x48C0 { return extend_sign(cpu, bus, reg, LONG) }
