@@ -1,0 +1,150 @@
+// legaltest — every one of the 65,536 opcodes through the 68000 core.
+//
+//   tests/legal.sh           # fetches the reference, builds, runs this
+//
+// Reads a reference on stdin — 65,536 characters, `1` where the opcode is a 68000
+// instruction and `0` where it is not (lines A and F included as `0`), expanded from
+// Musashi's opcode table by tests/musashi_legal.py — and checks three things:
+//
+// - `is_legal` agrees with the reference on every opcode;
+// - every legal opcode decodes: stepping it never answers `Unimplemented`, STOP aside
+//   until interrupts are built;
+// - every illegal opcode takes its exception — vector 4, or 10 and 11 for lines A and F —
+//   as the exact bus sequence the chip makes: four idle cycles, the six-byte frame with
+//   the opcode's own address, the vector, the handler's first two words; 34 cycles.
+//
+// The suite of recorded tests (cputest) has none of this: it holds legal opcodes only.
+// Prints one summary line and the first few disagreements; exits 1 on any.
+
+import std.io.{ read_stdin }
+import m68k.{ Cpu, step, cpu_with, is_legal }
+
+const SHOWN: i64 = 5
+const STOP: u16 = 0x4E72
+const START_PC: u32 = 0x1000
+const START_SSP: u32 = 0x2000
+const START_SR: u16 = 0x2700
+
+let main = () -> u8 => {
+  let reference = read_stdin().trim()
+  if reference.len() != 65536 {
+    println("legal: want 65536 characters of reference on stdin, got ${reference.len()}")
+    return 1
+  }
+  var legal = 0
+  var problems = 0
+  for i, c in reference {
+    let op = u16(i)
+    let want = c == '1'
+    if want { legal += 1 }
+    let why = check(op, want)
+    if why != "" {
+      problems += 1
+      if problems <= SHOWN { println("  ${hex(u32(op))}: ${why}") }
+    }
+  }
+  println("legal: ${legal} legal opcodes, ${65536 - legal} illegal; ${problems} problems")
+  if problems > 0 { 1 } else { 0 }
+}
+
+/// What is wrong with how the core treats `op`, or "" if nothing.
+let check = (op: u16, want_legal: bool) -> string => {
+  if is_legal(op) != want_legal {
+    return if want_legal { "legal, but is_legal refuses it" } else { "illegal, but is_legal accepts it" }
+  }
+  var cpu = fresh_cpu(op)
+  var bus = SinkBus { log: [], cycles: 0 }
+  let outcome = step(cpu, bus)
+  if want_legal {
+    if let Unimplemented(_) = outcome {
+      if op != STOP { return "legal, but the decoder has nothing for it" }
+    }
+    return ""
+  }
+  if let Illegal(_) = outcome {} else { return "illegal, but step did not say so" }
+  let want = exception_log(vector_for(op))
+  for i, entry in want {
+    if i >= bus.log.len() { return "transaction ${i} missing, want ${entry}" }
+    if bus.log[i] != entry { return "transaction ${i} is ${bus.log[i]}, want ${entry}" }
+  }
+  if bus.log.len() > want.len() { return "extra transaction ${bus.log[want.len()]}" }
+  if bus.cycles != 34 { return "took ${bus.cycles} cycles, want 34" }
+  if cpu.pc != 0 { return "PC is ${hex(cpu.pc)}, want the handler at 0" }
+  if cpu.a[7] != START_SSP - 6 { return "SSP is ${hex(cpu.a[7])}, want ${hex(START_SSP - 6)}" }
+  ""
+}
+
+/// Supervisor mode, interrupts masked, every register zero but the stack, `op` in IRD.
+let fresh_cpu = pure (op: u16) -> Cpu =>
+  cpu_with(
+    #[0, 0, 0, 0, 0, 0, 0, 0],
+    #[0, 0, 0, 0, 0, 0, 0],
+    0,
+    START_SSP,
+    START_SR,
+    START_PC,
+    op,
+    0
+  )
+
+let vector_for = pure (op: u16) -> u32 => match op >> 12 {
+  0xA => 10,
+  0xF => 11,
+  _ => 4,
+}
+
+/// The bus sequence of an illegal-instruction exception from [fresh_cpu], the vector
+/// reading 0: the frame (PC low, SR, PC high), the vector, the handler's words at 0.
+let exception_log = pure (vector: u32) -> []string => [
+  "n 4",
+  "w 5 ${START_SSP - 2} ${START_PC & 0xFFFF}",
+  "w 5 ${START_SSP - 6} ${START_SR}",
+  "w 5 ${START_SSP - 4} ${START_PC >> 16}",
+  "r 5 ${vector * 4}",
+  "r 5 ${vector * 4 + 2}",
+  "r 6 0",
+  "n 2",
+  "r 6 2",
+]
+
+// ── A bus that answers zero ──────────────────────────────────────────────────
+
+/// Every read answers 0; every access is logged as `r fc addr` or `w fc addr value`, and
+/// idle stretches as `n cycles`.
+struct SinkBus {
+  log: []string,
+  cycles: i64,
+}
+
+impl Bus for SinkBus {
+  read_word = (self, addr, fc) => {
+    self.log.push("r ${fc} ${addr & 0xFFFFFF}")
+    self.cycles += 4
+    0
+  }
+  read_byte = (self, addr, fc) => {
+    self.log.push("r ${fc} ${addr & 0xFFFFFF}")
+    self.cycles += 4
+    0
+  }
+  write_word = (self, addr, fc, value) => {
+    self.log.push("w ${fc} ${addr & 0xFFFFFF} ${value}")
+    self.cycles += 4
+  }
+  write_byte = (self, addr, fc, value) => {
+    self.log.push("w ${fc} ${addr & 0xFFFFFF} ${value}")
+    self.cycles += 4
+  }
+  test_and_set_byte = (self, addr, fc) => {
+    self.log.push("t ${fc} ${addr & 0xFFFFFF}")
+    self.cycles += 10
+    0
+  }
+  idle = (self, n) => {
+    self.log.push("n ${n}")
+    self.cycles += n
+  }
+}
+
+/// `v` in hexadecimal, `0x`-prefixed.
+let hex = pure (v: u32) -> string => "0x${v.to_hex()}"

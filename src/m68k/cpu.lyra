@@ -75,13 +75,20 @@ pub const SR_T: u16 = 0x8000
 pub data Outcome =
   /// The instruction ran; IRD holds the next one.
   Executed
-  /// No implementation yet for this opcode — the core is being built instruction by
-  /// instruction, and the test runner counts these apart from failures.
+  /// Not a 68000 instruction ([is_legal]): exception 4 has been taken, or 10 or 11 for an
+  /// opcode in line A or F, and IRD holds the handler's first instruction.
+  | Illegal(u16)
+  /// A legal opcode not built yet — STOP, which waits for an interrupt, until interrupts
+  /// are. Nothing else: `tests/legal.sh` runs every opcode to check.
   | Unimplemented(u16)
 
 /// Execute the instruction in IRD, leaving the next one there.
 pub let step<b> where b: Bus = (cpu: mut Cpu, bus: mut b) -> Outcome => {
   let op = cpu.ird
+  if !is_legal(op) {
+    illegal_instruction(cpu, bus, op)
+    return Illegal(op)
+  }
   let outcome = execute(cpu, bus, op)
   if cpu.faulted { address_error(cpu, bus, op) }
   outcome
@@ -183,33 +190,28 @@ let miscellaneous<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outco
     0x4E77 => return return_and_restore(cpu, bus),
     _ => {},
   }
-  if (op & 0xFFF0) == 0x4E40 { return trap(cpu, bus, op) }
-  if (op & 0xFFF0) == 0x4E60 { return move_user_stack(cpu, bus, op) }
-  let mode = source_mode(op)
   let reg = source_reg(op)
-  let data = mode != 1 && (mode != 7 || reg <= 4)
-  let alterable = mode != 1 && (mode != 7 || reg <= 1)
-  if (op & 0xFFC0) == 0x40C0 && alterable { return move_from_status(cpu, bus, op) }
-  if (op & 0xFFC0) == 0x44C0 && data { return move_to_status(cpu, bus, op, false) }
-  if (op & 0xFFC0) == 0x46C0 && data { return move_to_status(cpu, bus, op, true) }
-  if (op & 0xF1C0) == 0x4180 && data { return check_bounds(cpu, bus, op) }
-  if (op & 0xFFC0) == 0x4800 && alterable { return negate_bcd(cpu, bus, op) }
-  if is_unary(op, alterable) { return unary(cpu, bus, op) }
-  if (op & 0xFFC0) == 0x4AC0 && alterable { return test_and_set(cpu, bus, op) }
+  // By pattern alone: [step] has refused every operand the instruction does not allow, so
+  // where two share a pattern, the register form is the one with ea mode 0.
+  if (op & 0xFFF0) == 0x4E40 { return trap(cpu, bus, op) }
   if (op & 0xFFF8) == 0x4E50 { return link(cpu, bus, reg) }
   if (op & 0xFFF8) == 0x4E58 { return unlink(cpu, bus, reg) }
-  if (op & 0xFB80) == 0x4880 && is_movem_operand((op & 0x0400) != 0, mode, reg) {
-    return move_multiple(cpu, bus, op)
-  }
+  if (op & 0xFFF0) == 0x4E60 { return move_user_stack(cpu, bus, op) }
   if (op & 0xFFF8) == 0x4840 { return swap_halves(cpu, bus, reg) }
   if (op & 0xFFF8) == 0x4880 { return extend_sign(cpu, bus, reg, WORD) }
   if (op & 0xFFF8) == 0x48C0 { return extend_sign(cpu, bus, reg, LONG) }
-  let control = mode == 2 || mode == 5 || mode == 6 || (mode == 7 && reg <= 3)
-  if !control { return Unimplemented(op) }
-  if (op & 0xFFC0) == 0x4EC0 { return jump(cpu, bus, op) }
-  if (op & 0xFFC0) == 0x4E80 { return jump_subroutine(cpu, bus, op) }
-  if (op & 0xFFC0) == 0x4840 { return push_effective_address(cpu, bus, op) }
+  if (op & 0xFB80) == 0x4880 { return move_multiple(cpu, bus, op) }
+  if (op & 0xFFC0) == 0x40C0 { return move_from_status(cpu, bus, op) }
+  if (op & 0xFFC0) == 0x44C0 { return move_to_status(cpu, bus, op, false) }
+  if (op & 0xFFC0) == 0x46C0 { return move_to_status(cpu, bus, op, true) }
+  if (op & 0xF1C0) == 0x4180 { return check_bounds(cpu, bus, op) }
   if (op & 0xF1C0) == 0x41C0 { return load_effective_address(cpu, bus, op) }
+  if (op & 0xFFC0) == 0x4800 { return negate_bcd(cpu, bus, op) }
+  if (op & 0xFFC0) == 0x4840 { return push_effective_address(cpu, bus, op) }
+  if (op & 0xFFC0) == 0x4AC0 { return test_and_set(cpu, bus, op) }
+  if (op & 0xFFC0) == 0x4E80 { return jump_subroutine(cpu, bus, op) }
+  if (op & 0xFFC0) == 0x4EC0 { return jump(cpu, bus, op) }
+  if is_unary(op) { return unary(cpu, bus, op) }
   Unimplemented(op)
 }
 

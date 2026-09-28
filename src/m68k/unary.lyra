@@ -7,9 +7,9 @@ module m68k
 //! away: a CLR of a hardware register is a read of it too. TST only reads. TAS's read and
 //! write are one indivisible bus cycle ([Bus]'s `test_and_set_byte`).
 
-/// Whether `op` is one of these, `alterable` saying its ea is a data alterable mode.
-let is_unary = pure (op: u16, alterable: bool) -> bool => {
-  if !alterable || ((op >> 6) & 3) == 3 { return false }
+/// Whether `op` is one of these, TAS aside.
+let is_unary = pure (op: u16) -> bool => {
+  if ((op >> 6) & 3) == 3 { return false }
   let kind = (op >> 8) & 0xF
   kind == 0x0 || kind == 0x2 || kind == 0x4 || kind == 0x6 || kind == 0xA
 }

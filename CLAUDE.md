@@ -11,10 +11,11 @@ non-commercial is linked in. Lives in the Lyra workspace beside `lyra/`; the wor
 
 ```bash
 ../lyra/build.sh            # the compiler, with std/ beside it
-./build.sh                  # -> build/cputest
+./build.sh                  # -> build/cputest, build/legaltest
 tests/fetch.sh              # SingleStepTests 68000 suite -> build/deps/680x0 (~200 MB, once)
 tests/cpu.sh                # every 68000 test file (~1M tests, ~17 s)
 tests/cpu.sh MOVE.l DIVS    # just these
+tests/legal.sh              # all 65,536 opcodes: legality against Musashi, illegal exceptions
 ```
 
 ## Accuracy Target
@@ -64,7 +65,13 @@ frame-at-a-time shortcuts from the start:
   there: it follows Motorola's documentation and the frame TRAP's tests confirm, and is to
   be checked against real software.
 - **Test data is downloaded, never committed or shipped**: SingleStepTests declares no
-  licence; `tests/fetch.sh` pins it to a commit under `build/`.
+  licence; `tests/fetch.sh` pins it to a commit under `build/`. Musashi's opcode table
+  (MIT) is treated the same way by `tests/legal.sh`, though its licence would allow more.
+- **Legality is decided once, before decoding**: `is_legal` (`src/m68k/legal.lyra`) says
+  whether the 68000 has an opcode, and `step` takes the illegal-instruction (or line A/F)
+  exception for any it does not. The decoder may therefore match by bit pattern alone —
+  it never sees an operand the instruction refuses. `tests/legal.sh` holds `is_legal` to
+  Musashi's table on every opcode and checks that every legal one decodes.
 - **Hot paths do not allocate** (`noalloc` where it can be said): the 68000 alone is ~7.6
   million cycles a second.
 
@@ -74,8 +81,10 @@ Module paths resolve under `src/` (the entry file's directory), so entry points 
 
 ```
 src/cputest.lyra     68000 test runner: one SingleStepTests file on stdin
+src/legaltest.lyra   every opcode through the core, against a legality reference on stdin
 src/m68k/            the 68000 (module m68k):
   cpu.lyra           Cpu, the Bus trait, step and decode, the prefetch, flags
+  legal.lyra         is_legal: which opcodes the 68000 has
   access.lyra        fault-aware accesses; the address error exception
   ea.lyra            effective addresses: locate, read_operand, write_operand
   move.lyra          MOVE, MOVEA (with the -(An) and (xxx).L destination orders)
@@ -86,7 +95,8 @@ src/m68k/            the 68000 (module m68k):
   flow.lyra          Bcc/BRA/BSR, DBcc, Scc, JMP, JSR, RTS, RTR, LEA, PEA, LINK, UNLK;
                      the queue refill
   exception.lyra     TRAP, TRAPV, CHK, RTE, SR/CCR moves and immediates, MOVE USP, RESET;
-                     the 6-byte group 1/2 frame, set_sr (stack switch on S)
+                     illegal instruction, line A/F, privilege violation; the 6-byte
+                     group 1/2 frame, set_sr (stack switch on S)
   muldiv.lyra        MULU, MULS, DIVU, DIVS; data-dependent timing (Cwik's division model)
   bcd.lyra           ABCD, SBCD, NBCD, with the chip's undocumented N and V
   bits.lyra          BTST, BCHG, BCLR, BSET, dynamic and static
@@ -95,17 +105,20 @@ src/m68k/            the 68000 (module m68k):
   movem.lyra         MOVEM (with the extra read), MOVEP
 tests/fetch.sh       download the pinned suite
 tests/cpu.sh         run the suite, one line per instruction file
+tests/legal.sh       fetch Musashi's table, expand it (musashi_legal.py), run legaltest
 ```
 
 ## Status
 
 The 68000 passes **the whole suite**: all 124 files, 1,000,058 tests, address errors
-included, every instruction the chip has (the two known-bad tests aside). The
-divide-by-zero frame's PC rests on the suite's single such test (see `divide_by_zero`),
-and the privilege violation on no test at all (see Rules).
+included, every instruction the chip has (the two known-bad tests aside). Every one of the
+65,536 opcodes is classified as Musashi's table does, and each illegal one takes exception
+4, 10 (line A) or 11 (line F) with the frame and 34-cycle timing Motorola documents. The
+suite has no illegal opcodes and no user mode, so those exceptions and the privilege
+violation rest on Motorola's tables and the TRAP frame the suite does test; the
+divide-by-zero frame's PC rests on a single test (see `divide_by_zero`).
 
 Not yet: interrupts (the IPL input and autovectored acknowledge — wanted with the VDP),
-trace (the T bit), and the illegal-instruction and line A/F exceptions. Until those land,
-an opcode no instruction claims answers `Unimplemented`, which the runner counts apart
-from failures; the suite has none left. `CPUTEST_FLAGS=--no-address-errors` skips tests
-that end in one, to get an instruction's ordinary path right first.
+trace (the T bit), and STOP, which waits for an interrupt and so comes with them — it is
+the one opcode `step` answers `Unimplemented` for. `CPUTEST_FLAGS=--no-address-errors`
+skips tests that end in one, to get an instruction's ordinary path right first.

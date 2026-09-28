@@ -1,6 +1,7 @@
 module m68k
 //! Exceptions and the status register: TRAP, TRAPV, CHK, RTE, MOVE to/from SR, MOVE to CCR,
-//! ANDI/ORI/EORI to CCR and SR, MOVE USP, RESET, and the privilege violation.
+//! ANDI/ORI/EORI to CCR and SR, MOVE USP, RESET, the privilege violation, and the illegal
+//! instruction and line A/F exceptions.
 //!
 //! **The group 1 and 2 frame is six bytes** — SR and the PC — written PC low, SR, PC high,
 //! into supervisor mode (S set, T cleared, A7 switched to the supervisor stack). The
@@ -153,7 +154,24 @@ pub const VECTOR_ILLEGAL_INSTRUCTION: u32 = 4
 pub const VECTOR_CHK: u32 = 6
 pub const VECTOR_TRAPV: u32 = 7
 pub const VECTOR_PRIVILEGE_VIOLATION: u32 = 8
+pub const VECTOR_LINE_A: u32 = 10
+pub const VECTOR_LINE_F: u32 = 11
 pub const VECTOR_TRAP_0: u32 = 32
+
+/// An opcode the 68000 does not have: exception 4 — or 10 for line A (`1010`), 11 for line
+/// F (`1111`), which software uses to emulate instructions the chip lacks — returning to
+/// the opcode itself. Timed as the privilege violation: four idle cycles, then the frame,
+/// 34 cycles in all (Motorola's table). Like it, untested by the suite, which has no
+/// illegal opcodes.
+let illegal_instruction<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> void => {
+  let vector = match op >> 12 {
+    0xA => VECTOR_LINE_A,
+    0xF => VECTOR_LINE_F,
+    _ => VECTOR_ILLEGAL_INSTRUCTION,
+  }
+  cpu_idle(cpu, bus, 4)
+  group_exception(cpu, bus, vector, cpu.pc)
+}
 
 /// A privileged instruction in user mode: exception 8, returning to the instruction itself.
 /// Untested by the suite (see the module header).

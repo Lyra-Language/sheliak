@@ -1,0 +1,156 @@
+module m68k
+//! Which of the 65,536 opcodes the 68000 has. [step] asks before it decodes, so an opcode
+//! the chip would refuse — an addressing mode the instruction does not allow, an encoding
+//! later CPUs spent on new instructions — takes the illegal-instruction exception instead
+//! of running as whatever the decoder's nearest match is.
+//!
+//! **Written from Motorola's encoding tables and checked against Musashi's** (another
+//! emulator's opcode table, fetched by `tests/legal.sh` and never shipped): the two agree
+//! on every opcode. Lines A (`1010`) and F (`1111`) are not illegal but their own
+//! exceptions; [is_legal] answers false for them and [step] tells them apart.
+
+/// Whether `op` is a 68000 instruction.
+pub let is_legal = pure (op: u16) -> bool => {
+  let mode = i64((op >> 3) & 7)
+  let reg = i64(op & 7)
+  let size_bits = (op >> 6) & 3
+  let opmode = (op >> 6) & 7
+  match op >> 12 {
+    0x0 => group_0_legal(op, mode, reg, size_bits),
+    0x1 => move_legal(op, mode, reg, true),
+    0x2 | 0x3 => move_legal(op, mode, reg, false),
+    0x4 => group_4_legal(op, mode, reg, size_bits),
+    0x5 => if size_bits == 3 {
+      mode == 1 || data_alterable(mode, reg)
+    } else {
+      alterable(mode, reg) && !(mode == 1 && size_bits == 0)
+    },
+    0x6 => true,
+    0x7 => (op & 0x0100) == 0,
+    0x8 | 0xC => and_or_legal(op, mode, reg, opmode),
+    0x9 | 0xD => add_sub_legal(mode, reg, opmode),
+    0xB => if opmode == 3 || opmode == 7 {
+      any_mode(mode, reg)
+    } else if opmode < 4 {
+      any_mode(mode, reg) && !(mode == 1 && opmode == 0)
+    } else {
+      mode <= 1 || data_alterable(mode, reg)
+    },
+    0xE => size_bits != 3 || ((op & 0x0800) == 0 && memory_alterable(mode, reg)),
+    _ => false,
+  }
+}
+
+/// Group 0: the immediates, the CCR/SR immediates, the bit operations, MOVEP.
+let group_0_legal = pure (op: u16, mode: i64, reg: i64, size_bits: u16) -> bool => {
+  match op {
+    0x003C | 0x007C | 0x023C | 0x027C | 0x0A3C | 0x0A7C => return true,
+    _ => {},
+  }
+  let test = size_bits == 0
+  if (op & 0x0100) != 0 {
+    if mode == 1 { return true }
+    return if test { data_mode(mode, reg) } else { data_alterable(mode, reg) }
+  }
+  let kind = (op >> 8) & 0xF
+  if kind == 0x8 {
+    return if test { data_mode(
+      mode,
+      reg
+    ) && !(mode == 7 && reg == 4) } else { data_alterable(mode, reg) }
+  }
+  let arithmetic = kind == 0x0 ||
+    kind == 0x2 ||
+    kind == 0x4 ||
+    kind == 0x6 ||
+    kind == 0xA ||
+    kind == 0xC
+  arithmetic && size_bits != 3 && data_alterable(
+      mode,
+      reg
+    )
+}
+
+/// MOVE and MOVEA: any source (but not An for a byte), a data alterable destination or,
+/// for a word or long, An.
+let move_legal = pure (op: u16, mode: i64, reg: i64, byte: bool) -> bool => {
+  let dest_mode = i64((op >> 6) & 7)
+  let dest_reg = i64((op >> 9) & 7)
+  if !any_mode(mode, reg) || (byte && mode == 1) { return false }
+  if dest_mode == 1 { return !byte }
+  data_alterable(dest_mode, dest_reg)
+}
+
+/// Group 4, the miscellany.
+let group_4_legal = pure (op: u16, mode: i64, reg: i64, size_bits: u16) -> bool => {
+  if (op & 0xFFF0) == 0x4E40 || (op & 0xFFF0) == 0x4E50 || (op & 0xFFF0) == 0x4E60 {
+    return true
+  }
+  match op {
+    0x4E70 | 0x4E71 | 0x4E72 | 0x4E73 | 0x4E75 | 0x4E76 | 0x4E77 => return true,
+    _ => {},
+  }
+  if (op & 0xF1C0) == 0x41C0 { return control_mode(mode, reg) }
+  if (op & 0xF1C0) == 0x4180 { return data_mode(mode, reg) }
+  if (op & 0x0100) != 0 { return false }
+  match (op >> 8) & 0xF {
+    0x0 | 0x2 | 0x4 | 0x6 => {
+      if size_bits != 3 { return data_alterable(mode, reg) }
+      match (op >> 8) & 0xF {
+        0x0 => data_alterable(mode, reg),
+        0x2 => false,
+        _ => data_mode(mode, reg),
+      }
+    },
+    0x8 => match size_bits {
+      0 => data_alterable(mode, reg),
+      1 => mode == 0 || control_mode(mode, reg),
+      _ => mode == 0 || mode == 4 || control_alterable(mode, reg),
+    },
+    0xA => data_alterable(mode, reg),
+    0xC => size_bits >= 2 && (mode == 3 || control_mode(mode, reg)),
+    0xE => size_bits >= 2 && control_mode(mode, reg),
+    _ => false,
+  }
+}
+
+/// Groups 8 (OR, DIVU/DIVS, SBCD) and 12 (AND, MULU/MULS, ABCD, EXG).
+let and_or_legal = pure (op: u16, mode: i64, reg: i64, opmode: u16) -> bool => {
+  if opmode == 3 || opmode == 7 || opmode < 4 { return data_mode(mode, reg) }
+  if mode >= 2 { return memory_alterable(mode, reg) }
+  if opmode == 4 { return true }
+  // Group 12 spends the rest on EXG: Dx,Dy and Ax,Ay at op-mode 5, Dx,Ay at 6.
+  (op >> 12) == 0xC && (opmode == 5 || mode == 1)
+}
+
+/// Groups 9 (SUB, SUBA, SUBX) and 13 (ADD, ADDA, ADDX).
+let add_sub_legal = pure (mode: i64, reg: i64, opmode: u16) -> bool => {
+  if opmode == 3 || opmode == 7 { return any_mode(mode, reg) }
+  if opmode < 4 { return any_mode(mode, reg) && !(mode == 1 && opmode == 0) }
+  mode <= 1 || memory_alterable(mode, reg)
+}
+
+// ── Addressing-mode classes ──────────────────────────────────────────────────
+
+/// Every mode: mode 7 stops at #imm (reg 4).
+let any_mode = pure (mode: i64, reg: i64) -> bool => mode != 7 || reg <= 4
+
+/// Every mode but An.
+let data_mode = pure (mode: i64, reg: i64) -> bool => mode != 1 && any_mode(mode, reg)
+
+/// Every mode that can be written, An included: no PC-relative, no immediate.
+let alterable = pure (mode: i64, reg: i64) -> bool => mode != 7 || reg <= 1
+
+let data_alterable = pure (mode: i64, reg: i64) -> bool =>
+  mode != 1 && alterable(mode, reg)
+
+let memory_alterable = pure (mode: i64, reg: i64) -> bool =>
+  mode >= 2 && alterable(mode, reg)
+
+/// The modes that name an address without stepping a register: (An), (d16,An), (d8,An,Xn),
+/// the absolutes and the PC-relatives.
+let control_mode = pure (mode: i64, reg: i64) -> bool =>
+  mode == 2 || mode == 5 || mode == 6 || (mode == 7 && reg <= 3)
+
+let control_alterable = pure (mode: i64, reg: i64) -> bool =>
+  control_mode(mode, reg) && alterable(mode, reg)

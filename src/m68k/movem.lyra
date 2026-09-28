@@ -11,7 +11,7 @@ module m68k
 //! and throws it away — the chip's own quirk, which the tests record on every one.
 
 /// Group 4's MOVEM `0100 1d00 1s <ea>`: `d` (bit 10) set loads registers, `s` (bit 6) set
-/// moves longs. `mode`/`reg` are already known to be an ea this direction allows.
+/// moves longs.
 let move_multiple<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
   let size = if (op & 0x0040) != 0 { LONG } else { WORD }
   let mask = take_extension(cpu, bus)
@@ -28,16 +28,6 @@ let move_multiple<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outco
   }
   prefetch(cpu, bus)
   Executed
-}
-
-/// Whether MOVEM may use `mode`/`reg`: the control modes, and -(An) to store or (An)+ to
-/// load.
-let is_movem_operand = pure (load: bool, mode: i64, reg: i64) -> bool => match mode {
-  2 | 5 | 6 => true,
-  3 => load,
-  4 => !load,
-  7 => reg <= 1 || (load && reg <= 3),
-  _ => false,
 }
 
 /// MOVEM <ea>, list: the registers in mask order from ascending addresses, then the extra
