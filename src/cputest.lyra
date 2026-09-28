@@ -1,0 +1,226 @@
+// cputest — runs one SingleStepTests 68000 file against the m68k core.
+//
+//   gzip -dc build/deps/680x0/68000/v1/NOP.json.gz | build/cputest NOP
+//   tests/cpu.sh [NAME…]                      # every file, or the named ones
+//
+// Each test gives the CPU and RAM before one instruction and after it, the instruction's
+// length in cycles, and every bus transaction it made. All of it is compared: registers,
+// SR, PC, the prefetch queue, every RAM byte the test lists, the cycle count, and the
+// transactions in order — so a core that gets the right answer by the wrong bus sequence
+// fails here, as it would fail a game that watches the bus.
+//
+// Prints one summary line; lists the first few failures with what differed. Exits 1 on any
+// failure, 0 otherwise — unimplemented opcodes are counted, not failed, while the core is
+// being built.
+
+import std.io.{ read_stdin }
+import std.json.{ parse_json, JsonValue }
+import std.collections.{ HashMap, hashmap_new }
+import m68k.{ Cpu, step, cpu_with, usp, ssp }
+
+const SHOWN_FAILURES: i64 = 5
+
+let main = () -> u8 => {
+  let args = program_args()
+  let name = if args.len() > 1 { args[1] } else { "stdin" }
+  let parsed = parse_json(read_stdin())
+  if let Err(e) = parsed {
+    println("${name}: not JSON: ${e.message} at byte ${e.offset}")
+    return 1
+  }
+  var passed = 0
+  var failed = 0
+  var unimplemented = 0
+  for test in parsed.unwrap_or(JsonNull).elements() {
+    match run(test) {
+      Pass => { passed += 1 },
+      NotImplemented => { unimplemented += 1 },
+      Fail(why) => {
+        failed += 1
+        if failed <= SHOWN_FAILURES { println("  ${text_of(test, "name")}: ${why}") }
+      },
+    }
+  }
+  println("${name}: ${passed} passed, ${failed} failed, ${unimplemented} unimplemented")
+  if failed > 0 { 1 } else { 0 }
+}
+
+/// What one test came to.
+data Verdict =
+  Pass
+  | NotImplemented
+  /// What differed, first difference only.
+  | Fail(string)
+
+/// Run one test: build the CPU and RAM, step once, compare.
+let run = (test: JsonValue) -> Verdict => {
+  let initial = test.field("initial").unwrap_or(JsonNull)
+  let final = test.field("final").unwrap_or(JsonNull)
+  var cpu = load_cpu(initial)
+  var bus = TestBus { ram: hashmap_new::<u32, u8>(), log: [], cycles: 0 }
+  for pair in initial.field("ram").unwrap_or(JsonNull).elements() {
+    bus.ram.insert(u32(number(pair, 0)), u8(number(pair, 1)))
+  }
+  if let Unimplemented(_) = step(cpu, bus) { return NotImplemented }
+
+  let want = load_cpu(final)
+  for i in 0..<8 {
+    if cpu.d[i] != want.d[i] { return Fail("D${i} is ${hex(cpu.d[i])}, want ${hex(want.d[i])}") }
+  }
+  for i in 0..<7 {
+    if cpu.a[i] != want.a[i] { return Fail("A${i} is ${hex(cpu.a[i])}, want ${hex(want.a[i])}") }
+  }
+  if usp(cpu) != usp(want) { return Fail("USP is ${hex(usp(cpu))}, want ${hex(usp(want))}") }
+  if ssp(cpu) != ssp(want) { return Fail("SSP is ${hex(ssp(cpu))}, want ${hex(ssp(want))}") }
+  if cpu.sr != want.sr { return Fail("SR is ${hex(u32(cpu.sr))}, want ${hex(u32(want.sr))}") }
+  if cpu.pc != want.pc { return Fail("PC is ${hex(cpu.pc)}, want ${hex(want.pc)}") }
+  if cpu.ird != want.ird || cpu.irc != want.irc {
+    return Fail("prefetch is [${hex(u32(cpu.ird))}, ${hex(u32(cpu.irc))}], want [${hex(u32(want.ird))}, ${hex(u32(want.irc))}]")
+  }
+  for pair in final.field("ram").unwrap_or(JsonNull).elements() {
+    let addr = u32(number(pair, 0))
+    let got = bus.ram.get(addr).unwrap_or(0)
+    if i64(got) != number(pair, 1) {
+      return Fail("RAM[${hex(addr)}] is ${got}, want ${number(pair, 1)}")
+    }
+  }
+  let want_log = test
+    .field("transactions")
+    .unwrap_or(JsonNull)
+    .elements()
+    .map((t) => describe(t))
+  for i, entry in want_log {
+    if i >= bus.log.len() { return Fail("transaction ${i} missing, want ${entry}") }
+    if bus.log[i] != entry { return Fail("transaction ${i} is ${bus.log[i]}, want ${entry}") }
+  }
+  if bus.log.len() > want_log.len() {
+    return Fail("extra transaction ${want_log.len()}: ${bus.log[want_log.len()]}")
+  }
+  let length = member(test, "length")
+  if bus.cycles != length { return Fail("took ${bus.cycles} cycles, want ${length}") }
+  Pass
+}
+
+/// A CPU from a test's `initial` or `final` state.
+let load_cpu = pure (state: JsonValue) -> Cpu => {
+  let prefetch = state.field("prefetch").unwrap_or(JsonNull)
+  cpu_with(
+    #[reg(state, "d0"), reg(state, "d1"), reg(state, "d2"), reg(state, "d3"),
+      reg(state, "d4"), reg(state, "d5"), reg(state, "d6"), reg(state, "d7")],
+    #[reg(state, "a0"), reg(state, "a1"), reg(state, "a2"), reg(state, "a3"),
+      reg(state, "a4"), reg(state, "a5"), reg(state, "a6")],
+    reg(state, "usp"),
+    reg(state, "ssp"),
+    u16(reg(state, "sr")),
+    reg(state, "pc"),
+    u16(number(prefetch, 0)),
+    u16(number(prefetch, 1))
+  )
+}
+
+// ── The test bus ─────────────────────────────────────────────────────────────
+
+/// Sparse RAM and a log of every transaction, spelled as the test file spells them so the
+/// two compare as strings.
+struct TestBus {
+  ram: HashMap<u32, u8>,
+  log: []string,
+  cycles: i64,
+}
+
+impl Bus for TestBus {
+  read_word = (self, addr, fc) => {
+    let value = (u16(self.byte(addr)) << 8) | u16(self.byte(addr.wrapping_add(1)))
+    self.access("r", fc, addr, ".w", u32(value))
+    value
+  }
+  read_byte = (self, addr, fc) => {
+    let value = self.byte(addr)
+    self.access("r", fc, addr, ".b", u32(value))
+    value
+  }
+  write_word = (self, addr, fc, value) => {
+    self.ram.insert(addr & 0xFFFFFF, u8(value >> 8))
+    self.ram.insert(addr.wrapping_add(1) & 0xFFFFFF, u8(value & 0xFF))
+    self.access("w", fc, addr, ".w", u32(value))
+  }
+  write_byte = (self, addr, fc, value) => {
+    self.ram.insert(addr & 0xFFFFFF, value)
+    self.access("w", fc, addr, ".b", u32(value))
+  }
+  idle = (self, n) => {
+    // The files merge adjacent idle stretches into one entry, so the log does too.
+    let last = self.log.len() - 1
+    if last >= 0 && self.log[last].starts_with("n ") {
+      let before = self.log[last]
+        .strip_prefix("n ")
+        .unwrap_or("0")
+        .parse_i64()
+        .unwrap_or(0)
+      self.log[last] = "n ${before + n}"
+    } else {
+      self.log.push("n ${n}")
+    }
+    self.cycles += n
+  }
+}
+
+/// The byte at `addr` (24-bit bus), or 0 where the test left RAM unset.
+let byte = pure (self: TestBus, addr: u32) -> u8 =>
+  self.ram.get(addr & 0xFFFFFF).unwrap_or(0)
+
+/// Log one 4-cycle access.
+let access = (
+  self: mut TestBus,
+  kind: string,
+  fc: u8,
+  addr: u32,
+  width: string,
+  value: u32
+) -> void => {
+  self.log.push("${kind} 4 ${fc} ${addr & 0xFFFFFF} ${width} ${value}")
+  self.cycles += 4
+}
+
+/// One transaction from the file, spelled as [TestBus] logs it.
+let describe = pure (t: JsonValue) -> string => {
+  let parts = t.elements()
+  let kind = parts[0].as_text().unwrap_or("?")
+  if kind == "n" { return "n ${number(t, 1)}" }
+  "${kind} ${number(t, 1)} ${number(t, 2)} ${number(t, 3)} ${parts[4].as_text().unwrap_or("?")} ${number(t, 5)}"
+}
+
+// ── JSON reading ─────────────────────────────────────────────────────────────
+
+/// A register from a state object.
+let reg = pure (state: JsonValue, name: string) -> u32 => u32(member(state, name))
+
+/// A number member of an object, or 0.
+let member = pure (v: JsonValue, key: string) -> i64 =>
+  v.field(key).unwrap_or(JsonNull).as_int().unwrap_or(0)
+
+/// A number element of an array, or 0.
+let number = pure (v: JsonValue, at: i64) -> i64 =>
+  v.element(at).unwrap_or(JsonNull).as_int().unwrap_or(0)
+
+let text_of = pure (v: JsonValue, key: string) -> string =>
+  v.field(key).unwrap_or(JsonNull).as_text().unwrap_or("")
+
+/// `v` in hexadecimal, `0x`-prefixed.
+let hex = pure (v: u32) -> string => {
+  let digits = "0123456789abcdef".to_runes()
+  var out: []string = []
+  var rest = v
+  for {
+    out.push("${digits[i64(rest & 15)]}")
+    rest = rest >> 4
+    if rest == 0 { break }
+  }
+  var reversed: []string = []
+  var i = out.len() - 1
+  for i >= 0 {
+    reversed.push(out[i])
+    i -= 1
+  }
+  "0x${reversed.join("")}"
+}

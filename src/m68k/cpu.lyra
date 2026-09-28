@@ -1,0 +1,165 @@
+module m68k
+//! The Motorola 68000, bus cycle by bus cycle.
+//!
+//! **What is modelled is what the pins show.** Every instruction is a sequence of word and
+//! byte accesses and idle cycles on a [Bus], in the order and with the timing the real chip
+//! produces, including the **prefetch queue**: the opcode being executed (IRD) and the word
+//! after it (IRC) are already on chip when an instruction starts, and each instruction ends
+//! by fetching the next. Games observe all three — self-modifying code sees the prefetch,
+//! raster effects depend on the timing, and hardware registers on the Genesis react to the
+//! exact access sequence — so the core is checked against the SingleStepTests suite, which
+//! records every bus transaction of every test (`tests/`).
+//!
+//! **Time lives in the bus.** Each access costs 4 cycles plus whatever wait states the bus
+//! adds (the Genesis VDP and Z80 buses do); [Bus.idle] is cycles with no access. The CPU keeps
+//! no clock of its own, so the scheduler that interleaves the chips owns the one clock.
+
+/// The 68000's registers and prefetch queue.
+pub struct Cpu {
+  /// D0–D7.
+  d: [8]u32,
+  /// A0–A7. A7 is whichever stack pointer the mode selects; the other is [inactive_sp].
+  a: [8]u32,
+  /// The stack pointer not in use: the user one (USP) in supervisor mode, the supervisor
+  /// one (SSP) in user mode.
+  inactive_sp: u32,
+  /// The status register: the condition codes in the low byte, the system byte above.
+  sr: u16,
+  /// The address of the opcode in [ird].
+  pc: u32,
+  /// The opcode being executed.
+  ird: u16,
+  /// The word after it, already fetched: the first extension word, or the next opcode.
+  irc: u16,
+}
+
+/// What the 68000 is wired to. Each method is one bus cycle — or, for `idle`, cycles with
+/// nothing on the bus — so an implementation sees exactly the sequence the chip puts on its
+/// pins. `fc` is the function code: [FC_USER_DATA], [FC_USER_PROGRAM],
+/// [FC_SUPERVISOR_DATA], [FC_SUPERVISOR_PROGRAM], or [FC_INTERRUPT_ACKNOWLEDGE].
+pub trait Bus {
+  read_word: (mut Self, u32, u8) -> u16
+  read_byte: (mut Self, u32, u8) -> u8
+  write_word: (mut Self, u32, u8, u16) -> void
+  write_byte: (mut Self, u32, u8, u8) -> void
+  idle: (mut Self, i64) -> void
+}
+
+pub const FC_USER_DATA: u8 = 1
+pub const FC_USER_PROGRAM: u8 = 2
+pub const FC_SUPERVISOR_DATA: u8 = 5
+pub const FC_SUPERVISOR_PROGRAM: u8 = 6
+pub const FC_INTERRUPT_ACKNOWLEDGE: u8 = 7
+
+/// The status register's bits.
+pub const SR_C: u16 = 0x0001
+pub const SR_V: u16 = 0x0002
+pub const SR_Z: u16 = 0x0004
+pub const SR_N: u16 = 0x0008
+pub const SR_X: u16 = 0x0010
+pub const SR_S: u16 = 0x2000
+pub const SR_T: u16 = 0x8000
+
+/// What became of one [step].
+pub data Outcome =
+  /// The instruction ran; IRD holds the next one.
+  Executed
+  /// No implementation yet for this opcode — the core is being built instruction by
+  /// instruction, and the test runner counts these apart from failures.
+  | Unimplemented(u16)
+
+/// Execute the instruction in IRD, leaving the next one there.
+pub let step<b> where b: Bus = (cpu: mut Cpu, bus: mut b) -> Outcome => {
+  let op = cpu.ird
+  match op >> 12 {
+    0x4 => if op == 0x4E71 { nop(cpu, bus) } else { Unimplemented(op) },
+    0x7 => if (op & 0x0100) == 0 { moveq(cpu, bus, op) } else { Unimplemented(op) },
+    _ => Unimplemented(op),
+  }
+}
+
+/// The user stack pointer, wherever it is kept.
+pub let usp = pure (cpu: Cpu) -> u32 =>
+  if supervisor(cpu) { cpu.inactive_sp } else { cpu.a[7] }
+
+/// The supervisor stack pointer, wherever it is kept.
+pub let ssp = pure (cpu: Cpu) -> u32 =>
+  if supervisor(cpu) { cpu.a[7] } else { cpu.inactive_sp }
+
+/// A CPU in the given state — what a test, a save state or a reset starts from. `usp` and
+/// `ssp` are placed by `sr`'s S bit.
+pub let cpu_with = pure (
+  d: [8]u32,
+  a0_a6: [7]u32,
+  usp: u32,
+  ssp: u32,
+  sr: u16,
+  pc: u32,
+  ird: u16,
+  irc: u16
+) -> Cpu => {
+  let is_supervisor = (sr & SR_S) != 0
+  let a7 = if is_supervisor { ssp } else { usp }
+  let a: [8]u32 = #[
+    a0_a6[0],
+    a0_a6[1],
+    a0_a6[2],
+    a0_a6[3],
+    a0_a6[4],
+    a0_a6[5],
+    a0_a6[6],
+    a7
+  ]
+  Cpu {
+    d: d,
+    a: a,
+    inactive_sp: if is_supervisor { usp } else { ssp },
+    sr: sr,
+    pc: pc,
+    ird: ird,
+    irc: irc,
+  }
+}
+
+// ── Instructions ─────────────────────────────────────────────────────────────
+
+/// NOP: 4 cycles, all of them the prefetch.
+let nop<b> where b: Bus = (cpu: mut Cpu, bus: mut b) -> Outcome => {
+  prefetch(cpu, bus)
+  Executed
+}
+
+/// MOVEQ #d8, Dn: the byte sign-extended into all 32 bits. N and Z from the result, V and
+/// C cleared, X untouched. 4 cycles, all of them the prefetch.
+let moveq<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
+  let value = u32(i32(i8(op & 0xFF)))
+  cpu.d[i64((op >> 9) & 7)] = value
+  set_logic_flags(cpu, value, 0x80000000)
+  prefetch(cpu, bus)
+  Executed
+}
+
+// ── The machinery every instruction shares ───────────────────────────────────
+
+/// The step every instruction ends with: IRC moves into IRD, and the word after it is
+/// read into IRC. Four cycles.
+let prefetch<b> where b: Bus = (cpu: mut Cpu, bus: mut b) -> void => {
+  cpu.ird = cpu.irc
+  cpu.irc = bus.read_word(cpu.pc.wrapping_add(4), program_fc(cpu))
+  cpu.pc = cpu.pc.wrapping_add(2)
+}
+
+/// N and Z from `value` (whose sign bit is `sign`), V and C cleared, X untouched: the flags
+/// of MOVE, MOVEQ and the logical operations.
+let set_logic_flags = (cpu: mut Cpu, value: u32, sign: u32) -> void => {
+  var sr = cpu.sr & ~(SR_N | SR_Z | SR_V | SR_C)
+  if (value & sign) != 0 { sr = sr | SR_N }
+  if (value & ((sign << 1).wrapping_sub(1))) == 0 { sr = sr | SR_Z }
+  cpu.sr = sr
+}
+
+let supervisor = pure (cpu: Cpu) -> bool => (cpu.sr & SR_S) != 0
+
+/// The function code of an instruction fetch in the current mode.
+let program_fc = pure (cpu: Cpu) -> u8 =>
+  if supervisor(cpu) { FC_SUPERVISOR_PROGRAM } else { FC_USER_PROGRAM }
