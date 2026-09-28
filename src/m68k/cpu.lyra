@@ -46,6 +46,9 @@ pub struct Cpu {
   nmi: bool,
   /// STOP is in effect: no instructions run until an interrupt is taken.
   stopped: bool,
+  /// The instruction in progress may not be traced — it raised a privilege violation, which
+  /// Motorola exempts from tracing as it does an illegal opcode. Reset by every [step].
+  untraced: bool,
 }
 
 /// What the 68000 is wired to. Each method is one bus cycle — or, for `idle`, cycles with
@@ -120,8 +123,17 @@ pub let step<b> where b: Bus = (cpu: mut Cpu, bus: mut b) -> Outcome => {
     illegal_instruction(cpu, bus, op)
     return Illegal(op)
   }
+  // T as the instruction *starts* decides whether it is traced — so an instruction that
+  // clears T is still traced, and one that sets it (RTE, MOVE to SR) is not; the next one is.
+  let tracing = (cpu.sr & SR_T) != 0
+  cpu.untraced = false
   let outcome = execute(cpu, bus, op)
-  if cpu.faulted { address_error(cpu, bus, op) }
+  if cpu.faulted {
+    // An address error abandons the instruction, and its group 0 exception wins.
+    address_error(cpu, bus, op)
+    return outcome
+  }
+  if tracing && !cpu.untraced { trace(cpu, bus) }
   outcome
 }
 
@@ -190,6 +202,7 @@ pub let cpu_with = pure (
     ipl: 0,
     nmi: false,
     stopped: false,
+    untraced: false,
   }
 }
 

@@ -1,7 +1,7 @@
 module m68k
 //! Exceptions and the status register: TRAP, TRAPV, CHK, RTE, MOVE to/from SR, MOVE to CCR,
 //! ANDI/ORI/EORI to CCR and SR, MOVE USP, RESET, STOP, the privilege violation, the illegal
-//! instruction and line A/F exceptions, and interrupts.
+//! instruction and line A/F exceptions, trace, and interrupts.
 //!
 //! **The group 1 and 2 frame is six bytes** — SR and the PC — written PC low, SR, PC high,
 //! into supervisor mode (S set, T cleared, A7 switched to the supervisor stack). The
@@ -166,6 +166,7 @@ pub const VECTOR_ILLEGAL_INSTRUCTION: u32 = 4
 pub const VECTOR_CHK: u32 = 6
 pub const VECTOR_TRAPV: u32 = 7
 pub const VECTOR_PRIVILEGE_VIOLATION: u32 = 8
+pub const VECTOR_TRACE: u32 = 9
 pub const VECTOR_LINE_A: u32 = 10
 pub const VECTOR_LINE_F: u32 = 11
 pub const VECTOR_TRAP_0: u32 = 32
@@ -188,6 +189,7 @@ let illegal_instruction<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) ->
 /// A privileged instruction in user mode: exception 8, returning to the instruction itself.
 /// Untested by the suite (see the module header).
 let privilege_violation<b> where b: Bus = (cpu: mut Cpu, bus: mut b) -> Outcome => {
+  cpu.untraced = true
   cpu_idle(cpu, bus, 4)
   group_exception(cpu, bus, VECTOR_PRIVILEGE_VIOLATION, cpu.pc)
   Executed
@@ -211,6 +213,21 @@ let group_exception<b> where b: Bus = (
   cpu_write_word(cpu, bus, sp.wrapping_sub(4), fc, u16(return_pc >> 16))
   cpu.a[7] = sp.wrapping_sub(6)
   jump_to_vector(cpu, bus, vector)
+}
+
+/// Trace (exception 9), after an instruction that began with T set: four idle cycles, the
+/// group 1 frame with the address the program goes on to — the next instruction, or, when
+/// the instruction itself raised TRAP, TRAPV, CHK or divide-by-zero, that exception's handler,
+/// whose processing has already run — and the handler started. 34 cycles; Yacht gives it
+/// TRAPV's bus pattern, whose frame order the suite checks. A traced STOP resumes at the
+/// handler rather than staying stopped. Untested by the suite, which never sets T.
+///
+/// Taken inside the instruction's [step], so a pending interrupt is seen only at the next —
+/// after the trace, which Motorola ranks first.
+let trace<b> where b: Bus = (cpu: mut Cpu, bus: mut b) -> void => {
+  cpu.stopped = false
+  cpu_idle(cpu, bus, 4)
+  group_exception(cpu, bus, VECTOR_TRACE, cpu.pc)
 }
 
 // ── Interrupts ───────────────────────────────────────────────────────────────

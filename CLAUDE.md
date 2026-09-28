@@ -16,7 +16,7 @@ tests/fetch.sh              # SingleStepTests 68000 suite -> build/deps/680x0 (~
 tests/cpu.sh                # every 68000 test file (~1M tests, ~17 s)
 tests/cpu.sh MOVE.l DIVS    # just these
 tests/legal.sh              # all 65,536 opcodes: legality against Musashi, illegal exceptions
-tests/interrupts.sh         # interrupt and STOP scenarios on a scripted bus
+tests/scenarios.sh          # interrupt, STOP and trace scenarios on a scripted bus
 ```
 
 ## Accuracy Target
@@ -78,6 +78,10 @@ frame-at-a-time shortcuts from the start:
   only after the next instruction. Level 7 is taken on its rise, once. The acknowledge
   cycle is the bus's (`acknowledge_interrupt`), timing and vector both — the Genesis
   autovectors, synchronised to the E clock.
+- **Trace follows the T bit as an instruction starts**: exception 9 after it, inside its
+  `step` — so a pending interrupt is taken at the next step, after the trace, as Motorola
+  ranks them. Not after an illegal opcode or a privilege violation (`Cpu.untraced`); after
+  TRAP, TRAPV, CHK or divide-by-zero it follows that exception, into its handler.
 - **Hot paths do not allocate** (`noalloc` where it can be said): the 68000 alone is ~7.6
   million cycles a second.
 
@@ -88,7 +92,7 @@ Module paths resolve under `src/` (the entry file's directory), so entry points 
 ```
 src/cputest.lyra     68000 test runner: one SingleStepTests file on stdin
 src/legaltest.lyra   every opcode through the core, against a legality reference on stdin
-src/interrupttest.lyra  interrupts and STOP, scenario by scenario, on a scripted bus
+src/scenariotest.lyra  interrupts, STOP and trace, scenario by scenario, on a scripted bus
 src/m68k/            the 68000 (module m68k):
   cpu.lyra           Cpu, the Bus trait, step and decode, the prefetch, flags
   legal.lyra         is_legal: which opcodes the 68000 has
@@ -102,7 +106,7 @@ src/m68k/            the 68000 (module m68k):
   flow.lyra          Bcc/BRA/BSR, DBcc, Scc, JMP, JSR, RTS, RTR, LEA, PEA, LINK, UNLK;
                      the queue refill
   exception.lyra     TRAP, TRAPV, CHK, RTE, SR/CCR moves and immediates, MOVE USP, RESET,
-                     STOP; illegal instruction, line A/F, privilege violation,
+                     STOP; illegal instruction, line A/F, privilege violation, trace,
                      interrupts; the 6-byte group 1/2 frame, set_sr (stack switch on S)
   muldiv.lyra        MULU, MULS, DIVU, DIVS; data-dependent timing (Cwik's division model)
   bcd.lyra           ABCD, SBCD, NBCD, with the chip's undocumented N and V
@@ -113,7 +117,7 @@ src/m68k/            the 68000 (module m68k):
 tests/fetch.sh       download the pinned suite
 tests/cpu.sh         run the suite, one line per instruction file
 tests/legal.sh       fetch Musashi's table, expand it (musashi_legal.py), run legaltest
-tests/interrupts.sh  run interrupttest
+tests/scenarios.sh   run scenariotest
 ```
 
 ## Status
@@ -121,15 +125,16 @@ tests/interrupts.sh  run interrupttest
 The 68000 passes **the whole suite**: all 124 files, 1,000,058 tests, address errors
 included, every instruction the chip has (the two known-bad tests aside). Every one of the
 65,536 opcodes is classified as Musashi's table does, and each illegal one takes exception
-4, 10 (line A) or 11 (line F). Interrupts and STOP pass their scenarios
-(`tests/interrupts.sh`).
+4, 10 (line A) or 11 (line F). Interrupts, STOP and trace pass their scenarios
+(`tests/scenarios.sh`). **Nothing in the 68000 is left unbuilt** but the bus error, which
+needs a bus that can raise one.
 
 What the recorded suite cannot check rests on documentation: the illegal-instruction,
-privilege-violation and interrupt sequences on Motorola's tables and Yacht, with the TRAP
-frame the suite does test; the divide-by-zero frame's PC on a single test. **The interrupt
+privilege-violation, trace and interrupt sequences on Motorola's tables and Yacht, with the
+TRAP and TRAPV frames the suite does test; the divide-by-zero frame's PC on a single test. **The interrupt
 has one open cycle count**: the idle after the acknowledge is 4 cycles (Motorola's 44 in
 all) where Clock Signal takes 6 — to settle against hardware once the VDP raises real
 interrupts.
 
-Not yet: trace (the T bit). `CPUTEST_FLAGS=--no-address-errors` skips tests that end in
-an address error, to get an instruction's ordinary path right first.
+`CPUTEST_FLAGS=--no-address-errors` skips tests that end in an address error, to get an
+instruction's ordinary path right first.

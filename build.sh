@@ -2,7 +2,7 @@
 #
 # Build Sheliak's programs into build/.
 #
-#   ./build.sh              # build/cputest, legaltest, interrupttest (the 68000 test runners)
+#   ./build.sh              # build/cputest, legaltest, scenariotest (the 68000 test runners)
 #
 # Uses the sibling compiler, ../lyra/build/lyrac (run ../lyra/build.sh first), whose
 # install layout puts `std/` and `bindings/` beside it. Override with $LYRAC.
@@ -19,4 +19,4 @@ fi
 mkdir -p "$ROOT/build"
 "$LYRAC" build -o "$ROOT/build/cputest" "$ROOT/src/cputest.lyra"
 "$LYRAC" build -o "$ROOT/build/legaltest" "$ROOT/src/legaltest.lyra"
-"$LYRAC" build -o "$ROOT/build/interrupttest" "$ROOT/src/interrupttest.lyra"
+"$LYRAC" build -o "$ROOT/build/scenariotest" "$ROOT/src/scenariotest.lyra"

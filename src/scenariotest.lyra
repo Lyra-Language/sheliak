@@ -1,13 +1,16 @@
-// interrupttest — interrupts and STOP, which the recorded suite has none of.
+// scenariotest — the 68000's exceptions the recorded suite has none of: interrupts, STOP
+// and trace (the suite never raises an interrupt and never sets T).
 //
-//   tests/interrupts.sh
+//   tests/scenarios.sh
 //
-// Each scenario loads a few instructions, raises an interrupt level on a scripted bus at
-// a given cycle, steps, and checks the outcome of each step and — for the interrupt
-// itself — the exact bus sequence Yacht gives, `n nn ns ni n- n nS ns nV nv np n np`: six
-// idle cycles, the frame's PC low word, the acknowledge, four idle cycles, SR and the PC
-// high word, the vector, the handler's first two words. 44 cycles with this bus's
-// 4-cycle acknowledge. Prints a line per failure and a summary; exits 1 on any.
+// Each scenario loads a few instructions, optionally raises an interrupt level on a
+// scripted bus at a given cycle, steps, and checks the outcome of each step and the exact
+// bus sequences. An interrupt is Yacht's `n nn ns ni n- n nS ns nV nv np n np`: six idle
+// cycles, the frame's PC low word, the acknowledge, four idle cycles, SR and the PC high
+// word, the vector, the handler's first two words — 44 cycles with this bus's 4-cycle
+// acknowledge. A trace (exception 9) is a group 1 exception after the traced instruction:
+// four idle cycles, the frame, the vector, the handler — 34 cycles. Prints a line per
+// failure and a summary; exits 1 on any.
 
 import std.collections.{ HashMap, hashmap_new }
 import m68k.{ Bus, Cpu, step, cpu_with, Outcome }
@@ -15,12 +18,18 @@ import m68k.{ Bus, Cpu, step, cpu_with, Outcome }
 const CODE: u32 = 0x1000
 const HANDLER: u32 = 0x2000
 const PRIVILEGE_HANDLER: u32 = 0x3000
+const TRACE_HANDLER: u32 = 0x5000
+const TRAP_HANDLER: u32 = 0x6000
+const ILLEGAL_HANDLER: u32 = 0x7000
 const SSP: u32 = 0x8000
 const USP: u32 = 0x4000
 
 const NOP: u16 = 0x4E71
 const STOP: u16 = 0x4E72
 const EXG_D0_D1: u16 = 0xC141
+const TRAP_0: u16 = 0x4E40
+const ILLEGAL: u16 = 0x4AFC
+const MOVE_TO_SR: u16 = 0x46FC
 
 let main = () -> u8 => {
   var failures = 0
@@ -30,7 +39,7 @@ let main = () -> u8 => {
       println("  ${s.name}: ${why}")
     }
   }
-  println("interrupts: ${scenarios().len() - failures} passed, ${failures} failed")
+  println("scenarios: ${scenarios().len() - failures} passed, ${failures} failed")
   if failures > 0 { 1 } else { 0 }
 }
 
@@ -48,6 +57,14 @@ let scenarios = pure () -> []Scenario => [
   Scenario { name: "from user mode, onto the supervisor stack", run: from_user_mode },
   Scenario { name: "STOP waits, and returns past its immediate", run: stop_waits },
   Scenario { name: "STOP in user mode is a privilege violation", run: stop_privileged },
+  Scenario { name: "a traced instruction is followed by exception 9", run: traced_nop },
+  Scenario { name: "an illegal opcode is not traced", run: illegal_untraced },
+  Scenario { name: "a TRAP is traced into its handler", run: traced_trap },
+  Scenario { name: "clearing T is traced", run: clearing_t_traced },
+  Scenario { name: "setting T is not; the next instruction is", run: setting_t_untraced },
+  Scenario { name: "a privilege violation is not traced", run: privilege_untraced },
+  Scenario { name: "the trace comes before a pending interrupt", run: trace_before_interrupt },
+  Scenario { name: "a traced STOP resumes at the handler", run: traced_stop },
 ]
 
 /// Level 4 over mask 3: NOP samples it with its prefetch, and the next step takes it.
@@ -138,6 +155,118 @@ let stop_privileged = () -> Result<void, string> => {
   Ok()
 }
 
+// ── Trace ────────────────────────────────────────────────────────────────────
+
+/// NOP with T set: its prefetch, then the trace — the frame holding the next instruction's
+/// address and SR with T, the handler entered with T cleared. 4 + 34 cycles.
+let traced_nop = () -> Result<void, string> => {
+  var bus = script_bus([NOP, NOP], 0, 0)
+  var cpu = start(bus, 0xA700)
+  expect_outcome(step(cpu, bus), Executed)?
+  let want = [
+    "r 6 ${CODE + 4}",
+    ...exception_log(9, CODE + 2, 0xA700, SSP, TRACE_HANDLER)
+  ]
+  expect_log(bus.log, 0, want)?
+  expect_equal(bus.cycles, 38, "cycles")?
+  expect_equal(i64(cpu.sr), 0x2700, "SR")?
+  expect_equal(i64(cpu.pc), i64(TRACE_HANDLER), "PC")?
+  Ok()
+}
+
+/// ILLEGAL with T set: exception 4 and nothing after it.
+let illegal_untraced = () -> Result<void, string> => {
+  var bus = script_bus([ILLEGAL], 0, 0)
+  var cpu = start(bus, 0xA700)
+  expect_outcome(step(cpu, bus), Illegal(ILLEGAL))?
+  expect_log(bus.log, 0, exception_log(4, CODE, 0xA700, SSP, ILLEGAL_HANDLER))?
+  Ok()
+}
+
+/// TRAP #0 with T set: the trap's exception, then the trace, whose frame holds the trap
+/// handler's address and the SR the trap left (T already cleared).
+let traced_trap = () -> Result<void, string> => {
+  var bus = script_bus([TRAP_0], 0, 0)
+  var cpu = start(bus, 0xA700)
+  expect_outcome(step(cpu, bus), Executed)?
+  let want = [
+    ...exception_log(32, CODE + 2, 0xA700, SSP, TRAP_HANDLER),
+    ...exception_log(9, TRAP_HANDLER, 0x2700, SSP - 6, TRACE_HANDLER),
+  ]
+  expect_log(bus.log, 0, want)?
+  Ok()
+}
+
+/// MOVE #$2700, SR from T set: T was set as it started, so it is traced; the frame holds
+/// the SR it wrote.
+let clearing_t_traced = () -> Result<void, string> => {
+  var bus = script_bus([MOVE_TO_SR, 0x2700, NOP], 0, 0)
+  var cpu = start(bus, 0xA700)
+  expect_outcome(step(cpu, bus), Executed)?
+  expect_equal(i64(cpu.pc), i64(TRACE_HANDLER), "PC")?
+  expect_equal(i64(bus.word(SSP - 6)), 0x2700, "stacked SR")?
+  expect_equal(stacked_pc(bus, SSP), i64(CODE + 4), "stacked PC")?
+  Ok()
+}
+
+/// MOVE #$A700, SR from T clear: not traced — but the NOP after it is.
+let setting_t_untraced = () -> Result<void, string> => {
+  var bus = script_bus([MOVE_TO_SR, 0xA700, NOP, NOP], 0, 0)
+  var cpu = start(bus, 0x2700)
+  expect_outcome(step(cpu, bus), Executed)?
+  expect_equal(i64(cpu.pc), i64(CODE + 4), "PC after the MOVE")?
+  expect_outcome(step(cpu, bus), Executed)?
+  expect_equal(i64(cpu.pc), i64(TRACE_HANDLER), "PC after the NOP")?
+  Ok()
+}
+
+/// STOP in user mode with T set: the privilege violation, and no trace after it.
+let privilege_untraced = () -> Result<void, string> => {
+  var bus = script_bus([STOP, 0x2000], 0, 0)
+  var cpu = start(bus, 0x8000)
+  expect_outcome(step(cpu, bus), Executed)?
+  expect_equal(i64(cpu.pc), i64(PRIVILEGE_HANDLER), "PC")?
+  for entry in bus.log {
+    if entry == "r 5 36" { return Err("vector 9 was read: the violation was traced") }
+  }
+  Ok()
+}
+
+/// T set, mask 0, level 1 pending: the NOP's trace is taken first, and the interrupt at
+/// the next step, its frame returning to the trace handler.
+let trace_before_interrupt = () -> Result<void, string> => {
+  var bus = script_bus([NOP, NOP], 1, 0)
+  var cpu = start(bus, 0xA000)
+  expect_outcome(step(cpu, bus), Executed)?
+  expect_equal(i64(cpu.pc), i64(TRACE_HANDLER), "PC after the trace")?
+  expect_outcome(step(cpu, bus), Interrupted(1))?
+  expect_equal(
+    stacked_pc(bus, SSP - 6),
+    i64(TRACE_HANDLER),
+    "the interrupt's stacked PC"
+  )?
+  Ok()
+}
+
+/// STOP with T set: traced, so the processor resumes at the handler rather than stopping.
+let traced_stop = () -> Result<void, string> => {
+  var bus = script_bus([STOP, 0xA700], 0, 0)
+  var cpu = start(bus, 0xA700)
+  expect_outcome(step(cpu, bus), Executed)?
+  expect_equal(i64(cpu.pc), i64(TRACE_HANDLER), "PC")?
+  expect_equal(stacked_pc(bus, SSP), i64(CODE + 4), "stacked PC")?
+  expect_outcome(step(cpu, bus), Executed)?
+  Ok()
+}
+
+/// The PC of the group 1 frame pushed below `top` — SSP for the first exception, six bytes
+/// lower for one taken on top of it.
+let stacked_pc = pure (bus: ScriptBus, top: u32) -> i64 => {
+  let high = i64(bus.word(top - 4))
+  let low = i64(bus.word(top - 2))
+  (high << 16) | low
+}
+
 // ── Setting up and checking ──────────────────────────────────────────────────
 
 /// A CPU at CODE with `sr`, the stacks at SSP and USP, and the program's first two words
@@ -173,6 +302,26 @@ let interrupt_log = pure (level: u8, pc: u32, sr: u16, ssp: u32) -> []string => 
     "r 6 ${HANDLER + 2}",
   ]
 }
+
+/// The bus sequence of a group 1 exception (vector `vector`) pushed at `ssp` with `pc` and
+/// `sr`: four idle cycles, PC low, SR, PC high, the vector, the handler's first two words.
+let exception_log = pure (
+  vector: u32,
+  pc: u32,
+  sr: u16,
+  ssp: u32,
+  handler: u32
+) -> []string => [
+  "n 4",
+  "w 5 ${ssp - 2} ${pc & 0xFFFF}",
+  "w 5 ${ssp - 6} ${sr}",
+  "w 5 ${ssp - 4} ${pc >> 16}",
+  "r 5 ${vector * 4}",
+  "r 5 ${vector * 4 + 2}",
+  "r 6 ${handler}",
+  "n 2",
+  "r 6 ${handler + 2}",
+]
 
 /// Nothing if `got` is `want`; otherwise what differed, as an error `?` passes up.
 let expect_outcome = pure (got: Outcome, want: Outcome) -> Result<void, string> =>
@@ -227,8 +376,14 @@ let script_bus = (program: []u16, level: u8, raise_at: i64) -> ScriptBus => {
   for i, word in program { bus.ram.insert(CODE + u32(2 * i), word) }
   for v in 24..<32 { bus.set_long(u32(v) * 4, HANDLER) }
   bus.set_long(8 * 4, PRIVILEGE_HANDLER)
-  bus.ram.insert(HANDLER, NOP)
-  bus.ram.insert(HANDLER + 2, NOP)
+  bus.set_long(9 * 4, TRACE_HANDLER)
+  bus.set_long(32 * 4, TRAP_HANDLER)
+  bus.set_long(4 * 4, ILLEGAL_HANDLER)
+  for h in [HANDLER, PRIVILEGE_HANDLER, TRACE_HANDLER, TRAP_HANDLER, ILLEGAL_HANDLER] {
+    bus.ram.insert(h, NOP)
+    bus.ram.insert(h + 2, NOP)
+    bus.ram.insert(h + 4, NOP)
+  }
   bus
 }
 
