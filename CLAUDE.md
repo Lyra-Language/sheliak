@@ -86,11 +86,20 @@ frame-at-a-time shortcuts from the start:
   TRAP, TRAPV, CHK or divide-by-zero it follows that exception, into its handler.
 - **BlastEm is the VDP's oracle, as SingleStepTests is the 68000's** (`tests/vdp.sh`):
   test ROMs run on both to a parking loop, and the VDP's memories, registers, address and
-  code registers and the start of work RAM must match byte for byte. BlastEm is GPLv3, so
+  code registers and the start of work RAM must match byte for byte — and the frame, pixel
+  for pixel: Sheliak renders the VDP's output (a CRAM colour and an intensity per pixel),
+  `tests/frame_compare.py` turns it into light through the DAC's 15 levels, and BlastEm's
+  screenshot must be the same image. BlastEm is GPLv3, so
   it is **downloaded, built and run as a separate program** — pinned, under `build/deps/`,
   never linked, committed or shipped. Its source may be read to understand what the
   hardware does, never copied. Where it and the classic documents (genvdp.txt) disagree,
-  it is the authority, and the decision is recorded where the code makes it.
+  it is the authority, and the decision is recorded where the code makes it — unless BlastEm
+  itself looks wrong, when Sheliak does not copy it and the test sidesteps the case, the
+  reason written beside it (the one so far: `draw_shadow_blank` in `src/vdproms.lyra`).
+- **BlastEm is patched only outside what it emulates** (`tests/blastem_patches.py`): a line
+  the no-OpenGL build cannot compile, its no-OpenGL screenshot path (which read the wrong
+  rows), and a `screenshot` debugger command. It runs on SDL's dummy drivers, off-screen,
+  with a scratch HOME holding a config that crops the border.
 - **The test ROMs are ours**, written by `src/vdproms.lyra` with a hand-encoded handful of
   68000 instructions, so the harness needs no assembler. Each sets every register first (as
   a game's start-up does, so neither emulator's power-on values matter), waits for each DMA
@@ -132,6 +141,9 @@ src/m68k/            the 68000 (module m68k):
   movem.lyra         MOVEM (with the extra read), MOVEP
 src/vdp/             the VDP (module vdp):
   vdp.lyra           memories, registers, the control and data ports, status, DMA
+  render.lyra        mode 5 frames: the plane fetch pipeline (fine scroll, column scroll,
+                     the window and its edge bug), sprites and their limits, priority,
+                     shadow/highlight
 src/genesis/         the machine (module genesis):
   bus.lyra           the 68000's memory map: ROM, work RAM, the VDP ports, version, TMSS
 src/vdproms.lyra     writes the VDP test ROMs (and each one's parking address)
@@ -141,6 +153,8 @@ tests/cpu.sh         run the suite, one line per instruction file
 tests/legal.sh       fetch Musashi's table, expand it (musashi_legal.py), run legaltest
 tests/scenarios.sh   run scenariotest
 tests/vdp.sh         fetch and build BlastEm (pinned), run every VDP test ROM on both, compare
+tests/blastem_patches.py  the oracle's three patches (none to anything it emulates)
+tests/frame_compare.py    Sheliak's VDP output against BlastEm's screenshot, pixel for pixel
 ```
 
 ## Status
@@ -162,14 +176,18 @@ once the VDP raises real interrupts.
 `CPUTEST_FLAGS=--no-address-errors` skips tests that end in an address error, to get an
 instruction's ordinary path right first.
 
-**The VDP has its programming interface** (`tests/vdp.sh`, 11 ROMs matching BlastEm):
-VRAM, CRAM, VSRAM, the 24 registers, the control port's command words and pending latch,
-the data port and its auto-increment, the status register's fixed bits, and DMA — VRAM
-fill, VRAM copy, and 68000 → VDP transfers the bus feeds — all taking effect at once.
-Not yet, in the order they are wanted: **rendering** (planes, window, sprites, priority,
-shadow/highlight, with frame dumps compared against BlastEm's), then **timing** (the access
+**The VDP has its programming interface and renders** (`tests/vdp.sh`, 23 ROMs matching
+BlastEm in state and pixel for pixel): VRAM, CRAM, VSRAM, the registers, the command words,
+the data port, DMA; and mode 5 frames — planes A and B at every size and scroll mode, the
+window (left, right, below), sprites (sizes, flips, links, both limits, masking), priority,
+shadow/highlight, 32- and 40-cell widths, the blanked left column. **Every access and every
+line takes effect at once, from the state as it stands**, and the comparison is made against
+BlastEm settled two frames past the parking loop. Not yet, in order: **timing** (the access
 slots, the FIFO's waiting, DMA's pace and the 68000's freeze, the HV counter, the status
-register's live bits, the H and V interrupts), then the corners — 128 KB VRAM mode, the
-8-bit VRAM read (code `1100`), CRAM and VSRAM as DMA targets beyond what the ROMs cover,
-mode 4. **Open**: the VDP's registers at power-on, which the ROMs sidestep and BlastEm
-answers (register 10 = FF) with no hardware citation.
+register's live bits, the H and V interrupts, lines drawn as the beam reaches them), then the
+corners — interlace, 128 KB VRAM mode, the 8-bit VRAM read, mode 4, the SAT cache.
+
+**Open**: the VDP's registers at power-on (the ROMs set every one; BlastEm starts register
+10 at FF, uncited). The partial left block's column scroll follows BlastEm's model-1 AND;
+MD2 VA4 and later differ. In shadow/highlight mode with the left column blanked, BlastEm
+draws pixels 8–15 from the planes' pixels 0–7, which Sheliak does not (see Rules).

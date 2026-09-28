@@ -10,20 +10,22 @@
 # **BlastEm is the oracle, downloaded and built here, never committed or shipped**: GPLv3,
 # so it is run as a separate program, the way the 68000 suite is downloaded as data. Pinned
 # to one revision, built once into build/deps/blastem/. Needs a C compiler, make, python3,
-# pkg-config and SDL2 (`brew install sdl2`). One line of its UI code is patched so the
-# no-OpenGL build compiles (render_sdl.c reads an OpenGL-only field); nothing it emulates is
-# touched. It runs off-screen on SDL's dummy drivers, with a scratch HOME so it writes no
+# pkg-config and SDL2 (`brew install sdl2`). tests/blastem_patches.py patches two things,
+# neither of them emulated: a line the no-OpenGL build cannot compile, and a `screenshot`
+# debugger command. It runs off-screen on SDL's dummy drivers, with a scratch HOME so it writes no
 # configuration of yours, driven through its debugger (`-t -d`, commands on stdin).
 set -euo pipefail
 
 readonly REVISION="9b71c8bd20654e8ac27b457fa55a8bc3b1d9446f"
+# Bumped whenever tests/blastem_patches.py changes, so a cached build is rebuilt with it.
+readonly PATCHES="4"
 readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly DEPS="$ROOT/build/deps/blastem"
 readonly BLASTEM="$DEPS/blastem-$REVISION/blastem"
 readonly WORK="$ROOT/build/vdp"
 
 fetch_blastem() {
-  if [ -x "$BLASTEM" ] && [ "$(cat "$DEPS/REVISION" 2>/dev/null)" = "$REVISION" ]; then
+  if [ -x "$BLASTEM" ] && [ "$(cat "$DEPS/REVISION" 2>/dev/null)" = "$REVISION.$PATCHES" ]; then
     return
   fi
   rm -rf "$DEPS"
@@ -32,20 +34,11 @@ fetch_blastem() {
     "https://www.retrodev.com/repos/blastem/archive/$REVISION.tar.gz"
   tar -xzf "$DEPS/blastem.tar.gz" -C "$DEPS"
   rm -f "$DEPS/blastem.tar.gz"
-  python3 - "$DEPS/blastem-$REVISION/render_sdl.c" <<'EOF'
-import sys
-path = sys.argv[1]
-source = open(path).read()
-line = ("\tprocess_framebuffer(which < FRAMEBUFFER_USER_START ? texture_buf : "
-        "extras[which - FRAMEBUFFER_USER_START].texture_buf, which, width);")
-assert source.count(line) == 1, "render_sdl.c changed; revisit the NOGL patch"
-source = source.replace(line, "#ifdef DISABLE_OPENGL\n\tprocess_framebuffer(texture_buf, which, width);\n#else\n" + line + "\n#endif")
-open(path, "w").write(source)
-EOF
+  python3 "$ROOT/tests/blastem_patches.py" "$DEPS/blastem-$REVISION"
   echo "building BlastEm $REVISION (once; a few minutes)"
   (cd "$DEPS/blastem-$REVISION" && make NOGL=1 LIBS=sdl2 blastem -j8 >"$DEPS/build.log" 2>&1) ||
     { tail -20 "$DEPS/build.log"; exit 1; }
-  printf '%s' "$REVISION" >"$DEPS/REVISION"
+  printf '%s' "$REVISION.$PATCHES" >"$DEPS/REVISION"
 }
 
 # Run ROM on BlastEm to PARK, then two frames more — the program is parked, so nothing new is
@@ -54,7 +47,7 @@ EOF
 # settled state is what the two can agree on.
 run_blastem() {
   local rom="$1" park="$2" out="$3"
-  mkdir -p "$out" "$WORK/home"
+  mkdir -p "$out"
   cat >"$out/script.txt" <<EOF
 advance 0x$park
 frames 2
@@ -65,6 +58,8 @@ save/b "$out/regs.bin" vdp:reg
 save/b "$out/ram.bin" [0xFF0000] 256
 print vdp:address
 print vdp:cd
+screenshot "$out/frame.ppm"
+frames 1
 quit
 EOF
   SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy HOME="$WORK/home" \
@@ -89,7 +84,23 @@ EOF
   printf 'address %s\ncd %s\n' "$address" "$cd" >"$out/state.txt"
 }
 
+# BlastEm's configuration in the scratch home: its defaults, with the NTSC overscan set to
+# hide the border entirely (the values its own default.cfg suggests for that), so a
+# screenshot is exactly the 320x224 active display.
+configure_blastem() {
+  local dir="$WORK/home/.config/blastem"
+  mkdir -p "$dir"
+  python3 - "$DEPS/blastem-$REVISION/default.cfg" "$dir/blastem.cfg" <<'EOF'
+import sys
+source = open(sys.argv[1]).read()
+old = "\t\t\ttop 2\n\t\t\tbottom 1\n"
+assert source.count(old) >= 1, "default.cfg changed; revisit the overscan override"
+open(sys.argv[2], "w").write(source.replace(old, "\t\t\ttop 11\n\t\t\tbottom 8\n", 1))
+EOF
+}
+
 fetch_blastem
+configure_blastem
 "$ROOT/build.sh"
 "$ROOT/build/vdproms" "$WORK/roms" >/dev/null
 
@@ -109,10 +120,17 @@ for name in "${names[@]}"; do
   for file in vram.bin cram.bin vsram.bin regs.bin ram.bin state.txt; do
     cmp -s "$WORK/blastem/$name/$file" "$WORK/sheliak/$name/$file" || differs+=("$file")
   done
+  # register_bits sets V30 on an NTSC console, a mode no NTSC display shows; its frame is
+  # not compared.
+  if [ "$name" != register_bits ] && ! "$ROOT/tests/frame_compare.py" "$WORK/sheliak/$name/frame.bin" "$WORK/blastem/$name/frame.ppm" \
+    >"$WORK/sheliak/$name/frame.txt"; then
+    differs+=("frame")
+  fi
   if [ ${#differs[@]} -eq 0 ]; then
     echo "$name: matches"
   else
     echo "$name: differs in ${differs[*]}"
+    sed 's/^/    /' "$WORK/sheliak/$name/frame.txt"
     failed=$((failed + 1))
   fi
 done

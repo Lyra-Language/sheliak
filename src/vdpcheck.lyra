@@ -5,12 +5,14 @@
 // Resets the 68000 on a Genesis bus holding ROM and steps it until the PC reaches
 // PARK_ADDRESS (hex) — the ROM's closing `bra.s *` — then writes, into OUT_DIR, the files
 // BlastEm's debugger is asked for: vram.bin, cram.bin, vsram.bin (words big-endian),
-// regs.bin, ram.bin (the first 256 bytes of work RAM), and state.txt (address and code
-// registers). Exits 1 if the ROM never parks (a step limit), or takes an exception.
+// regs.bin, ram.bin (the first 256 bytes of work RAM), state.txt (address and code
+// registers), and frame.bin — the frame the VDP's state draws (width and height, then a
+// pixel per u16, all big-endian; tests/frame_compare.py reads it). Exits 1 if the ROM never parks (a step limit), or takes an exception.
 
 import std.io.{ read_bytes, write_bytes, write_file, create_dir_all }
 import m68k.{ step, reset, cpu_with }
 import genesis.{ GenesisBus, genesis_bus }
+import vdp.{ render_frame }
 
 const STEP_LIMIT: i64 = 1000000
 const ERROR_LOOP: u32 = 0x1FC
@@ -72,12 +74,24 @@ let dump = (bus: GenesisBus, out: string) -> u8 => {
   var regs: []u8 = []
   for r in v.regs { regs.push(r) }
   let ram = [i in 0..<256 | bus.ram[i]]
+  let frame = render_frame(v)
+  var image: []u8 = [
+    u8(frame.width >> 8),
+    u8(frame.width & 0xFF),
+    u8(frame.height >> 8),
+    u8(frame.height & 0xFF),
+  ]
+  for p in frame.pixels {
+    image.push(u8(p >> 8))
+    image.push(u8(p & 0xFF))
+  }
   let written = write_bytes(
     "${out}/vram.bin",
     v.vram
   ) && write_bytes("${out}/cram.bin", cram) &&
     write_bytes("${out}/vsram.bin", vsram) && write_bytes("${out}/regs.bin", regs) &&
     write_bytes("${out}/ram.bin", ram) &&
+    write_bytes("${out}/frame.bin", image) &&
     write_file("${out}/state.txt", "address ${v.address}\ncd ${u32(v.code)}\n")
   if written { 0 } else { 1 }
 }

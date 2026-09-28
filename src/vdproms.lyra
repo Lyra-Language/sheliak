@@ -34,7 +34,7 @@ let main = () -> u8 => {
     return 1
   }
   for name in TESTS {
-    var a = Asm { code: [] }
+    var a = Asm { code: [], blobs: [] }
     tmss(a)
     // Every register set first, as a game's start-up does, so what the VDP holds at power-on
     // — which differs between emulators, and is not well documented for the hardware — plays
@@ -69,6 +69,18 @@ const TESTS: []string = [
   "copy",
   "dma_68k",
   "dma_disabled",
+  "draw_planes",
+  "draw_line_scroll",
+  "draw_cell_scroll",
+  "draw_window_left",
+  "draw_window_down",
+  "draw_sprites",
+  "draw_sprite_limits",
+  "draw_shadow",
+  "draw_shadow_blank",
+  "draw_h32",
+  "draw_left_blank",
+  "draw_wide_plane",
 ]
 
 /// The code of the test `name`. (A `match` rather than a table of functions: each takes the
@@ -84,7 +96,19 @@ let body = (name: string, a: mut Asm) -> void => match name {
   "fill" => fill(a),
   "copy" => copy(a),
   "dma_68k" => transfers(a),
-  _ => dma_disabled(a),
+  "dma_disabled" => dma_disabled(a),
+  "draw_planes" => draw_planes(a),
+  "draw_line_scroll" => draw_line_scroll(a),
+  "draw_cell_scroll" => draw_cell_scroll(a),
+  "draw_window_left" => draw_window_left(a),
+  "draw_window_down" => draw_window_down(a),
+  "draw_sprites" => draw_sprites(a),
+  "draw_sprite_limits" => draw_sprite_limits(a),
+  "draw_shadow" => draw_shadow(a),
+  "draw_shadow_blank" => draw_shadow_blank(a),
+  "draw_h32" => draw_h32(a),
+  "draw_left_blank" => draw_left_blank(a),
+  _ => draw_wide_plane(a),
 }
 
 // ── The tests ────────────────────────────────────────────────────────────────
@@ -265,6 +289,286 @@ let dma_disabled = (a: mut Asm) -> void => {
   a.data(0x5432)
 }
 
+// ── Scenes ───────────────────────────────────────────────────────────────────
+//
+// Each draws a still frame: a common layout (below), the data every scene shares uploaded
+// by 68000 → VDP DMA as a game would, then what the scene is about. VRAM: patterns at 0000,
+// the window's name table at A000, horizontal scroll at B800, sprites at BC00, plane A at
+// C000, plane B at E000.
+
+const WINDOW_TABLE: u32 = 0xA000
+const HSCROLL_TABLE: u32 = 0xB800
+const SPRITE_TABLE: u32 = 0xBC00
+const PLANE_A: u32 = 0xC000
+const PLANE_B: u32 = 0xE000
+/// Patterns 0–63 are the generated ones; 64 and 65 are solid colours 14 and 15, the
+/// shadow/highlight operators' pixels.
+const PATTERNS: i64 = 64
+
+/// The layout every scene starts from: 40-cell, 64×32 planes, full-screen scroll, no
+/// window, display on — and the palette, patterns, both planes, a first sprite that ends
+/// the list, and zero scroll.
+let scene = (a: mut Asm, wide: bool) -> void => {
+  a.reg(0, 0x04)
+  a.reg(1, 0x14)
+  a.reg(2, i64(PLANE_A >> 10))
+  a.reg(3, i64(WINDOW_TABLE >> 10))
+  a.reg(4, i64(PLANE_B >> 13))
+  a.reg(5, i64(SPRITE_TABLE >> 9))
+  a.reg(7, 0x21)
+  a.reg(11, 0)
+  a.reg(12, if wide { 0x81 } else { 0x00 })
+  a.reg(13, i64(HSCROLL_TABLE >> 10))
+  a.reg(15, 2)
+  a.reg(16, 0x01)
+  a.reg(17, 0)
+  a.reg(18, 0)
+  a.upload(words_to_bytes(palette()), 0x3, 0)
+  a.upload(patterns(), 0x1, 0)
+  a.upload(name_table(64, 32, 1), 0x1, PLANE_A)
+  a.upload(name_table(64, 32, 2), 0x1, PLANE_B)
+  a.upload(name_table(64, 32, 3), 0x1, WINDOW_TABLE)
+  a.upload(sprite_entry(0, 0, 0, 0, 0, 0), 0x1, SPRITE_TABLE)
+  a.upload([0; 8], 0x1, HSCROLL_TABLE)
+  a.upload(words_to_bytes([0; 40]), 0x5, 0)
+}
+
+/// The display switched on, last, as a game does.
+let display_on = (a: mut Asm) -> void => a.reg(1, 0x54)
+
+/// Planes A and B with full-screen scroll in both directions: priorities, flips and
+/// transparency mixed across both name tables.
+let draw_planes = (a: mut Asm) -> void => {
+  scene(a, true)
+  a.upload(words_to_bytes([5, 0x3F3]), 0x1, HSCROLL_TABLE)
+  a.upload(words_to_bytes([3, 17]), 0x5, 0)
+  display_on(a)
+}
+
+/// Per-line horizontal scroll and per-column (2-cell) vertical scroll.
+let draw_line_scroll = (a: mut Asm) -> void => {
+  scene(a, true)
+  a.reg(11, 0x07)
+  a.upload(
+    words_to_bytes([y in 0..<224 * 2 | if (y & 1) == 0 { u16((y / 2 * 3) & 0x3FF) } else { u16((1024 - y / 2) & 0x3FF) }]),
+    0x1,
+    HSCROLL_TABLE
+  )
+  a.upload(
+    words_to_bytes([c in 0..<40 | if (c & 1) == 0 { u16(c / 2 * 5) } else { u16(c / 2 * 7 + 1) }]),
+    0x5,
+    0
+  )
+  display_on(a)
+}
+
+/// Per-cell-row horizontal scroll: one pair of values per 8 lines, 32 bytes apart.
+let draw_cell_scroll = (a: mut Asm) -> void => {
+  scene(a, true)
+  a.reg(11, 0x02)
+  var table: []u16 = [0; 224 * 2]
+  for row in 0..<28 {
+    table[row * 16] = u16(row * 11)
+    table[row * 16 + 1] = u16((1024 - row * 6) & 0x3FF)
+  }
+  a.upload(words_to_bytes(table), 0x1, HSCROLL_TABLE)
+  display_on(a)
+}
+
+/// The window over the left 12 cells, plane A scrolled beside it (the window is not).
+let draw_window_left = (a: mut Asm) -> void => {
+  scene(a, true)
+  a.reg(17, 0x06)
+  a.upload(words_to_bytes([21, 0]), 0x1, HSCROLL_TABLE)
+  a.upload(words_to_bytes([9, 0]), 0x5, 0)
+  display_on(a)
+}
+
+/// The window right of cell 12 and below row 20: on rows 20 onward it spans the line.
+let draw_window_down = (a: mut Asm) -> void => {
+  scene(a, true)
+  a.reg(17, 0x86)
+  a.reg(18, 0x94)
+  display_on(a)
+}
+
+/// Sixteen sprites, one of each size, in a list whose links skip around: flips, both
+/// priorities, overlapping one another, and cut by every edge of the screen.
+let draw_sprites = (a: mut Asm) -> void => {
+  scene(a, true)
+  var table: []u8 = [0; 16 * 8]
+  let order = [0, 5, 2, 9, 12, 1, 7, 15, 3, 10, 6, 13, 4, 8, 11, 14]
+  for i, s in order {
+    let next = if i + 1 < order.len() { order[i + 1] } else { 0 }
+    let x = 40 + s * 19 - (if s == 3 { 70 } else { 0 }) + (if s == 14 { 150 } else { 0 })
+    let y = 16 + s * 11 - (if s == 7 { 90 } else { 0 }) + (if s == 15 { 50 } else { 0 })
+    let attributes = ((s & 1) << 15) | ((s & 3) << 13) | ((s & 4) << 10) | ((s & 8) << 8) | ((s * 5) % 48)
+    for j,
+    b in sprite_entry(x, y, s & 3, s >> 2, next, attributes) { table[s * 8 + j] = b }
+  }
+  a.upload(table, 0x1, SPRITE_TABLE)
+  display_on(a)
+}
+
+/// Sprite limits on one band of lines: 24 sprites across it (the 21st and later are not
+/// drawn), a band where their width passes 320 pixels, and a sprite at x = 0 masking the
+/// ones after it.
+let draw_sprite_limits = (a: mut Asm) -> void => {
+  scene(a, true)
+  var table: []u8 = []
+  for i in 0..<24 {
+    table = [...table, ...sprite_entry(8 + i * 13, 40, 0, 1, i + 1, 10 + i)]
+  }
+  for i in 0..<12 {
+    table = [...table, ...sprite_entry(i * 30, 100, 3, 0, 25 + i, 20 + i)]
+  }
+  table = [...table, ...sprite_entry(-128, 160, 1, 0, 37, 30)]
+  table = [...table, ...sprite_entry(60, 158, 2, 1, 38, 31)]
+  table = [...table, ...sprite_entry(70, 170, 2, 1, 0, 32)]
+  a.upload(table, 0x1, SPRITE_TABLE)
+  display_on(a)
+}
+
+/// Shadow/highlight: planes of mixed priority, and sprites of palette 3's operator colours
+/// (14 highlights, 15 shadows) over them, beside ordinary sprites of both priorities.
+let draw_shadow = (a: mut Asm) -> void => {
+  scene(a, true)
+  a.reg(12, 0x89)
+  var table: []u8 = []
+  table = [...table, ...sprite_entry(20, 30, 3, 3, 1, 0x6000 | PATTERNS)]
+  table = [...table, ...sprite_entry(100, 60, 3, 3, 2, 0x6000 | (PATTERNS + 1))]
+  table = [...table, ...sprite_entry(180, 90, 3, 3, 3, 0x8000 | 0x2000 | 12)]
+  table = [...table, ...sprite_entry(230, 120, 3, 3, 4, 0x4000 | 17)]
+  table = [...table, ...sprite_entry(140, 140, 3, 3, 0, 0xE000 | PATTERNS)]
+  a.upload(table, 0x1, SPRITE_TABLE)
+  display_on(a)
+}
+
+/// Shadow/highlight with the leftmost 8 pixels blanked, which this mode shows as the backdrop
+/// shadowed. Each plane's first two cell columns are the same, because BlastEm draws pixels
+/// 8–15 of that first 16-pixel column from the planes' pixels 0–7 in this mode alone (its
+/// shadow/highlight path does not step the plane offsets past the blanked pixels, where its
+/// normal path does). That looks like BlastEm's, not the hardware's; Sheliak does not copy
+/// it, and this scene leaves it unexercised rather than let either side's guess stand.
+let draw_shadow_blank = (a: mut Asm) -> void => {
+  scene(a, true)
+  a.reg(0, 0x24)
+  a.reg(12, 0x89)
+  a.upload(first_columns_alike(name_table(64, 32, 1), 64), 0x1, PLANE_A)
+  a.upload(first_columns_alike(name_table(64, 32, 2), 64), 0x1, PLANE_B)
+  display_on(a)
+}
+
+/// A name table with each row's second entry made a copy of its first.
+let first_columns_alike = pure (table: []u8, columns: i64) -> []u8 => {
+  var out = table
+  for r in 0..<(table.len() / (columns * 2)) {
+    let at = r * columns * 2
+    out[at + 2] = table[at]
+    out[at + 3] = table[at + 1]
+  }
+  out
+}
+
+/// 32-cell mode: 256 pixels wide, a 32×32 plane, the window over the left 4 cells.
+let draw_h32 = (a: mut Asm) -> void => {
+  scene(a, false)
+  a.reg(16, 0x00)
+  a.reg(17, 0x02)
+  a.upload(name_table(32, 32, 4), 0x1, PLANE_B)
+  a.upload(sprite_entry(200, 50, 2, 2, 0, 25), 0x1, SPRITE_TABLE)
+  display_on(a)
+}
+
+/// Register 0 bit 5: the leftmost 8 pixels show the background colour.
+let draw_left_blank = (a: mut Asm) -> void => {
+  scene(a, true)
+  a.reg(0, 0x24)
+  a.upload(words_to_bytes([3, 0]), 0x1, HSCROLL_TABLE)
+  display_on(a)
+}
+
+/// A 128×32 plane, scrolled far enough to wrap.
+let draw_wide_plane = (a: mut Asm) -> void => {
+  scene(a, true)
+  a.reg(16, 0x03)
+  a.upload(name_table(128, 32, 5), 0x1, PLANE_A)
+  a.upload(name_table(128, 32, 6), 0x1, PLANE_B)
+  a.upload(words_to_bytes([700, 300]), 0x1, HSCROLL_TABLE)
+  display_on(a)
+}
+
+// ── Scene data ───────────────────────────────────────────────────────────────
+
+/// 64 colours, every one different: red from bits 0–2 of the index, green from 3–5, blue
+/// from a mix of both, so neighbouring indices differ in two components.
+let palette = pure () -> []u16 =>
+  [i in 0..<64 | u16((((i * 5 + 3) & 7) << 9) | (((i >> 3) & 7) << 5) | ((i & 7) << 1))]
+
+/// The patterns: 64 generated ones, asymmetric in both directions (so a flip shows) and
+/// with transparent pixels scattered through them, then two solid ones of colours 14, 15.
+let patterns = pure () -> []u8 => {
+  var bytes: []u8 = []
+  for t in 0..<PATTERNS {
+    for y in 0..<8 {
+      for pair in 0..<4 {
+        let left = pattern_pixel(t, pair * 2, y)
+        let right = pattern_pixel(t, pair * 2 + 1, y)
+        bytes.push(u8((left << 4) | right))
+      }
+    }
+  }
+  for solid in [0xEE, 0xFF] {
+    for _ in 0..<32 { bytes.push(u8(solid)) }
+  }
+  bytes
+}
+
+let pattern_pixel = pure (t: i64, x: i64, y: i64) -> i64 =>
+  (t * 7 + x * 3 + y * 5 + x * y) & 15
+
+/// A name table `columns` × `rows`, entries varied by `seed`: pattern, palette, both flips
+/// and priority all changing across it.
+let name_table = pure (columns: i64, rows: i64, seed: i64) -> []u8 => {
+  var words: []u16 = []
+  for r in 0..<rows {
+    for c in 0..<columns {
+      let pattern = (c * 3 + r * 5 + seed * 7) % PATTERNS
+      let pal = ((c + r + seed) >> 1) & 3
+      let hflip = if (c + seed) % 3 == 0 { 0x0800 } else { 0 }
+      let vflip = if (r + seed) % 4 == 0 { 0x1000 } else { 0 }
+      let high = if (c * r + seed) % 5 == 0 { 0x8000 } else { 0 }
+      words.push(u16(high | vflip | hflip | (pal << 13) | pattern))
+    }
+  }
+  words_to_bytes(words)
+}
+
+/// An 8-byte sprite entry: screen position (x, y), size in cells less one (w, h), the link,
+/// and the attribute word (priority, palette, flips, first pattern).
+let sprite_entry = pure (
+  x: i64,
+  y: i64,
+  w: i64,
+  h: i64,
+  link: i64,
+  attributes: i64
+) -> []u8 => words_to_bytes([
+  u16((y + 128) & 0x3FF),
+  u16((w << 10) | (h << 8) | link),
+  u16(attributes),
+  u16((x + 128) & 0x1FF),
+])
+
+let words_to_bytes = pure (words: []u16) -> []u8 => {
+  var bytes: []u8 = []
+  for w in words {
+    bytes.push(u8(w >> 8))
+    bytes.push(u8(w & 0xFF))
+  }
+  bytes
+}
+
 // ── A cartridge ──────────────────────────────────────────────────────────────
 
 /// The ROM image: vectors, header, the code at CODE, the DMA tables, zero padding.
@@ -286,6 +590,7 @@ let rom = (a: Asm) -> []u8 => {
     put_word(image, i64(TABLE) + 2 * i, u16(0x0102 + i * 0x0303))
     put_word(image, i64(BOUNDARY_TABLE) + 2 * i, u16(0x7700 + i))
   }
+  for i, b in a.blobs { image[i64(DATA) + i] = b }
   image
 }
 
@@ -314,6 +619,20 @@ let tmss = (a: mut Asm) -> void => {
 
 struct Asm {
   code: []u8,
+  /// Data placed in ROM from DATA on, for DMA to upload.
+  blobs: []u8,
+}
+
+/// Where scene data goes in ROM: after the tables, before the 128 KB boundary table.
+const DATA: u32 = 0x4000
+
+/// Place `bytes` in ROM (word-aligned) and upload them by DMA into the memory `target`
+/// names (1 VRAM, 3 CRAM, 5 VSRAM) at `address`, waiting for it to finish.
+let upload = (self: mut Asm, bytes: []u8, target: i64, address: u32) -> void => {
+  let at = DATA + u32(self.blobs.len())
+  for b in bytes { self.blobs.push(b) }
+  if (self.blobs.len() & 1) != 0 { self.blobs.push(0) }
+  self.dma_68k(at, (bytes.len() + 1) / 2, target, address)
 }
 
 let w = (self: mut Asm, word: u16) -> void => {
