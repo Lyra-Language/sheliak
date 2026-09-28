@@ -92,23 +92,20 @@ src/m68k/            the 68000 (module m68k):
   bits.lyra          BTST, BCHG, BCLR, BSET, dynamic and static
   registers.lyra     SWAP, EXT, EXG
   unary.lyra         NEGX, CLR, NEG, NOT, TST (CLR reads before it writes), TAS
+  movem.lyra         MOVEM (with the extra read), MOVEP
 tests/fetch.sh       download the pinned suite
 tests/cpu.sh         run the suite, one line per instruction file
 ```
 
 ## Status
 
-The 68000 passes every test in 120 of the suite's 124 files (967,798 tests, address errors
-included): NOP, MOVEQ, MOVE, MOVEA, ADD/SUB/AND/OR/EOR/CMP with their A, X, M, I and Q
-forms, all shifts and rotates, control flow (Bcc, BSR, DBcc, Scc, JMP, JSR, RTS, RTR, LEA,
-PEA, LINK, UNLK), the exception group (TRAP, TRAPV, CHK, RTE, SR/CCR moves and
-immediates, MOVE USP, RESET), multiply/divide, BCD, the bit operations (BTST, BCHG, BCLR,
-BSET), SWAP, EXT, EXG, NEG, NEGX, NOT, CLR, TST and TAS. The divide-by-zero frame's PC
-rests on the suite's single such test (see `divide_by_zero`).
+The 68000 passes **the whole suite**: all 124 files, 1,000,058 tests, address errors
+included, every instruction the chip has (the two known-bad tests aside). The
+divide-by-zero frame's PC rests on the suite's single such test (see `divide_by_zero`),
+and the privilege violation on no test at all (see Rules).
 
 Not yet: interrupts (the IPL input and autovectored acknowledge — wanted with the VDP),
-trace (the T bit), and the illegal-instruction and line A/F exceptions, which wait for
-`Unimplemented` to mean only a genuinely illegal opcode. Every other opcode answers
-`Unimplemented`, which the runner counts apart from failures.
-`CPUTEST_FLAGS=--no-address-errors` skips tests that end in one, to get an instruction's
-ordinary path right first.
+trace (the T bit), and the illegal-instruction and line A/F exceptions. Until those land,
+an opcode no instruction claims answers `Unimplemented`, which the runner counts apart
+from failures; the suite has none left. `CPUTEST_FLAGS=--no-address-errors` skips tests
+that end in one, to get an instruction's ordinary path right first.

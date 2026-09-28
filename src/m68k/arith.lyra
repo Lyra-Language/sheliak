@@ -53,7 +53,7 @@ let cmp_eor_group<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outco
 
 /// Group 0's immediate arithmetic: ORI, ANDI, SUBI, ADDI, EORI, CMPI `#imm,<ea>`. Bits 11–8
 /// name the operation. The CCR/SR forms and the bit operations (`bits.lyra`) are dispatched
-/// from here too; MOVEP is not here yet.
+/// from here too, as is MOVEP (`movem.lyra`).
 let immediate<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
   match op {
     0x003C | 0x007C | 0x023C | 0x027C | 0x0A3C | 0x0A7C =>
@@ -61,7 +61,7 @@ let immediate<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome =
     _ => {},
   }
   if (op & 0x0100) != 0 {
-    if source_mode(op) == 1 { return Unimplemented(op) }
+    if source_mode(op) == 1 { return move_peripheral(cpu, bus, op) }
     return bit_operation(cpu, bus, op, false)
   }
   if (op & 0x0F00) == 0x0800 { return bit_operation(cpu, bus, op, true) }

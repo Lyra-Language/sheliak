@@ -172,7 +172,7 @@ let moveq<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
 
 /// Group 4, the miscellany, as far as it is implemented: NOP, the returns, TRAP, TRAPV,
 /// RESET, MOVE USP, the SR and CCR moves, CHK, NBCD, NEGX, CLR, NEG, NOT, TST, TAS, SWAP,
-/// EXT, LINK, UNLK, JMP, JSR, LEA, PEA.
+/// EXT, LINK, UNLK, MOVEM, JMP, JSR, LEA, PEA.
 let miscellaneous<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
   match op {
     0x4E70 => return reset_peripherals(cpu, bus),
@@ -198,6 +198,9 @@ let miscellaneous<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outco
   if (op & 0xFFC0) == 0x4AC0 && alterable { return test_and_set(cpu, bus, op) }
   if (op & 0xFFF8) == 0x4E50 { return link(cpu, bus, reg) }
   if (op & 0xFFF8) == 0x4E58 { return unlink(cpu, bus, reg) }
+  if (op & 0xFB80) == 0x4880 && is_movem_operand((op & 0x0400) != 0, mode, reg) {
+    return move_multiple(cpu, bus, op)
+  }
   if (op & 0xFFF8) == 0x4840 { return swap_halves(cpu, bus, reg) }
   if (op & 0xFFF8) == 0x4880 { return extend_sign(cpu, bus, reg, WORD) }
   if (op & 0xFFF8) == 0x48C0 { return extend_sign(cpu, bus, reg, LONG) }
