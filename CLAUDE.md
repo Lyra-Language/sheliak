@@ -87,21 +87,24 @@ src/m68k/            the 68000 (module m68k):
   muldiv.lyra        MULU, MULS, DIVU, DIVS; data-dependent timing (Cwik's division model)
   bcd.lyra           ABCD, SBCD, NBCD, with the chip's undocumented N and V
   bits.lyra          BTST, BCHG, BCLR, BSET, dynamic and static
+  registers.lyra     SWAP, EXT, EXG
 tests/fetch.sh       download the pinned suite
 tests/cpu.sh         run the suite, one line per instruction file
 ```
 
 ## Status
 
-The 68000 passes every test in 98 of the suite's 124 files (790,368 tests, address errors
+The 68000 passes every test in 102 of the suite's 124 files (822,628 tests, address errors
 included): NOP, MOVEQ, MOVE, MOVEA, ADD/SUB/AND/OR/EOR/CMP with their A, X, M, I and Q
 forms, all shifts and rotates, control flow (Bcc, BSR, DBcc, Scc, JMP, JSR, RTS, RTR, LEA,
 PEA), the exception group (TRAP, TRAPV, CHK, RTE, SR/CCR moves and immediates, MOVE USP,
-RESET), multiply/divide, BCD, and the bit operations (BTST, BCHG, BCLR, BSET). The
-divide-by-zero frame's PC rests on the suite's single such test (see `divide_by_zero`).
+RESET), multiply/divide, BCD, the bit operations (BTST, BCHG, BCLR, BSET), SWAP, EXT and
+EXG. The divide-by-zero frame's PC rests on the suite's single such test (see
+`divide_by_zero`).
 
 Not yet: interrupts (the IPL input and autovectored acknowledge — wanted with the VDP),
 trace (the T bit), and the illegal-instruction and line A/F exceptions, which wait for
 `Unimplemented` to mean only a genuinely illegal opcode. Every other opcode answers
-`Unimplemented`, which the runner counts apart from failures. `CPUTEST_FLAGS=--no-address-errors` skips tests that end in one, to get an
-instruction's ordinary path right first.
+`Unimplemented`, which the runner counts apart from failures.
+`CPUTEST_FLAGS=--no-address-errors` skips tests that end in one, to get an instruction's
+ordinary path right first.

@@ -1,0 +1,70 @@
+module m68k
+//! Register-only rearrangements: SWAP, EXT and EXG. No operand is in memory, so each is
+//! the prefetch and, for EXG, two idle cycles.
+
+/// SWAP Dn: the two halves exchanged. N and Z from the 32-bit result, V and C cleared, X
+/// kept.
+let swap_halves<b> where b: Bus = (cpu: mut Cpu, bus: mut b, dn: i64) -> Outcome => {
+  let v = cpu.d[dn]
+  let swapped = (v << 16) | (v >> 16)
+  prefetch(cpu, bus)
+  if cpu.faulted { return Executed }
+  cpu.d[dn] = swapped
+  set_logic_flags(cpu, swapped, 0x80000000)
+  Executed
+}
+
+/// EXT.W Dn (a byte to a word) or EXT.L Dn (a word to a long): the sign extended, flags
+/// from the result as SWAP's are.
+let extend_sign<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  dn: i64,
+  size: i64
+) -> Outcome => {
+  let v = cpu.d[dn]
+  let result = if size == WORD {
+    u32(i32(i8(v & 0xFF))) & 0xFFFF
+  } else {
+    sign_extend_word(u16(v & 0xFFFF))
+  }
+  prefetch(cpu, bus)
+  if cpu.faulted { return Executed }
+  write_data_register(cpu, dn, size, result)
+  set_logic_flags(cpu, result, sign_bit(size))
+  Executed
+}
+
+/// EXG, in group 12 where AND would have a register destination: `0xC140` Dx,Dy,
+/// `0xC148` Ax,Ay, `0xC188` Dx,Ay (bits 8–3). All 32 bits; no flags.
+let exchange<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
+  let x = destination_reg(op)
+  let y = source_reg(op)
+  prefetch(cpu, bus)
+  cpu_idle(cpu, bus, 2)
+  if cpu.faulted { return Executed }
+  match op & 0x01F8 {
+    0x0140 => {
+      let t = cpu.d[x]
+      cpu.d[x] = cpu.d[y]
+      cpu.d[y] = t
+    },
+    0x0148 => {
+      let t = cpu.a[x]
+      cpu.a[x] = cpu.a[y]
+      cpu.a[y] = t
+    },
+    _ => {
+      let t = cpu.d[x]
+      cpu.d[x] = cpu.a[y]
+      cpu.a[y] = t
+    },
+  }
+  Executed
+}
+
+/// Whether `op` (group 12) is one of EXG's three forms.
+let is_exchange = pure (op: u16) -> bool => {
+  let form = op & 0x01F8
+  form == 0x0140 || form == 0x0148 || form == 0x0188
+}

@@ -30,9 +30,10 @@ let arith_group<b> where b: Bus = (
   if opmode < 4 { return to_data_register(cpu, bus, op, alu_op, size) }
   if source_mode(op) > 1 { return to_memory(cpu, bus, op, alu_op, size) }
   if is_add_sub { return extended(cpu, bus, op, alu_op == Sub, size) }
-  // AND and OR spend op-mode 4 with a register ea on ABCD and SBCD; the rest (EXG) is not
-  // here yet.
+  // AND and OR spend op-mode 4 with a register ea on ABCD and SBCD, and AND the rest on
+  // EXG.
   if opmode == 4 { return bcd_arithmetic(cpu, bus, op, alu_op == Or) }
+  if alu_op == And && is_exchange(op) { return exchange(cpu, bus, op) }
   Unimplemented(op)
 }
 
