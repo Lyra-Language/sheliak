@@ -34,16 +34,13 @@ let main = () -> u8 => {
   if failures > 0 { 1 } else { 0 }
 }
 
-/// A check that held. (`Result<void, string>` has no `Ok` to build yet — Lyra's todo.md.)
-data Checked = Checked
-
 /// One scenario: a name and the check, which fails with what went wrong.
 struct Scenario {
   name: string,
-  run: () -> Result<Checked, string>,
+  run: () -> Result<void, string>,
 }
 
-let scenarios = () -> []Scenario => [
+let scenarios = pure () -> []Scenario => [
   Scenario { name: "a level above the mask is taken", run: above_mask },
   Scenario { name: "a level at the mask is not", run: at_mask },
   Scenario { name: "level 7 is taken once per rise", run: level_7_edge },
@@ -54,7 +51,7 @@ let scenarios = () -> []Scenario => [
 ]
 
 /// Level 4 over mask 3: NOP samples it with its prefetch, and the next step takes it.
-let above_mask = () -> Result<Checked, string> => {
+let above_mask = () -> Result<void, string> => {
   var bus = script_bus([NOP, NOP], 4, 0)
   var cpu = start(bus, 0x2300)
   expect_outcome(step(cpu, bus), Executed)?
@@ -66,41 +63,41 @@ let above_mask = () -> Result<Checked, string> => {
   expect_equal(i64(cpu.sr), 0x2400, "SR")?
   expect_equal(i64(cpu.a[7]), i64(SSP - 6), "SSP")?
   expect_equal(i64(cpu.pc), i64(HANDLER), "PC")?
-  Ok(Checked)
+  Ok()
 }
 
 /// Level 4 at mask 4: never taken.
-let at_mask = () -> Result<Checked, string> => {
+let at_mask = () -> Result<void, string> => {
   var bus = script_bus([NOP, NOP, NOP], 4, 0)
   var cpu = start(bus, 0x2400)
   for _ in 0..<3 { expect_outcome(step(cpu, bus), Executed)? }
-  Ok(Checked)
+  Ok()
 }
 
 /// Level 7 over mask 7: taken on the rise, not again while it is held.
-let level_7_edge = () -> Result<Checked, string> => {
+let level_7_edge = () -> Result<void, string> => {
   var bus = script_bus([NOP, NOP], 7, 0)
   var cpu = start(bus, 0x2700)
   expect_outcome(step(cpu, bus), Executed)?
   expect_outcome(step(cpu, bus), Interrupted(7))?
   expect_outcome(step(cpu, bus), Executed)?
   expect_outcome(step(cpu, bus), Executed)?
-  Ok(Checked)
+  Ok()
 }
 
 /// EXG prefetches, then idles two cycles; level 1 rises in the idle, after the prefetch
 /// sampled the pins. The next instruction runs first, and its prefetch sees it.
-let after_last_fetch = () -> Result<Checked, string> => {
+let after_last_fetch = () -> Result<void, string> => {
   var bus = script_bus([EXG_D0_D1, NOP, NOP], 1, 5)
   var cpu = start(bus, 0x2000)
   expect_outcome(step(cpu, bus), Executed)?
   expect_outcome(step(cpu, bus), Executed)?
   expect_outcome(step(cpu, bus), Interrupted(1))?
-  Ok(Checked)
+  Ok()
 }
 
 /// User mode, mask 0, level 2: the frame goes on the supervisor stack, USP is kept.
-let from_user_mode = () -> Result<Checked, string> => {
+let from_user_mode = () -> Result<void, string> => {
   var bus = script_bus([NOP, NOP], 2, 0)
   var cpu = start(bus, 0x0000)
   expect_outcome(step(cpu, bus), Executed)?
@@ -109,12 +106,12 @@ let from_user_mode = () -> Result<Checked, string> => {
   expect_equal(i64(cpu.a[7]), i64(SSP - 6), "SSP")?
   expect_equal(i64(cpu.inactive_sp), i64(USP), "USP")?
   expect_equal(i64(bus.word(SSP - 6)), 0x0000, "stacked SR")?
-  Ok(Checked)
+  Ok()
 }
 
 /// STOP #$2000 from mask 7: four cycles, then two-cycle waits until level 1 rises at
 /// cycle 20; the frame returns to the word after the immediate.
-let stop_waits = () -> Result<Checked, string> => {
+let stop_waits = () -> Result<void, string> => {
   var bus = script_bus([STOP, 0x2000, NOP], 1, 20)
   var cpu = start(bus, 0x2700)
   expect_outcome(step(cpu, bus), Executed)?
@@ -124,11 +121,11 @@ let stop_waits = () -> Result<Checked, string> => {
   let before = bus.log.len()
   expect_outcome(step(cpu, bus), Interrupted(1))?
   expect_log(bus.log, before, interrupt_log(1, CODE + 4, 0x2000, SSP))?
-  Ok(Checked)
+  Ok()
 }
 
 /// STOP in user mode: exception 8, returning to the STOP itself.
-let stop_privileged = () -> Result<Checked, string> => {
+let stop_privileged = () -> Result<void, string> => {
   var bus = script_bus([STOP, 0x2000], 0, 0)
   var cpu = start(bus, 0x0000)
   expect_outcome(step(cpu, bus), Executed)?
@@ -138,7 +135,7 @@ let stop_privileged = () -> Result<Checked, string> => {
     i64(CODE),
     "stacked PC"
   )?
-  Ok(Checked)
+  Ok()
 }
 
 // ── Setting up and checking ──────────────────────────────────────────────────
@@ -178,25 +175,25 @@ let interrupt_log = pure (level: u8, pc: u32, sr: u16, ssp: u32) -> []string => 
 }
 
 /// Nothing if `got` is `want`; otherwise what differed, as an error `?` passes up.
-let expect_outcome = pure (got: Outcome, want: Outcome) -> Result<Checked, string> =>
-  if got == want { Ok(Checked) } else { Err("stepped to ${describe(got)}, want ${describe(want)}") }
+let expect_outcome = pure (got: Outcome, want: Outcome) -> Result<void, string> =>
+  if got == want { Ok() } else { Err("stepped to ${describe(got)}, want ${describe(want)}") }
 
-let expect_equal = pure (got: i64, want: i64, what: string) -> Result<Checked, string> =>
-  if got == want { Ok(Checked) } else { Err("${what} is ${hex(got)}, want ${hex(want)}") }
+let expect_equal = pure (got: i64, want: i64, what: string) -> Result<void, string> =>
+  if got == want { Ok() } else { Err("${what} is ${hex(got)}, want ${hex(want)}") }
 
 /// The log from `from` on is `want`.
 let expect_log = pure (
   log: []string,
   from: i64,
   want: []string
-) -> Result<Checked, string> => {
+) -> Result<void, string> => {
   for i, entry in want {
     let at = from + i
     if at >= log.len() { return Err("transaction ${i} missing, want ${entry}") }
     if log[at] != entry { return Err("transaction ${i} is ${log[at]}, want ${entry}") }
   }
   if log.len() > from + want.len() { return Err("extra transaction ${log[from + want.len()]}") }
-  Ok(Checked)
+  Ok()
 }
 
 let describe = pure (o: Outcome) -> string => match o {
