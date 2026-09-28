@@ -7,8 +7,7 @@
 // Musashi's opcode table by tests/musashi_legal.py — and checks three things:
 //
 // - `is_legal` agrees with the reference on every opcode;
-// - every legal opcode decodes: stepping it never answers `Unimplemented`, STOP aside
-//   until interrupts are built;
+// - every legal opcode decodes: stepping it never answers `Illegal`;
 // - every illegal opcode takes its exception — vector 4, or 10 and 11 for lines A and F —
 //   as the exact bus sequence the chip makes: four idle cycles, the six-byte frame with
 //   the opcode's own address, the vector, the handler's first two words; 34 cycles.
@@ -17,10 +16,9 @@
 // Prints one summary line and the first few disagreements; exits 1 on any.
 
 import std.io.{ read_stdin }
-import m68k.{ Cpu, step, cpu_with, is_legal }
+import m68k.{ Bus, Cpu, step, cpu_with, is_legal }
 
 const SHOWN: i64 = 5
-const STOP: u16 = 0x4E72
 const START_PC: u32 = 0x1000
 const START_SSP: u32 = 0x2000
 const START_SR: u16 = 0x2700
@@ -56,9 +54,7 @@ let check = (op: u16, want_legal: bool) -> string => {
   var bus = SinkBus { log: [], cycles: 0 }
   let outcome = step(cpu, bus)
   if want_legal {
-    if let Unimplemented(_) = outcome {
-      if op != STOP { return "legal, but the decoder has nothing for it" }
-    }
+    if let Illegal(_) = outcome { return "legal, but the decoder has nothing for it" }
     return ""
   }
   if let Illegal(_) = outcome {} else { return "illegal, but step did not say so" }
@@ -135,6 +131,8 @@ impl Bus for SinkBus {
     self.log.push("w ${fc} ${addr & 0xFFFFFF} ${value}")
     self.cycles += 4
   }
+  interrupt_level = (self) => 0
+  acknowledge_interrupt = (self, level) => 24 + u32(level)
   test_and_set_byte = (self, addr, fc) => {
     self.log.push("t ${fc} ${addr & 0xFFFFFF}")
     self.cycles += 10

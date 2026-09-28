@@ -1,0 +1,284 @@
+// interrupttest — interrupts and STOP, which the recorded suite has none of.
+//
+//   tests/interrupts.sh
+//
+// Each scenario loads a few instructions, raises an interrupt level on a scripted bus at
+// a given cycle, steps, and checks the outcome of each step and — for the interrupt
+// itself — the exact bus sequence Yacht gives, `n nn ns ni n- n nS ns nV nv np n np`: six
+// idle cycles, the frame's PC low word, the acknowledge, four idle cycles, SR and the PC
+// high word, the vector, the handler's first two words. 44 cycles with this bus's
+// 4-cycle acknowledge. Prints a line per failure and a summary; exits 1 on any.
+
+import std.collections.{ HashMap, hashmap_new }
+import m68k.{ Bus, Cpu, step, cpu_with, Outcome }
+
+const CODE: u32 = 0x1000
+const HANDLER: u32 = 0x2000
+const PRIVILEGE_HANDLER: u32 = 0x3000
+const SSP: u32 = 0x8000
+const USP: u32 = 0x4000
+
+const NOP: u16 = 0x4E71
+const STOP: u16 = 0x4E72
+const EXG_D0_D1: u16 = 0xC141
+
+let main = () -> u8 => {
+  var failures = 0
+  for s in scenarios() {
+    if let Err(why) = s.run() {
+      failures += 1
+      println("  ${s.name}: ${why}")
+    }
+  }
+  println("interrupts: ${scenarios().len() - failures} passed, ${failures} failed")
+  if failures > 0 { 1 } else { 0 }
+}
+
+/// A check that held. (`Result<void, string>` has no `Ok` to build yet — Lyra's todo.md.)
+data Checked = Checked
+
+/// One scenario: a name and the check, which fails with what went wrong.
+struct Scenario {
+  name: string,
+  run: () -> Result<Checked, string>,
+}
+
+let scenarios = () -> []Scenario => [
+  Scenario { name: "a level above the mask is taken", run: above_mask },
+  Scenario { name: "a level at the mask is not", run: at_mask },
+  Scenario { name: "level 7 is taken once per rise", run: level_7_edge },
+  Scenario { name: "raised after the last fetch, it waits an instruction", run: after_last_fetch },
+  Scenario { name: "from user mode, onto the supervisor stack", run: from_user_mode },
+  Scenario { name: "STOP waits, and returns past its immediate", run: stop_waits },
+  Scenario { name: "STOP in user mode is a privilege violation", run: stop_privileged },
+]
+
+/// Level 4 over mask 3: NOP samples it with its prefetch, and the next step takes it.
+let above_mask = () -> Result<Checked, string> => {
+  var bus = script_bus([NOP, NOP], 4, 0)
+  var cpu = start(bus, 0x2300)
+  expect_outcome(step(cpu, bus), Executed)?
+  let before = bus.log.len()
+  let cycles_before = bus.cycles
+  expect_outcome(step(cpu, bus), Interrupted(4))?
+  expect_log(bus.log, before, interrupt_log(4, CODE + 2, 0x2300, SSP))?
+  expect_equal(bus.cycles - cycles_before, 44, "cycles")?
+  expect_equal(i64(cpu.sr), 0x2400, "SR")?
+  expect_equal(i64(cpu.a[7]), i64(SSP - 6), "SSP")?
+  expect_equal(i64(cpu.pc), i64(HANDLER), "PC")?
+  Ok(Checked)
+}
+
+/// Level 4 at mask 4: never taken.
+let at_mask = () -> Result<Checked, string> => {
+  var bus = script_bus([NOP, NOP, NOP], 4, 0)
+  var cpu = start(bus, 0x2400)
+  for _ in 0..<3 { expect_outcome(step(cpu, bus), Executed)? }
+  Ok(Checked)
+}
+
+/// Level 7 over mask 7: taken on the rise, not again while it is held.
+let level_7_edge = () -> Result<Checked, string> => {
+  var bus = script_bus([NOP, NOP], 7, 0)
+  var cpu = start(bus, 0x2700)
+  expect_outcome(step(cpu, bus), Executed)?
+  expect_outcome(step(cpu, bus), Interrupted(7))?
+  expect_outcome(step(cpu, bus), Executed)?
+  expect_outcome(step(cpu, bus), Executed)?
+  Ok(Checked)
+}
+
+/// EXG prefetches, then idles two cycles; level 1 rises in the idle, after the prefetch
+/// sampled the pins. The next instruction runs first, and its prefetch sees it.
+let after_last_fetch = () -> Result<Checked, string> => {
+  var bus = script_bus([EXG_D0_D1, NOP, NOP], 1, 5)
+  var cpu = start(bus, 0x2000)
+  expect_outcome(step(cpu, bus), Executed)?
+  expect_outcome(step(cpu, bus), Executed)?
+  expect_outcome(step(cpu, bus), Interrupted(1))?
+  Ok(Checked)
+}
+
+/// User mode, mask 0, level 2: the frame goes on the supervisor stack, USP is kept.
+let from_user_mode = () -> Result<Checked, string> => {
+  var bus = script_bus([NOP, NOP], 2, 0)
+  var cpu = start(bus, 0x0000)
+  expect_outcome(step(cpu, bus), Executed)?
+  expect_outcome(step(cpu, bus), Interrupted(2))?
+  expect_equal(i64(cpu.sr), 0x2200, "SR")?
+  expect_equal(i64(cpu.a[7]), i64(SSP - 6), "SSP")?
+  expect_equal(i64(cpu.inactive_sp), i64(USP), "USP")?
+  expect_equal(i64(bus.word(SSP - 6)), 0x0000, "stacked SR")?
+  Ok(Checked)
+}
+
+/// STOP #$2000 from mask 7: four cycles, then two-cycle waits until level 1 rises at
+/// cycle 20; the frame returns to the word after the immediate.
+let stop_waits = () -> Result<Checked, string> => {
+  var bus = script_bus([STOP, 0x2000, NOP], 1, 20)
+  var cpu = start(bus, 0x2700)
+  expect_outcome(step(cpu, bus), Executed)?
+  expect_equal(bus.cycles, 4, "STOP's cycles")?
+  expect_equal(i64(cpu.sr), 0x2000, "SR")?
+  for _ in 0..<8 { expect_outcome(step(cpu, bus), Stopped)? }
+  let before = bus.log.len()
+  expect_outcome(step(cpu, bus), Interrupted(1))?
+  expect_log(bus.log, before, interrupt_log(1, CODE + 4, 0x2000, SSP))?
+  Ok(Checked)
+}
+
+/// STOP in user mode: exception 8, returning to the STOP itself.
+let stop_privileged = () -> Result<Checked, string> => {
+  var bus = script_bus([STOP, 0x2000], 0, 0)
+  var cpu = start(bus, 0x0000)
+  expect_outcome(step(cpu, bus), Executed)?
+  expect_equal(i64(cpu.pc), i64(PRIVILEGE_HANDLER), "PC")?
+  expect_equal(
+    (i64(bus.word(SSP - 4)) << 16) | i64(bus.word(SSP - 2)),
+    i64(CODE),
+    "stacked PC"
+  )?
+  Ok(Checked)
+}
+
+// ── Setting up and checking ──────────────────────────────────────────────────
+
+/// A CPU at CODE with `sr`, the stacks at SSP and USP, and the program's first two words
+/// in the queue.
+let start = pure (bus: ScriptBus, sr: u16) -> Cpu => {
+  let zeros: [7]u32 = #[0, 0, 0, 0, 0, 0, 0]
+  cpu_with(
+    #[0, 0, 0, 0, 0, 0, 0, 0],
+    zeros,
+    USP,
+    SSP,
+    sr,
+    CODE,
+    bus.word(CODE),
+    bus.word(CODE + 2)
+  )
+}
+
+/// The bus sequence of an interrupt at `level` returning to `pc` with `sr` stacked.
+let interrupt_log = pure (level: u8, pc: u32, sr: u16, ssp: u32) -> []string => {
+  let vector = (24 + u32(level)) * 4
+  [
+    "n 6",
+    "w 5 ${ssp - 2} ${pc & 0xFFFF}",
+    "i ${level}",
+    "n 4",
+    "w 5 ${ssp - 6} ${sr}",
+    "w 5 ${ssp - 4} ${pc >> 16}",
+    "r 5 ${vector}",
+    "r 5 ${vector + 2}",
+    "r 6 ${HANDLER}",
+    "n 2",
+    "r 6 ${HANDLER + 2}",
+  ]
+}
+
+/// Nothing if `got` is `want`; otherwise what differed, as an error `?` passes up.
+let expect_outcome = pure (got: Outcome, want: Outcome) -> Result<Checked, string> =>
+  if got == want { Ok(Checked) } else { Err("stepped to ${describe(got)}, want ${describe(want)}") }
+
+let expect_equal = pure (got: i64, want: i64, what: string) -> Result<Checked, string> =>
+  if got == want { Ok(Checked) } else { Err("${what} is ${hex(got)}, want ${hex(want)}") }
+
+/// The log from `from` on is `want`.
+let expect_log = pure (
+  log: []string,
+  from: i64,
+  want: []string
+) -> Result<Checked, string> => {
+  for i, entry in want {
+    let at = from + i
+    if at >= log.len() { return Err("transaction ${i} missing, want ${entry}") }
+    if log[at] != entry { return Err("transaction ${i} is ${log[at]}, want ${entry}") }
+  }
+  if log.len() > from + want.len() { return Err("extra transaction ${log[from + want.len()]}") }
+  Ok(Checked)
+}
+
+let describe = pure (o: Outcome) -> string => match o {
+  Executed => "Executed",
+  Illegal(op) => "Illegal(0x${op.to_hex()})",
+  Interrupted(level) => "Interrupted(${level})",
+  Stopped => "Stopped",
+}
+
+// ── A scripted bus ───────────────────────────────────────────────────────────
+
+/// Word-addressed RAM holding the program at CODE, the handlers and the vectors; the IPL
+/// pins at `level` from cycle `raise_at` on; every access logged as `r fc addr`,
+/// `w fc addr value`, `i level` for an acknowledge, `n cycles` for idling.
+struct ScriptBus {
+  ram: HashMap<u32, u16>,
+  log: []string,
+  cycles: i64,
+  level: u8,
+  raise_at: i64,
+}
+
+let script_bus = (program: []u16, level: u8, raise_at: i64) -> ScriptBus => {
+  var bus = ScriptBus {
+    ram: hashmap_new::<u32, u16>(),
+    log: [],
+    cycles: 0,
+    level: level,
+    raise_at: raise_at,
+  }
+  for i, word in program { bus.ram.insert(CODE + u32(2 * i), word) }
+  for v in 24..<32 { bus.set_long(u32(v) * 4, HANDLER) }
+  bus.set_long(8 * 4, PRIVILEGE_HANDLER)
+  bus.ram.insert(HANDLER, NOP)
+  bus.ram.insert(HANDLER + 2, NOP)
+  bus
+}
+
+let set_long = (self: mut ScriptBus, addr: u32, value: u32) -> void => {
+  self.ram.insert(addr, u16(value >> 16))
+  self.ram.insert(addr + 2, u16(value & 0xFFFF))
+}
+
+let word = pure (self: ScriptBus, addr: u32) -> u16 =>
+  self.ram.get(addr & 0xFFFFFE).unwrap_or(0)
+
+impl Bus for ScriptBus {
+  read_word = (self, addr, fc) => {
+    self.log.push("r ${fc} ${addr & 0xFFFFFF}")
+    self.cycles += 4
+    self.word(addr)
+  }
+  read_byte = (self, addr, fc) => {
+    self.log.push("r ${fc} ${addr & 0xFFFFFF}")
+    self.cycles += 4
+    let w = self.word(addr)
+    if (addr & 1) == 0 { u8(w >> 8) } else { u8(w & 0xFF) }
+  }
+  write_word = (self, addr, fc, value) => {
+    self.ram.insert(addr & 0xFFFFFE, value)
+    self.log.push("w ${fc} ${addr & 0xFFFFFF} ${value}")
+    self.cycles += 4
+  }
+  write_byte = (self, addr, fc, value) => {
+    self.log.push("w ${fc} ${addr & 0xFFFFFF} ${value}")
+    self.cycles += 4
+  }
+  test_and_set_byte = (self, addr, fc) => {
+    self.log.push("t ${fc} ${addr & 0xFFFFFF}")
+    self.cycles += 10
+    0
+  }
+  interrupt_level = (self) => if self.cycles >= self.raise_at { self.level } else { 0 }
+  acknowledge_interrupt = (self, level) => {
+    self.log.push("i ${level}")
+    self.cycles += 4
+    24 + u32(level)
+  }
+  idle = (self, n) => {
+    self.log.push("n ${n}")
+    self.cycles += n
+  }
+}
+
+let hex = pure (v: i64) -> string => "0x${u64(v).to_hex()}"

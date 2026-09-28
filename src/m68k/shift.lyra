@@ -17,7 +17,7 @@ module m68k
 let shift_group<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
   let left = (op & 0x0100) != 0
   if ((op >> 6) & 3) == 3 {
-    if (op & 0x0800) != 0 { return Unimplemented(op) }
+    if (op & 0x0800) != 0 { return undecoded(cpu, bus, op) }
     return shift_memory(cpu, bus, op, shift_kind((op >> 9) & 3), left)
   }
   let size = opmode_size((op >> 6) & 3)

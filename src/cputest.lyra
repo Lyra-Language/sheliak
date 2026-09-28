@@ -11,13 +11,12 @@
 // fails here, as it would fail a game that watches the bus.
 //
 // Prints one summary line; lists the first few failures with what differed. Exits 1 on any
-// failure, 0 otherwise — unimplemented opcodes are counted, not failed, while the core is
-// being built.
+// failure, 0 otherwise.
 
 import std.io.{ read_stdin }
 import std.json.{ parse_json, JsonValue }
 import std.collections.{ HashMap, hashmap_new }
-import m68k.{ Cpu, step, cpu_with, usp, ssp }
+import m68k.{ Bus, Cpu, step, cpu_with, usp, ssp }
 
 const SHOWN_FAILURES: i64 = 5
 
@@ -43,7 +42,6 @@ let main = () -> u8 => {
   }
   var passed = 0
   var failed = 0
-  var unimplemented = 0
   var skipped = 0
   var known_bad = 0
   for test in parsed.unwrap_or(JsonNull).elements() {
@@ -57,7 +55,6 @@ let main = () -> u8 => {
     }
     match run(test) {
       Pass => { passed += 1 },
-      NotImplemented => { unimplemented += 1 },
       Fail(why) => {
         failed += 1
         if failed <= SHOWN_FAILURES { println("  ${text_of(test, "name")}: ${why}") }
@@ -66,14 +63,13 @@ let main = () -> u8 => {
   }
   let bad_note = if known_bad > 0 { ", ${known_bad} known-bad skipped" } else { "" }
   let skip_note = bad_note ++ (if skipped > 0 { ", ${skipped} address errors skipped" } else { "" })
-  println("${name}: ${passed} passed, ${failed} failed, ${unimplemented} unimplemented${skip_note}")
+  println("${name}: ${passed} passed, ${failed} failed${skip_note}")
   if failed > 0 { 1 } else { 0 }
 }
 
 /// What one test came to.
 data Verdict =
   Pass
-  | NotImplemented
   /// What differed, first difference only.
   | Fail(string)
 
@@ -86,7 +82,7 @@ let run = (test: JsonValue) -> Verdict => {
   for pair in initial.field("ram").unwrap_or(JsonNull).elements() {
     bus.ram.insert(u32(number(pair, 0)), u8(number(pair, 1)))
   }
-  if let Unimplemented(_) = step(cpu, bus) { return NotImplemented }
+  if let Illegal(_) = step(cpu, bus) { return Fail("decoded as an illegal instruction") }
 
   let want = load_cpu(final)
   for i in 0..<8 {
@@ -191,6 +187,9 @@ impl Bus for TestBus {
     self.ram.insert(addr & 0xFFFFFF, value)
     self.access("w", fc, addr, ".b", u32(value))
   }
+  // The suite has no interrupts: the pins stay low.
+  interrupt_level = (self) => 0
+  acknowledge_interrupt = (self, level) => 24 + u32(level)
   test_and_set_byte = (self, addr, fc) => {
     // The files log it as one 10-cycle `t` transaction with the byte written.
     let value = self.byte(addr)

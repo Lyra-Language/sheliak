@@ -19,7 +19,7 @@ let bit_operation<b> where b: Bus = (
   let mode = source_mode(op)
   let reg = source_reg(op)
   if mode == 1 || !bit_operand_allowed(mode, reg, kind == 0, static_number) {
-    return Unimplemented(op)
+    return undecoded(cpu, bus, op)
   }
   let number = if static_number {
     u32(take_extension(cpu, bus))

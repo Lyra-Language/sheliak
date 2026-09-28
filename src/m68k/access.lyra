@@ -23,7 +23,20 @@ pub let cpu_read_word<b> where b: Bus = (
     fault(cpu, addr, true, fc)
     return 0
   }
-  bus.read_word(addr, fc)
+  let word = bus.read_word(addr, fc)
+  if fc == FC_USER_PROGRAM || fc == FC_SUPERVISOR_PROGRAM { sample_interrupt_level(
+    cpu,
+    bus
+  ) }
+  word
+}
+
+/// Look at the IPL pins, as the chip does at every instruction fetch, noting a rise to
+/// level 7.
+let sample_interrupt_level<b> where b: Bus = (cpu: mut Cpu, bus: mut b) -> void => {
+  let level = bus.interrupt_level() & 7
+  if level == 7 && cpu.ipl != 7 { cpu.nmi = true }
+  cpu.ipl = level
 }
 
 /// A byte read by the CPU: any address will do.
@@ -140,6 +153,8 @@ let jump_to_vector<b> where b: Bus = (cpu: mut Cpu, bus: mut b, vector: u32) -> 
   let low = u32(bus.read_word(vector * 4 + 2, fc))
   cpu.pc = (high << 16) | low
   cpu.ird = bus.read_word(cpu.pc, FC_SUPERVISOR_PROGRAM)
+  sample_interrupt_level(cpu, bus)
   bus.idle(2)
   cpu.irc = bus.read_word(cpu.pc.wrapping_add(2), FC_SUPERVISOR_PROGRAM)
+  sample_interrupt_level(cpu, bus)
 }

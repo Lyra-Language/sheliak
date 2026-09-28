@@ -1,7 +1,7 @@
 module m68k
 //! Exceptions and the status register: TRAP, TRAPV, CHK, RTE, MOVE to/from SR, MOVE to CCR,
-//! ANDI/ORI/EORI to CCR and SR, MOVE USP, RESET, the privilege violation, and the illegal
-//! instruction and line A/F exceptions.
+//! ANDI/ORI/EORI to CCR and SR, MOVE USP, RESET, STOP, the privilege violation, the illegal
+//! instruction and line A/F exceptions, and interrupts.
 //!
 //! **The group 1 and 2 frame is six bytes** — SR and the PC — written PC low, SR, PC high,
 //! into supervisor mode (S set, T cleared, A7 switched to the supervisor stack). The
@@ -138,6 +138,18 @@ let move_user_stack<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Out
   Executed
 }
 
+/// STOP #imm (privileged): SR from the immediate, then nothing until an interrupt is taken
+/// ([step]). Four cycles, no bus activity — the chip does not prefetch, so the interrupt's
+/// frame returns to the word after the immediate. (Yacht; the suite has no STOP.)
+let stop<b> where b: Bus = (cpu: mut Cpu, bus: mut b) -> Outcome => {
+  if !supervisor(cpu) { return privilege_violation(cpu, bus) }
+  set_sr(cpu, cpu.irc)
+  cpu_idle(cpu, bus, 4)
+  cpu.pc = cpu.pc.wrapping_add(4)
+  cpu.stopped = true
+  Executed
+}
+
 /// RESET (privileged): asserts the reset line for 124 cycles.
 let reset_peripherals<b> where b: Bus = (cpu: mut Cpu, bus: mut b) -> Outcome => {
   if !supervisor(cpu) { return privilege_violation(cpu, bus) }
@@ -197,6 +209,45 @@ let group_exception<b> where b: Bus = (
   cpu_write_word(cpu, bus, sp.wrapping_sub(2), fc, u16(return_pc & 0xFFFF))
   cpu_write_word(cpu, bus, sp.wrapping_sub(6), fc, old_sr)
   cpu_write_word(cpu, bus, sp.wrapping_sub(4), fc, u16(return_pc >> 16))
+  cpu.a[7] = sp.wrapping_sub(6)
+  jump_to_vector(cpu, bus, vector)
+}
+
+// ── Interrupts ───────────────────────────────────────────────────────────────
+
+/// The level of the interrupt to take now, or 0: a rise to level 7, or a level above the
+/// mask in SR (bits 10–8), as last sampled.
+let pending_interrupt = pure (cpu: Cpu) -> u8 => {
+  if cpu.nmi { return 7 }
+  let mask = u8((cpu.sr >> 8) & 7)
+  if cpu.ipl > mask { cpu.ipl } else { 0 }
+}
+
+/// Take an interrupt at `level`, between instructions: into supervisor mode with the mask
+/// raised to `level`, the vector from the acknowledge cycle, the frame of a group 1
+/// exception — with the acknowledge between its first word and the rest, as Yacht gives it
+/// (`n nn ns ni n- n nS ns nV nv np n np`, 44 cycles with a 4-cycle acknowledge).
+///
+/// **The idle after the acknowledge is taken as 4 cycles**, which is what Motorola's total
+/// allows; Yacht marks that `n-` as possibly two microcycles, and Clock Signal takes 6.
+/// Settle it against real hardware with the VDP, whose interrupts games time.
+let take_interrupt<b> where b: Bus = (cpu: mut Cpu, bus: mut b, level: u8) -> void => {
+  if level == 7 { cpu.nmi = false }
+  cpu.stopped = false
+  let old_sr = cpu.sr
+  let return_pc = cpu.pc
+  enter_supervisor(cpu)
+  cpu.sr = (cpu.sr & ~0x0700) | (u16(level) << 8)
+  cpu_idle(cpu, bus, 6)
+  let sp = cpu.a[7]
+  let fc = FC_SUPERVISOR_DATA
+  cpu_write_word(cpu, bus, sp.wrapping_sub(2), fc, u16(return_pc & 0xFFFF))
+  if cpu.faulted { return }
+  let vector = bus.acknowledge_interrupt(level)
+  cpu_idle(cpu, bus, 4)
+  cpu_write_word(cpu, bus, sp.wrapping_sub(6), fc, old_sr)
+  cpu_write_word(cpu, bus, sp.wrapping_sub(4), fc, u16(return_pc >> 16))
+  if cpu.faulted { return }
   cpu.a[7] = sp.wrapping_sub(6)
   jump_to_vector(cpu, bus, vector)
 }

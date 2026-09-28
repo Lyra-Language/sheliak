@@ -37,6 +37,15 @@ pub struct Cpu {
   /// The faulted access's address and its status-word bits (R/W, I/N, function code).
   fault_address: u32,
   fault_status: u16,
+  /// The interrupt level on the IPL pins when the chip last looked: at every instruction
+  /// fetch ([sample_interrupt_level]), so an interrupt raised after an instruction's last
+  /// fetch is seen only after the next instruction.
+  ipl: u8,
+  /// Level 7 rose since it was last taken. Level 7 cannot be masked and is taken on the
+  /// edge, not the level: once per rise, however long it is held.
+  nmi: bool,
+  /// STOP is in effect: no instructions run until an interrupt is taken.
+  stopped: bool,
 }
 
 /// What the 68000 is wired to. Each method is one bus cycle — or, for `idle`, cycles with
@@ -47,12 +56,20 @@ pub struct Cpu {
 /// `test_and_set_byte` is TAS's read-modify-write cycle, the one access the chip makes
 /// indivisibly: read the byte, write it back with bit 7 set, ten cycles, and answer the byte
 /// read. It is the bus's to honour — the Genesis never completes the write.
+///
+/// `interrupt_level` is the IPL pins now, 0 (none) to 7; it takes no time.
+/// `acknowledge_interrupt` is the interrupt-acknowledge cycle for a level (function code
+/// 7), with whatever time it takes, answering the vector number: a device's own, 24 +
+/// level for an autovector (VPA, which is how the Genesis answers, synchronised to the E
+/// clock), or 24, the spurious interrupt, for a bus error.
 pub trait Bus {
   read_word: (mut Self, u32, u8) -> u16
   read_byte: (mut Self, u32, u8) -> u8
   write_word: (mut Self, u32, u8, u16) -> void
   write_byte: (mut Self, u32, u8, u8) -> void
   test_and_set_byte: (mut Self, u32, u8) -> u8
+  interrupt_level: (mut Self) -> u8
+  acknowledge_interrupt: (mut Self, u8) -> u32
   idle: (mut Self, i64) -> void
 }
 
@@ -78,12 +95,26 @@ pub data Outcome =
   /// Not a 68000 instruction ([is_legal]): exception 4 has been taken, or 10 or 11 for an
   /// opcode in line A or F, and IRD holds the handler's first instruction.
   | Illegal(u16)
-  /// A legal opcode not built yet — STOP, which waits for an interrupt, until interrupts
-  /// are. Nothing else: `tests/legal.sh` runs every opcode to check.
-  | Unimplemented(u16)
+  /// An interrupt at this level was taken instead of an instruction; IRD holds the
+  /// handler's first.
+  | Interrupted(u8)
+  /// STOP is in effect and no interrupt came: two cycles passed, nothing ran.
+  | Stopped
 
-/// Execute the instruction in IRD, leaving the next one there.
+/// Take a pending interrupt, or execute the instruction in IRD, leaving the next one there.
+/// Stopped, wait two cycles for an interrupt instead.
 pub let step<b> where b: Bus = (cpu: mut Cpu, bus: mut b) -> Outcome => {
+  if cpu.stopped { sample_interrupt_level(cpu, bus) }
+  let level = pending_interrupt(cpu)
+  if level != 0 {
+    take_interrupt(cpu, bus, level)
+    if cpu.faulted { address_error(cpu, bus, cpu.ird) }
+    return Interrupted(level)
+  }
+  if cpu.stopped {
+    bus.idle(2)
+    return Stopped
+  }
   let op = cpu.ird
   if !is_legal(op) {
     illegal_instruction(cpu, bus, op)
@@ -102,14 +133,14 @@ let execute<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => 
     0x4 => miscellaneous(cpu, bus, op),
     0x5 => quick_or_condition(cpu, bus, op),
     0x6 => branch(cpu, bus, op),
-    0x7 => if (op & 0x0100) == 0 { moveq(cpu, bus, op) } else { Unimplemented(op) },
+    0x7 => if (op & 0x0100) == 0 { moveq(cpu, bus, op) } else { undecoded(cpu, bus, op) },
     0x8 => arith_group(cpu, bus, op, Or),
     0x9 => arith_group(cpu, bus, op, Sub),
     0xB => cmp_eor_group(cpu, bus, op),
     0xC => arith_group(cpu, bus, op, And),
     0xD => arith_group(cpu, bus, op, Add),
     0xE => shift_group(cpu, bus, op),
-    _ => Unimplemented(op),
+    _ => undecoded(cpu, bus, op),
   }
 }
 
@@ -156,6 +187,9 @@ pub let cpu_with = pure (
     faulted: false,
     fault_address: 0,
     fault_status: 0,
+    ipl: 0,
+    nmi: false,
+    stopped: false,
   }
 }
 
@@ -184,6 +218,7 @@ let miscellaneous<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outco
   match op {
     0x4E70 => return reset_peripherals(cpu, bus),
     0x4E71 => return nop(cpu, bus),
+    0x4E72 => return stop(cpu, bus),
     0x4E73 => return return_from_exception(cpu, bus),
     0x4E75 => return return_from_subroutine(cpu, bus),
     0x4E76 => return trap_on_overflow(cpu, bus),
@@ -212,7 +247,7 @@ let miscellaneous<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outco
   if (op & 0xFFC0) == 0x4E80 { return jump_subroutine(cpu, bus, op) }
   if (op & 0xFFC0) == 0x4EC0 { return jump(cpu, bus, op) }
   if is_unary(op) { return unary(cpu, bus, op) }
-  Unimplemented(op)
+  undecoded(cpu, bus, op)
 }
 
 /// Group 5: ADDQ/SUBQ with a size, DBcc and Scc with size bits `11`.
@@ -230,7 +265,7 @@ let quick_or_condition<b> where b: Bus = (
 let move_family<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
   let size = move_size(op)
   if destination_mode(op) != 1 { return move(cpu, bus, op, size) }
-  if size == BYTE { Unimplemented(op) } else { movea(cpu, bus, op, size) }
+  if size == BYTE { undecoded(cpu, bus, op) } else { movea(cpu, bus, op, size) }
 }
 
 // ── The machinery every instruction shares ───────────────────────────────────
@@ -252,6 +287,15 @@ let set_logic_flags = (cpu: mut Cpu, value: u32, sign: u32) -> void => {
   if (value & sign) != 0 { sr = sr | SR_N }
   if (value & ((sign << 1).wrapping_sub(1))) == 0 { sr = sr | SR_Z }
   cpu.sr = sr
+}
+
+/// What the decoder does with an opcode it has no instruction for — which [step] never
+/// lets it see, since [is_legal] refuses them first (`tests/legal.sh` checks every legal
+/// opcode decodes). Should the two ever disagree, the chip's answer is the safe one: the
+/// illegal-instruction exception.
+let undecoded<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
+  illegal_instruction(cpu, bus, op)
+  Illegal(op)
 }
 
 let supervisor = pure (cpu: Cpu) -> bool => (cpu.sr & SR_S) != 0

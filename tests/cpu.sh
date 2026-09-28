@@ -7,7 +7,7 @@
 #   CPUTEST_FLAGS=--no-address-errors tests/cpu.sh MOVE.w   # skip tests ending in one
 #
 # Builds cputest and fetches the suite first if needed. One line per file, then a total;
-# exits 1 if any test failed (unimplemented opcodes are counted separately, not failed).
+# exits 1 if any test failed.
 set -euo pipefail
 
 readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
