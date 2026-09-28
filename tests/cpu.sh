@@ -2,7 +2,7 @@
 #
 # Run the 68000 core against SingleStepTests: every file, or the ones named.
 #
-#   tests/cpu.sh                 # all 125 instruction files
+#   tests/cpu.sh                 # all 124 instruction files
 #   tests/cpu.sh NOP MOVE.l      # just these
 #   CPUTEST_FLAGS=--no-address-errors tests/cpu.sh MOVE.w   # skip tests ending in one
 #

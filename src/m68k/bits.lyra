@@ -1,0 +1,89 @@
+module m68k
+//! Single-bit operations: BTST, BCHG, BCLR and BSET, each **dynamic** (the bit number in a
+//! data register, `0000 rrr1 tt <ea>`) or **static** (in an extension word, `0000 1000 tt
+//! <ea>`). Bits 7–6, `tt`, pick the operation in that order.
+//!
+//! The operand is a whole data register — the bit number taken mod 32 — or a byte in
+//! memory, mod 8. Z is set when the bit *was* zero; no other flag changes. BTST only
+//! tests; the others test, then flip, clear or set the bit.
+
+/// The bit operation `op` names, the bit number from Dn or (`static_number`) the extension
+/// word.
+let bit_operation<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  op: u16,
+  static_number: bool
+) -> Outcome => {
+  let kind = (op >> 6) & 3
+  let mode = source_mode(op)
+  let reg = source_reg(op)
+  if mode == 1 || !bit_operand_allowed(mode, reg, kind == 0, static_number) {
+    return Unimplemented(op)
+  }
+  let number = if static_number {
+    u32(take_extension(cpu, bus))
+  } else {
+    cpu.d[destination_reg(op)]
+  }
+  if mode == 0 { return register_bit(cpu, bus, reg, kind, number) }
+  let at = locate(cpu, bus, mode, reg, BYTE, true)
+  let value = read_operand(cpu, bus, at, BYTE)
+  let mask = u32(1) << (number & 7)
+  set_flags(cpu, zero_if_clear(cpu.sr, value & mask))
+  prefetch(cpu, bus)
+  // BTST Dn, #imm times like the register form.
+  if mode == 7 && reg == 4 { cpu_idle(cpu, bus, 2) }
+  if kind != 0 { write_operand(cpu, bus, at, BYTE, changed_bit(kind, value, mask)) }
+  Executed
+}
+
+/// The register form: all 32 bits of Dn. Past the prefetch, BTST idles two cycles; BCHG
+/// and BSET two more for a bit in the high word, and BCLR two more than those.
+let register_bit<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  dn: i64,
+  kind: u16,
+  number: u32
+) -> Outcome => {
+  let bit = number & 31
+  let mask = u32(1) << bit
+  let value = cpu.d[dn]
+  prefetch(cpu, bus)
+  let high: i64 = if bit >= 16 { 2 } else { 0 }
+  cpu_idle(cpu, bus, match kind {
+    0 => 2,
+    2 => 4 + high,
+    _ => 2 + high,
+  })
+  if cpu.faulted { return Executed }
+  cpu.sr = zero_if_clear(cpu.sr, value & mask)
+  if kind != 0 { cpu.d[dn] = changed_bit(kind, value, mask) }
+  Executed
+}
+
+/// `value` with the bit `mask` names flipped (BCHG, kind 1), cleared (BCLR, 2) or set
+/// (BSET, 3).
+let changed_bit = pure (kind: u16, value: u32, mask: u32) -> u32 => match kind {
+  1 => value ~ mask,
+  2 => value & ~mask,
+  _ => value | mask,
+}
+
+/// SR with Z set if `tested` — the operand's bit, masked — is zero, and cleared if not.
+let zero_if_clear = pure (sr: u16, tested: u32) -> u16 =>
+  if tested == 0 { sr | SR_Z } else { sr & ~SR_Z }
+
+/// Whether `mode`/`reg` is an operand this bit operation takes: any data mode for BTST —
+/// even an immediate, when the bit number is dynamic — and data alterable for the others.
+let bit_operand_allowed = pure (
+  mode: i64,
+  reg: i64,
+  test: bool,
+  static_number: bool
+) -> bool => {
+  if mode != 7 { return true }
+  if !test { return reg <= 1 }
+  reg <= 3 || (reg == 4 && !static_number)
+}
