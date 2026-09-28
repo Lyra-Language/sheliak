@@ -96,6 +96,7 @@ let execute<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => 
     0xB => cmp_eor_group(cpu, bus, op),
     0xC => arith_group(cpu, bus, op, And),
     0xD => arith_group(cpu, bus, op, Add),
+    0xE => shift_group(cpu, bus, op),
     _ => Unimplemented(op),
   }
 }

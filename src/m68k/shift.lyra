@@ -1,0 +1,137 @@
+module m68k
+//! Shifts and rotates, group 14: ASL/ASR, LSL/LSR, ROXL/ROXR, ROL/ROR.
+//!
+//! **Register form** (size bits 7–6 not `11`): a data register shifted by a count — bits
+//! 11–9 as an immediate 1–8 (0 meaning 8), or, with bit 5 set, the register those bits
+//! name, taken mod 64. **Memory form** (size bits `11`): a word in memory shifted by one.
+//! Bit 8 is the direction (set is left); the type is bits 4–3 in the register form and
+//! bits 10–9 in the memory form.
+//!
+//! **The result is computed a bit at a time**, which is what makes every edge fall out
+//! rather than be special-cased: a count of zero, a count as wide as the operand or wider
+//! (up to 63), ASL's V — set if the sign bit changed *at any step*, not just between the
+//! first and last value — and the rotates through X. The chip itself takes two cycles per
+//! bit, which is the timing the tests check.
+
+/// Group 14.
+let shift_group<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
+  let left = (op & 0x0100) != 0
+  if ((op >> 6) & 3) == 3 {
+    if (op & 0x0800) != 0 { return Unimplemented(op) }
+    return shift_memory(cpu, bus, op, shift_kind((op >> 9) & 3), left)
+  }
+  let size = opmode_size((op >> 6) & 3)
+  let dy = source_reg(op)
+  let field = i64((op >> 9) & 7)
+  let places = if (op & 0x0020) != 0 {
+    i64(cpu.d[field] & 63)
+  } else if field == 0 {
+    8
+  } else {
+    field
+  }
+  let r = shift_value(shift_kind((op >> 3) & 3), left, cpu.d[dy], places, size, cpu.sr)
+  prefetch(cpu, bus)
+  cpu_idle(cpu, bus, (if size == LONG { 4 } else { 2 }) + 2 * places)
+  if !cpu.faulted {
+    write_data_register(cpu, dy, size, r.value)
+    cpu.sr = r.sr
+  }
+  Executed
+}
+
+/// The kinds of shift, in the order the 2-bit type field lists them.
+data ShiftKind =
+  Arithmetic
+  | Logical
+  | RotateExtend
+  | Rotate
+
+let shift_kind = pure (bits: u16) -> ShiftKind => match bits & 3 {
+  0 => Arithmetic,
+  1 => Logical,
+  2 => RotateExtend,
+  _ => Rotate,
+}
+
+/// The memory form: one bit, word size, read-modify-write.
+let shift_memory<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  op: u16,
+  kind: ShiftKind,
+  left: bool
+) -> Outcome => {
+  let at = locate(cpu, bus, source_mode(op), source_reg(op), WORD, true)
+  let value = read_operand(cpu, bus, at, WORD)
+  let r = shift_value(kind, left, value, 1, WORD, cpu.sr)
+  set_flags(cpu, r.sr)
+  prefetch(cpu, bus)
+  write_operand(cpu, bus, at, WORD, r.value)
+  Executed
+}
+
+/// `value` (its low `size` bytes) shifted or rotated `count` places, and the status
+/// register that leaves.
+///
+/// Every kind sets N and Z from the result. C is the last bit shifted or rotated out, and
+/// X follows it for all but the plain rotates, which leave X alone; with a count of zero
+/// C is cleared — or, for a rotate through X, set to X — and X is untouched. V is set only
+/// by ASL, when the sign bit changed at any step; every other kind clears it. ASR by more
+/// than the width shifts out zeros as far as C and X are concerned (see the loop).
+let shift_value = pure (
+  kind: ShiftKind,
+  left: bool,
+  value: u32,
+  count: i64,
+  size: i64,
+  sr: u16
+) -> AluResult => {
+  let mask = size_mask(size)
+  let sign = sign_bit(size)
+  var v = value & mask
+  var x = (sr & SR_X) != 0
+  var c = false
+  var overflow = false
+  let width = size * 8
+  for step in 0..<count {
+    if left {
+      let out = (v & sign) != 0
+      let into: u32 = match kind {
+        Rotate => if out { 1 } else { 0 },
+        RotateExtend => if x { 1 } else { 0 },
+        _ => 0,
+      }
+      v = ((v << 1) | into) & mask
+      if kind == Arithmetic && ((v & sign) != 0) != out { overflow = true }
+      c = out
+    } else {
+      // ASR past the operand's width keeps filling with the sign, but what it shifts out
+      // is counted as zero: C and X end clear even for a negative operand (every one of
+      // the ~6,000 such tests; at exactly the width, C is the sign bit as usual).
+      let out = (v & 1) != 0 && !(kind == Arithmetic && step >= width)
+      let into: u32 = match kind {
+        Arithmetic => v & sign,
+        Rotate => if out { sign } else { 0 },
+        RotateExtend => if x { sign } else { 0 },
+        _ => 0,
+      }
+      v = (v >> 1) | into
+      c = out
+    }
+    if kind != Rotate { x = c }
+  }
+  var out = sr & ~(SR_N | SR_Z | SR_V | SR_C)
+  if count == 0 {
+    if kind == RotateExtend && x { out = out | SR_C }
+  } else {
+    if c { out = out | SR_C }
+    if kind != Rotate {
+      out = if x { out | SR_X } else { out & ~SR_X }
+    }
+  }
+  if overflow { out = out | SR_V }
+  if (v & sign) != 0 { out = out | SR_N }
+  if v == 0 { out = out | SR_Z }
+  AluResult { value: v, sr: out }
+}

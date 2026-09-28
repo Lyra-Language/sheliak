@@ -21,6 +21,14 @@ import m68k.{ Cpu, step, cpu_with, usp, ssp }
 
 const SHOWN_FAILURES: i64 = 5
 
+/// Tests whose expected state is wrong, skipped by name and counted apart. Each is an
+/// upstream report, not a judgement made here.
+///
+/// - ASL.b 1583 and 1761 expect a byte shift to change D2's upper 24 bits, which no byte
+///   operation can; they are the only such tests in the suite
+///   (SingleStepTests/680x0 issue #4, "Incorrect data for ASL.b tests 1583 and 1761").
+const KNOWN_BAD: []string = ["e502 [ASL.b Q, D2] 1583", "e502 [ASL.b Q, D2] 1761"]
+
 let main = () -> u8 => {
   let args = program_args()
   let name = if args.len() > 1 { args[1] } else { "stdin" }
@@ -37,7 +45,12 @@ let main = () -> u8 => {
   var failed = 0
   var unimplemented = 0
   var skipped = 0
+  var known_bad = 0
   for test in parsed.unwrap_or(JsonNull).elements() {
+    if is_known_bad(text_of(test, "name")) {
+      known_bad += 1
+      continue
+    }
     if skip_address_errors && ends_in_address_error(test) {
       skipped += 1
       continue
@@ -51,7 +64,8 @@ let main = () -> u8 => {
       },
     }
   }
-  let skip_note = if skipped > 0 { ", ${skipped} address errors skipped" } else { "" }
+  let bad_note = if known_bad > 0 { ", ${known_bad} known-bad skipped" } else { "" }
+  let skip_note = bad_note ++ (if skipped > 0 { ", ${skipped} address errors skipped" } else { "" })
   println("${name}: ${passed} passed, ${failed} failed, ${unimplemented} unimplemented${skip_note}")
   if failed > 0 { 1 } else { 0 }
 }
@@ -110,6 +124,13 @@ let run = (test: JsonValue) -> Verdict => {
   let length = member(test, "length")
   if bus.cycles != length { return Fail("took ${bus.cycles} cycles, want ${length}") }
   Pass
+}
+
+let is_known_bad = pure (name: string) -> bool => {
+  for bad in KNOWN_BAD {
+    if bad == name { return true }
+  }
+  false
 }
 
 /// Whether the test's instruction raised an address error: exception processing reads the

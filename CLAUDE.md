@@ -51,6 +51,9 @@ frame-at-a-time shortcuts from the start:
   instruction that prefetched before faulting has the next opcode in IRD.
 - **Hardware arithmetic wraps**: Lyra traps on overflow, so register arithmetic is
   `wrapping_*`, and conversions (`u8(x)` truncates, `i8(u8)` reinterprets) are explicit.
+- **A test is only skipped with an upstream report behind it**: `KNOWN_BAD` in
+  `src/cputest.lyra` names each one and the issue that says its data is wrong, and the
+  runner counts them apart. Two so far (ASL.b 1583 and 1761, SingleStepTests issue #4).
 - **Test data is downloaded, never committed or shipped**: SingleStepTests declares no
   licence; `tests/fetch.sh` pins it to a commit under `build/`.
 - **Hot paths do not allocate** (`noalloc` where it can be said): the 68000 alone is ~7.6
@@ -70,14 +73,15 @@ src/m68k/            the 68000 (module m68k):
   alu.lyra           results and condition codes per operation and size (no bus)
   arith.lyra         ADD/SUB/AND/OR/EOR/CMP in every form: register, memory, address
                      register, extended, CMPM, immediate (group 0), quick (group 5)
+  shift.lyra         ASx/LSx/ROXx/ROx, register and memory forms, a bit at a time
 tests/fetch.sh       download the pinned suite
 tests/cpu.sh         run the suite, one line per instruction file
 ```
 
 ## Status
 
-The 68000 passes every test in 37 of the suite's 125 files (298,405 tests, address errors
-included): NOP, MOVEQ, MOVE, MOVEA, and ADD/SUB/AND/OR/EOR/CMP with their A, X, M, I and Q
-forms. Every other opcode answers `Unimplemented`, which the runner counts apart from
+The 68000 passes every test in 61 of the suite's 125 files (491,963 tests, address errors
+included): NOP, MOVEQ, MOVE, MOVEA, ADD/SUB/AND/OR/EOR/CMP with their A, X, M, I and Q
+forms, and all shifts and rotates. Every other opcode answers `Unimplemented`, which the runner counts apart from
 failures. `CPUTEST_FLAGS=--no-address-errors` skips tests that end in one, to get an
 instruction's ordinary path right first.
