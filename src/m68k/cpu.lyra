@@ -85,9 +85,17 @@ pub let step<b> where b: Bus = (cpu: mut Cpu, bus: mut b) -> Outcome => {
 /// Decode and run one opcode.
 let execute<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
   match op >> 12 {
+    0x0 => immediate(cpu, bus, op),
     0x1 | 0x2 | 0x3 => move_family(cpu, bus, op),
     0x4 => if op == 0x4E71 { nop(cpu, bus) } else { Unimplemented(op) },
+    0x5 =>
+      if ((op >> 6) & 3) != 3 { add_sub_quick(cpu, bus, op) } else { Unimplemented(op) },
     0x7 => if (op & 0x0100) == 0 { moveq(cpu, bus, op) } else { Unimplemented(op) },
+    0x8 => arith_group(cpu, bus, op, Or),
+    0x9 => arith_group(cpu, bus, op, Sub),
+    0xB => cmp_eor_group(cpu, bus, op),
+    0xC => arith_group(cpu, bus, op, And),
+    0xD => arith_group(cpu, bus, op, Add),
     _ => Unimplemented(op),
   }
 }

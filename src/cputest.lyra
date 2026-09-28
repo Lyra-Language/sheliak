@@ -220,20 +220,4 @@ let text_of = pure (v: JsonValue, key: string) -> string =>
   v.field(key).unwrap_or(JsonNull).as_text().unwrap_or("")
 
 /// `v` in hexadecimal, `0x`-prefixed.
-let hex = pure (v: u32) -> string => {
-  let digits = "0123456789abcdef".to_runes()
-  var out: []string = []
-  var rest = v
-  for {
-    out.push("${digits[i64(rest & 15)]}")
-    rest = rest >> 4
-    if rest == 0 { break }
-  }
-  var reversed: []string = []
-  var i = out.len() - 1
-  for i >= 0 {
-    reversed.push(out[i])
-    i -= 1
-  }
-  "0x${reversed.join("")}"
-}
+let hex = pure (v: u32) -> string => "0x${v.to_hex()}"

@@ -1,0 +1,359 @@
+module m68k
+//! ADD, SUB, AND, OR, EOR and CMP in all their forms: register and memory (opcode groups
+//! 8, 9, 11, 12, 13), address register (ADDA, SUBA, CMPA), extended (ADDX, SUBX), memory to
+//! memory (CMPM), immediate (group 0: ORI, ANDI, SUBI, ADDI, EORI, CMPI) and quick (group 5:
+//! ADDQ, SUBQ). The ALU (`alu.lyra`) computes; this is when the operands are read and the
+//! result written, which is what the tests check cycle by cycle.
+
+/// Groups 8 (OR), 9 (SUB), 12 (AND) and 13 (ADD). Bits 8–6, the op-mode, pick the form:
+/// 0–2 `<ea>,Dn` at byte/word/long, 4–6 `Dn,<ea>` (or ADDX/SUBX when the ea is a register
+/// or -(An)), 3 and 7 the address-register form at word/long — which AND and OR spend on
+/// multiply and divide instead.
+let arith_group<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  op: u16,
+  alu_op: AluOp
+) -> Outcome => {
+  let opmode = (op >> 6) & 7
+  let is_add_sub = alu_op == Add || alu_op == Sub
+  if opmode == 3 || opmode == 7 {
+    if !is_add_sub { return Unimplemented(op) }
+    let size = if opmode == 3 { WORD } else { LONG }
+    return to_address_register(cpu, bus, op, alu_op, size)
+  }
+  let size = opmode_size(opmode)
+  if opmode < 4 { return to_data_register(cpu, bus, op, alu_op, size) }
+  if source_mode(op) > 1 { return to_memory(cpu, bus, op, alu_op, size) }
+  if !is_add_sub { return Unimplemented(op) }
+  extended(cpu, bus, op, alu_op == Sub, size)
+}
+
+/// Group 11: CMP `<ea>,Dn` (op-mode 0–2), CMPA (3, 7), and at 4–6 EOR `Dn,<ea>` — or CMPM
+/// when the ea mode is (An)+.
+let cmp_eor_group<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
+  let opmode = (op >> 6) & 7
+  if opmode == 3 || opmode == 7 {
+    return to_address_register(cpu, bus, op, Cmp, if opmode == 3 { WORD } else { LONG })
+  }
+  let size = opmode_size(opmode)
+  if opmode < 4 { return to_data_register(cpu, bus, op, Cmp, size) }
+  if source_mode(op) == 1 { return compare_memory(cpu, bus, op, size) }
+  if source_mode(op) == 0 { return eor_to_data_register(cpu, bus, op, size) }
+  to_memory(cpu, bus, op, Eor, size)
+}
+
+/// Group 0's immediate arithmetic: ORI, ANDI, SUBI, ADDI, EORI, CMPI `#imm,<ea>`. Bits 11–8
+/// name the operation; the rest of group 0 (bit operations, MOVEP, the CCR/SR forms) is
+/// not here yet.
+let immediate<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
+  let size_bits = (op >> 6) & 3
+  if size_bits == 3 || (op & 0x0100) != 0 { return Unimplemented(op) }
+  let mode = source_mode(op)
+  let reg = source_reg(op)
+  if mode == 1 || (mode == 7 && reg >= 2) { return Unimplemented(op) }
+  let alu_op = match (op >> 8) & 0xF {
+    0x0 => Or,
+    0x2 => And,
+    0x4 => Sub,
+    0x6 => Add,
+    0xA => Eor,
+    0xC => Cmp,
+    _ => return Unimplemented(op),
+  }
+  let size = opmode_size(size_bits)
+  let src = read_immediate(cpu, bus, size)
+  if mode == 0 {
+    let r = alu(alu_op, cpu.d[reg], src, size, cpu.sr)
+    prefetch(cpu, bus)
+    if size == LONG { cpu_idle(cpu, bus, if alu_op == Cmp { 2 } else { 4 }) }
+    finish_register(cpu, reg, alu_op, size, r)
+    return Executed
+  }
+  let at = locate(cpu, bus, mode, reg, size, true)
+  let value = read_operand(cpu, bus, at, size)
+  let r = alu(alu_op, value, src, size, cpu.sr)
+  set_flags(cpu, r.sr)
+  prefetch(cpu, bus)
+  if alu_op != Cmp { write_back(cpu, bus, at, size, r.value) }
+  Executed
+}
+
+/// Group 5 with a size: ADDQ and SUBQ `#1..8,<ea>`. Bits 11–9 are the data (0 means 8),
+/// bit 8 subtracts. To an address register the whole register changes and the flags do
+/// not, whatever the size — and the word form is the slower one: 8 cycles against the
+/// long's 6, in all 1,138 tests of it, where Motorola's table gives 8 for both.
+let add_sub_quick<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
+  let size = opmode_size((op >> 6) & 3)
+  let data_bits = u32((op >> 9) & 7)
+  let data = if data_bits == 0 { 8 } else { data_bits }
+  let subtract = (op & 0x0100) != 0
+  let mode = source_mode(op)
+  let reg = source_reg(op)
+  if mode == 1 {
+    prefetch(cpu, bus)
+    cpu_idle(cpu, bus, if size == WORD { 4 } else { 2 })
+    if !cpu.faulted {
+      cpu.a[reg] = if subtract { cpu.a[reg].wrapping_sub(data) } else { cpu.a[reg].wrapping_add(data) }
+    }
+    return Executed
+  }
+  let alu_op = if subtract { Sub } else { Add }
+  if mode == 0 {
+    let r = alu(alu_op, cpu.d[reg], data, size, cpu.sr)
+    prefetch(cpu, bus)
+    if size == LONG { cpu_idle(cpu, bus, 4) }
+    finish_register(cpu, reg, alu_op, size, r)
+    return Executed
+  }
+  let at = locate(cpu, bus, mode, reg, size, true)
+  let value = read_operand(cpu, bus, at, size)
+  let r = alu(alu_op, value, data, size, cpu.sr)
+  set_flags(cpu, r.sr)
+  prefetch(cpu, bus)
+  write_back(cpu, bus, at, size, r.value)
+  Executed
+}
+
+// ── The forms ────────────────────────────────────────────────────────────────
+
+/// `<ea>,Dn`: Dn = Dn op <ea> (CMP only compares). A long result costs idle cycles after the
+/// prefetch: four when the source was a register or an immediate, two when it came from
+/// memory, and CMP two either way.
+let to_data_register<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  op: u16,
+  alu_op: AluOp,
+  size: i64
+) -> Outcome => {
+  let dn = destination_reg(op)
+  let source = locate(cpu, bus, source_mode(op), source_reg(op), size, true)
+  let src = read_operand(cpu, bus, source, size)
+  let r = alu(alu_op, cpu.d[dn], src, size, cpu.sr)
+  prefetch(cpu, bus)
+  if size == LONG {
+    let from_memory = is_memory(source)
+    cpu_idle(cpu, bus, if alu_op == Cmp || from_memory { 2 } else { 4 })
+  }
+  finish_register(cpu, dn, alu_op, size, r)
+  Executed
+}
+
+/// `Dn,<ea>` to memory: read the operand, compute, prefetch, write it back.
+let to_memory<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  op: u16,
+  alu_op: AluOp,
+  size: i64
+) -> Outcome => {
+  let dn = destination_reg(op)
+  let at = locate(cpu, bus, source_mode(op), source_reg(op), size, true)
+  let value = read_operand(cpu, bus, at, size)
+  let r = alu(alu_op, value, cpu.d[dn], size, cpu.sr)
+  set_flags(cpu, r.sr)
+  prefetch(cpu, bus)
+  write_back(cpu, bus, at, size, r.value)
+  Executed
+}
+
+/// EOR Dn,Dm — the one `Dn,<ea>` form whose destination is a register.
+let eor_to_data_register<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  op: u16,
+  size: i64
+) -> Outcome => {
+  let dm = source_reg(op)
+  let r = alu(Eor, cpu.d[dm], cpu.d[destination_reg(op)], size, cpu.sr)
+  prefetch(cpu, bus)
+  if size == LONG { cpu_idle(cpu, bus, 4) }
+  finish_register(cpu, dm, Eor, size, r)
+  Executed
+}
+
+/// ADDA, SUBA, CMPA `<ea>,An`: a word source is sign-extended, and the arithmetic is always
+/// 32 bits. ADDA and SUBA touch no flags; CMPA sets them from a long compare.
+let to_address_register<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  op: u16,
+  alu_op: AluOp,
+  size: i64
+) -> Outcome => {
+  let an = destination_reg(op)
+  let source = locate(cpu, bus, source_mode(op), source_reg(op), size, true)
+  let raw = read_operand(cpu, bus, source, size)
+  let src = if size == WORD { sign_extend_word(u16(raw & 0xFFFF)) } else { raw }
+  prefetch(cpu, bus)
+  if alu_op == Cmp {
+    cpu_idle(cpu, bus, 2)
+    let r = alu(Cmp, cpu.a[an], src, LONG, cpu.sr)
+    set_flags(cpu, r.sr)
+    return Executed
+  }
+  let long_from_memory = size == LONG && is_memory(source)
+  cpu_idle(cpu, bus, if long_from_memory { 2 } else { 4 })
+  if !cpu.faulted {
+    cpu.a[an] = if alu_op == Sub { cpu.a[an].wrapping_sub(src) } else { cpu.a[an].wrapping_add(src) }
+  }
+  Executed
+}
+
+/// ADDX, SUBX: Dy,Dx, or -(Ay),-(Ax) memory to memory, with X as a carry in.
+let extended<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  op: u16,
+  subtract: bool,
+  size: i64
+) -> Outcome => {
+  let rx = destination_reg(op)
+  let ry = source_reg(op)
+  if source_mode(op) == 0 {
+    let r = alu_extended(subtract, cpu.d[rx], cpu.d[ry], size, cpu.sr)
+    prefetch(cpu, bus)
+    if size == LONG { cpu_idle(cpu, bus, 4) }
+    if !cpu.faulted {
+      write_data_register(cpu, rx, size, r.value)
+      cpu.sr = r.sr
+    }
+    return Executed
+  }
+  // -(Ay),-(Ax): each operand's An moves *before* its read — a long in halves, down 2 and
+  // the low word, down 2 and the high word — so an address error leaves it where it got to.
+  cpu_idle(cpu, bus, 2)
+  let src = read_predecrement(cpu, bus, ry, size)
+  let dest = read_predecrement(cpu, bus, rx, size)
+  let r = alu_extended(subtract, dest, src, size, cpu.sr)
+  set_flags(cpu, r.sr)
+  let fc = data_fc(cpu)
+  let addr = cpu.a[rx]
+  if size != LONG {
+    prefetch(cpu, bus)
+    write_memory(cpu, bus, addr, size, r.value)
+    return Executed
+  }
+  // A long result straddles the prefetch: low word, prefetch, high word.
+  cpu_write_word(cpu, bus, addr.wrapping_add(2), fc, u16(r.value & 0xFFFF))
+  prefetch(cpu, bus)
+  cpu_write_word(cpu, bus, addr, fc, u16(r.value >> 16))
+  Executed
+}
+
+/// -(An) as ADDX and SUBX read it: An moves before the access, a long in two word steps
+/// with the low word read first.
+let read_predecrement<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  reg: i64,
+  size: i64
+) -> u32 => {
+  if cpu.faulted { return 0 }
+  let fc = data_fc(cpu)
+  if size != LONG {
+    cpu.a[reg] = cpu.a[reg].wrapping_sub(u32(step_size(reg, size)))
+    return read_memory(cpu, bus, cpu.a[reg], size)
+  }
+  cpu.a[reg] = cpu.a[reg].wrapping_sub(2)
+  let low = u32(cpu_read_word(cpu, bus, cpu.a[reg], fc))
+  if cpu.faulted { return 0 }
+  cpu.a[reg] = cpu.a[reg].wrapping_sub(2)
+  let high = u32(cpu_read_word(cpu, bus, cpu.a[reg], fc))
+  (high << 16) | low
+}
+
+/// CMPM (Ay)+,(Ax)+.
+let compare_memory<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  op: u16,
+  size: i64
+) -> Outcome => {
+  let source = locate(cpu, bus, 3, source_reg(op), size, true)
+  let src = read_operand(cpu, bus, source, size)
+  let destination = locate(cpu, bus, 3, destination_reg(op), size, true)
+  let dest = read_operand(cpu, bus, destination, size)
+  let r = alu(Cmp, dest, src, size, cpu.sr)
+  set_flags(cpu, r.sr)
+  prefetch(cpu, bus)
+  Executed
+}
+
+// ── Shared steps ─────────────────────────────────────────────────────────────
+
+/// A read-modify-write's result going back to memory. A long goes **low word first** — at
+/// the higher address, then the high word — for every addressing mode, where MOVE writes
+/// that way only to -(An).
+let write_back<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  at: Location,
+  size: i64,
+  value: u32
+) -> void => {
+  if size != LONG { return write_operand(cpu, bus, at, size, value) }
+  match at {
+    InMemory(addr) => write_long_low_first(cpu, bus, addr, value),
+    Stepping(addr, reg, after) => {
+      write_long_low_first(cpu, bus, addr, value)
+      commit_step(cpu, reg, after)
+    },
+    _ => write_operand(cpu, bus, at, size, value),
+  }
+}
+
+let write_long_low_first<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  addr: u32,
+  value: u32
+) -> void => {
+  cpu_write_word(cpu, bus, addr.wrapping_add(2), data_fc(cpu), u16(value & 0xFFFF))
+  cpu_write_word(cpu, bus, addr, data_fc(cpu), u16(value >> 16))
+}
+
+/// `#imm` of `size` from the instruction stream: one extension word (a byte in its low
+/// half), or two for a long.
+let read_immediate<b> where b: Bus = (cpu: mut Cpu, bus: mut b, size: i64) -> u32 => {
+  if size == LONG {
+    let high = u32(take_extension(cpu, bus))
+    let low = u32(take_extension(cpu, bus))
+    return (high << 16) | low
+  }
+  let word = u32(take_extension(cpu, bus))
+  if size == BYTE { word & 0xFF } else { word }
+}
+
+/// Store a register-destination result: Dn's low `size` bytes (unless the operation only
+/// compares) and the flags — neither if the instruction faulted.
+let finish_register = (
+  cpu: mut Cpu,
+  dn: i64,
+  alu_op: AluOp,
+  size: i64,
+  r: AluResult
+) -> void => {
+  if cpu.faulted { return }
+  if alu_op != Cmp { write_data_register(cpu, dn, size, r.value) }
+  cpu.sr = r.sr
+}
+
+/// Dn's low `size` bytes replaced by `value`'s.
+let write_data_register = (cpu: mut Cpu, dn: i64, size: i64, value: u32) -> void => {
+  let mask = size_mask(size)
+  cpu.d[dn] = (cpu.d[dn] & ~mask) | (value & mask)
+}
+
+/// The condition codes (and the rest of SR, which the ALU passed through), unless faulted.
+let set_flags = (cpu: mut Cpu, sr: u16) -> void => {
+  if !cpu.faulted { cpu.sr = sr }
+}
+
+/// Op-mode or size bits 0, 1, 2 as byte, word, long.
+let opmode_size = pure (bits: u16) -> i64 => match bits & 3 {
+  0 => BYTE,
+  1 => WORD,
+  _ => LONG,
+}

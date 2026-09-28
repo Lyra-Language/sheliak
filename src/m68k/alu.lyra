@@ -1,0 +1,123 @@
+module m68k
+//! The arithmetic and logic unit: an operation's result and the condition codes it sets,
+//! per operation size. No bus, no timing — the instruction forms in `arith.lyra` decide
+//! when an operand is read and the result written; this decides what they are.
+
+/// The two-operand operations of ADD, SUB, AND, OR, EOR and CMP, and every form of them.
+pub data AluOp =
+  Add
+  | Sub
+  | And
+  | Or
+  | Eor
+  /// SUB without the result: the flags only, and X untouched.
+  | Cmp
+
+/// A result and the status register it leaves.
+pub struct AluResult {
+  value: u32,
+  sr: u16,
+}
+
+/// `dest op src` at `size` (a byte, word or long of each operand is used), with `sr` the
+/// status register before. Add and Sub set X from the carry; Cmp and the logical
+/// operations leave X alone, and the logical operations clear V and C.
+pub let alu = pure (op: AluOp, dest: u32, src: u32, size: i64, sr: u16) -> AluResult => {
+  let mask = size_mask(size)
+  let d = dest & mask
+  let s = src & mask
+  match op {
+    Add => add_with(d, s, 0, size, sr, false),
+    Sub => sub_with(d, s, 0, size, sr, false),
+    Cmp => {
+      let r = sub_with(d, s, 0, size, sr, false)
+      AluResult { value: d, sr: (r.sr & ~SR_X) | (sr & SR_X) }
+    },
+    And => logic(d & s, size, sr),
+    Or => logic(d | s, size, sr),
+    Eor => logic(d ~ s, size, sr),
+  }
+}
+
+/// ADDX and SUBX: `dest ± src ± X`. Z is only ever *cleared* — a zero result leaves it as
+/// it was — so a multi-precision sum's Z covers every word of it.
+pub let alu_extended = pure (
+  subtract: bool,
+  dest: u32,
+  src: u32,
+  size: i64,
+  sr: u16
+) -> AluResult => {
+  let mask = size_mask(size)
+  let x: u32 = if (sr & SR_X) != 0 { 1 } else { 0 }
+  if subtract {
+    sub_with(dest & mask, src & mask, x, size, sr, true)
+  } else {
+    add_with(dest & mask, src & mask, x, size, sr, true)
+  }
+}
+
+/// `d + s + x`: C and X from the carry out of the top bit, V when two operands of one sign
+/// give a result of the other.
+let add_with = pure (
+  d: u32,
+  s: u32,
+  x: u32,
+  size: i64,
+  sr: u16,
+  sticky_z: bool
+) -> AluResult => {
+  let mask = size_mask(size)
+  let sign = sign_bit(size)
+  let wide = u64(d) + u64(s) + u64(x)
+  let r = u32(wide & u64(mask))
+  let carry = wide > u64(mask)
+  let overflow = ((s ~ r) & (d ~ r) & sign) != 0
+  AluResult { value: r, sr: arithmetic_flags(sr, r, sign, carry, overflow, sticky_z) }
+}
+
+/// `d - s - x`: C and X from the borrow, V when operands of different signs give a result
+/// whose sign is the subtrahend's.
+let sub_with = pure (
+  d: u32,
+  s: u32,
+  x: u32,
+  size: i64,
+  sr: u16,
+  sticky_z: bool
+) -> AluResult => {
+  let mask = size_mask(size)
+  let sign = sign_bit(size)
+  let r = d.wrapping_sub(s).wrapping_sub(x) & mask
+  let borrow = u64(s) + u64(x) > u64(d)
+  let overflow = ((s ~ d) & (r ~ d) & sign) != 0
+  AluResult { value: r, sr: arithmetic_flags(sr, r, sign, borrow, overflow, sticky_z) }
+}
+
+/// X, N, Z, V and C for an add or subtract. With `sticky_z` (ADDX, SUBX) a zero result
+/// leaves Z as it was instead of setting it.
+let arithmetic_flags = pure (
+  sr: u16,
+  r: u32,
+  sign: u32,
+  carry: bool,
+  overflow: bool,
+  sticky_z: bool
+) -> u16 => {
+  var out = sr & ~(SR_X | SR_N | SR_Z | SR_V | SR_C)
+  if carry { out = out | SR_X | SR_C }
+  if overflow { out = out | SR_V }
+  if (r & sign) != 0 { out = out | SR_N }
+  if r == 0 {
+    if !sticky_z || (sr & SR_Z) != 0 { out = out | SR_Z }
+  }
+  out
+}
+
+/// N and Z from a logical result; V and C cleared; X kept.
+let logic = pure (r: u32, size: i64, sr: u16) -> AluResult => {
+  var out = sr & ~(SR_N | SR_Z | SR_V | SR_C)
+  if (r & sign_bit(size)) != 0 { out = out | SR_N }
+  if r == 0 { out = out | SR_Z }
+  AluResult { value: r, sr: out }
+}

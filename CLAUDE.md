@@ -67,13 +67,17 @@ src/m68k/            the 68000 (module m68k):
   access.lyra        fault-aware accesses; the address error exception
   ea.lyra            effective addresses: locate, read_operand, write_operand
   move.lyra          MOVE, MOVEA (with the -(An) and (xxx).L destination orders)
+  alu.lyra           results and condition codes per operation and size (no bus)
+  arith.lyra         ADD/SUB/AND/OR/EOR/CMP in every form: register, memory, address
+                     register, extended, CMPM, immediate (group 0), quick (group 5)
 tests/fetch.sh       download the pinned suite
 tests/cpu.sh         run the suite, one line per instruction file
 ```
 
 ## Status
 
-The 68000 passes every test for NOP, MOVEQ, MOVE.b/.w/.l and MOVEA.w/.l (56,455), address
-errors included; every other opcode answers `Unimplemented`, which the runner counts apart
-from failures. `CPUTEST_FLAGS=--no-address-errors` skips tests that end in one, to get an
+The 68000 passes every test in 37 of the suite's 125 files (298,405 tests, address errors
+included): NOP, MOVEQ, MOVE, MOVEA, and ADD/SUB/AND/OR/EOR/CMP with their A, X, M, I and Q
+forms. Every other opcode answers `Unimplemented`, which the runner counts apart from
+failures. `CPUTEST_FLAGS=--no-address-errors` skips tests that end in one, to get an
 instruction's ordinary path right first.
