@@ -188,8 +188,8 @@ impl Bus for TestBus {
     self.access("w", fc, addr, ".b", u32(value))
   }
   // The suite has no interrupts: the pins stay low.
-  interrupt_level = (self) => 0
-  acknowledge_interrupt = (self, level) => 24 + u32(level)
+  interrupt_level = pure (self) => 0
+  acknowledge_interrupt = pure (self, level) => 24 + u32(level)
   test_and_set_byte = (self, addr, fc) => {
     // The files log it as one 10-cycle `t` transaction with the byte written.
     let value = self.byte(addr)
