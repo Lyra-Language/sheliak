@@ -18,7 +18,11 @@ let arith_group<b> where b: Bus = (
   let opmode = (op >> 6) & 7
   let is_add_sub = alu_op == Add || alu_op == Sub
   if opmode == 3 || opmode == 7 {
-    if !is_add_sub { return Unimplemented(op) }
+    // AND and OR spend these op-modes on MULU/MULS and DIVU/DIVS (data sources only).
+    if !is_add_sub {
+      if source_mode(op) == 1 { return Unimplemented(op) }
+      return if alu_op == And { multiply(cpu, bus, op) } else { divide(cpu, bus, op) }
+    }
     let size = if opmode == 3 { WORD } else { LONG }
     return to_address_register(cpu, bus, op, alu_op, size)
   }

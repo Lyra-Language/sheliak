@@ -1,0 +1,188 @@
+module m68k
+//! MULU, MULS, DIVU and DIVS: 16 × 16 → 32 multiplies and 32 ÷ 16 → 16 : 16 divides, whose
+//! times depend on the operands.
+//!
+//! **Multiply** takes 38 + 2n cycles: for MULU n is the multiplier's one bits; for MULS it
+//! is the number of `01` and `10` pairs in the multiplier with a zero appended below it. The
+//! prefetch comes first, the rest is idle.
+//!
+//! **Divide** idles first, then prefetches. Its time follows the chip's microcode, which
+//! shifts and conditionally subtracts once per quotient bit; [divu_cycles] and
+//! [divs_cycles] are Jorge Cwik's model of it ("68000 division timing"), which the tests
+//! confirm. Overflow — a quotient that does not fit 16 bits — is detected early for the
+//! unsigned case and costs little; the register is left alone and V set. Division by zero
+//! is exception 5.
+
+/// MULU <ea>, Dn (bit 8 clear) and MULS <ea>, Dn (bit 8 set): Dn.l = Dn.w × <ea>.w. N and Z
+/// from the 32-bit product, V and C cleared, X kept.
+let multiply<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
+  let signed = (op & 0x0100) != 0
+  let source = locate(cpu, bus, source_mode(op), source_reg(op), WORD, true)
+  let multiplier = u16(read_operand(cpu, bus, source, WORD) & 0xFFFF)
+  prefetch(cpu, bus)
+  if cpu.faulted { return Executed }
+  let dn = destination_reg(op)
+  let multiplicand = u16(cpu.d[dn] & 0xFFFF)
+  let product = if signed {
+    u32(i32(i16(multiplicand)) * i32(i16(multiplier)))
+  } else {
+    u32(multiplicand) * u32(multiplier)
+  }
+  let ones = if signed { bit_pairs(multiplier) } else { ones_in(multiplier) }
+  cpu_idle(cpu, bus, 34 + 2 * ones)
+  cpu.d[dn] = product
+  cpu.sr = long_logic_flags(cpu.sr, product)
+  Executed
+}
+
+/// DIVU <ea>, Dn (bit 8 clear) and DIVS <ea>, Dn (bit 8 set): Dn.l ÷ <ea>.w, the quotient in
+/// Dn's low word and the remainder (with the dividend's sign) in its high word.
+let divide<b> where b: Bus = (cpu: mut Cpu, bus: mut b, op: u16) -> Outcome => {
+  let start = cpu.pc
+  let signed = (op & 0x0100) != 0
+  let source = locate(cpu, bus, source_mode(op), source_reg(op), WORD, true)
+  let divisor = u16(read_operand(cpu, bus, source, WORD) & 0xFFFF)
+  if cpu.faulted { return Executed }
+  let dn = destination_reg(op)
+  let dividend = cpu.d[dn]
+  if divisor == 0 { return divide_by_zero(cpu, bus, start) }
+  cpu_idle(cpu, bus, division_cycles(signed, dividend, divisor) - 4)
+  prefetch(cpu, bus)
+  if cpu.faulted { return Executed }
+  match divided(signed, dividend, divisor) {
+    Some(q) => {
+      cpu.d[dn] = q
+      cpu.sr = word_quotient_flags(cpu.sr, u16(q & 0xFFFF))
+    },
+    None => { cpu.sr = (cpu.sr | SR_V) & ~SR_C },
+  }
+  Executed
+}
+
+/// Division by zero: N, Z, V and C cleared, eight idle cycles, exception 5.
+///
+/// **The frame's PC is the divide's own address** (`start`), where Motorola's manual says
+/// the next instruction's. The suite has a single divide-by-zero test (a random divisor is
+/// zero once in 65,536): `DIVU (d16, A7), D0` at 3072 pushes 3072. One data point, so a
+/// different rule that happens to agree there is possible; revisit with real software.
+let divide_by_zero<b> where b: Bus = (
+  cpu: mut Cpu,
+  bus: mut b,
+  start: u32
+) -> Outcome => {
+  cpu.sr = cpu.sr & ~(SR_N | SR_Z | SR_V | SR_C)
+  cpu_idle(cpu, bus, 8)
+  group_exception(cpu, bus, VECTOR_DIVIDE_BY_ZERO, start)
+  Executed
+}
+
+pub const VECTOR_DIVIDE_BY_ZERO: u32 = 5
+
+/// [divs_cycles] or [divu_cycles].
+let division_cycles = pure (signed: bool, dividend: u32, divisor: u16) -> i64 =>
+  if signed { divs_cycles(dividend, divisor) } else { divu_cycles(dividend, divisor) }
+
+/// [signed_quotient] or [unsigned_quotient].
+let divided = pure (signed: bool, dividend: u32, divisor: u16) -> Maybe<u32> => {
+  if signed { return signed_quotient(dividend, divisor) }
+  unsigned_quotient(dividend, divisor)
+}
+
+/// `dividend ÷ divisor` unsigned, as remainder:quotient words, or `None` if the quotient
+/// needs more than 16 bits.
+let unsigned_quotient = pure (dividend: u32, divisor: u16) -> Maybe<u32> => {
+  let quotient = dividend / u32(divisor)
+  if quotient > 0xFFFF { return None }
+  let remainder = dividend % u32(divisor)
+  Some((remainder << 16) | quotient)
+}
+
+/// `dividend ÷ divisor` signed, truncating: the remainder has the dividend's sign.
+let signed_quotient = pure (dividend: u32, divisor: u16) -> Maybe<u32> => {
+  let n = i64(i32(dividend))
+  let d = i64(i16(divisor))
+  let quotient = n / d
+  if quotient > 32767 || quotient < -32768 { return None }
+  let remainder = n % d
+  Some((u32(remainder & 0xFFFF) << 16) | u32(quotient & 0xFFFF))
+}
+
+/// DIVU's time in cycles, prefetch included (Cwik's model). Overflow is detected before the
+/// loop; otherwise each of 15 quotient bits costs 4 cycles when the shifted dividend
+/// carried out, 6 when it did not, and 2 fewer of those when it then subtracted.
+let divu_cycles = pure (dividend: u32, divisor: u16) -> i64 => {
+  if (dividend >> 16) >= u32(divisor) { return 10 }
+  var cycles: i64 = 38
+  let high_divisor = u32(divisor) << 16
+  var rest = dividend
+  for _ in 0..<15 {
+    let carried = (rest & 0x80000000) != 0
+    rest = rest << 1
+    if carried {
+      rest = rest.wrapping_sub(high_divisor)
+    } else {
+      cycles += 2
+      if rest >= high_divisor {
+        rest = rest.wrapping_sub(high_divisor)
+        cycles -= 1
+      }
+    }
+  }
+  cycles * 2
+}
+
+/// DIVS's time in cycles, prefetch included (Cwik's model): the absolute-value overflow
+/// check first, then a cost per one bit of the absolute quotient's top 15.
+let divs_cycles = pure (dividend: u32, divisor: u16) -> i64 => {
+  let n = i64(i32(dividend))
+  let d = i64(i16(divisor))
+  var cycles: i64 = if n < 0 { 7 } else { 6 }
+  let abs_n = n.abs()
+  let abs_d = d.abs()
+  if (abs_n >> 16) >= abs_d { return (cycles + 2) * 2 }
+  // A quotient too big for a signed word is caught just as early.
+  if signed_quotient(dividend, divisor) == None { return (cycles + 2) * 2 }
+  cycles += 55
+  if d >= 0 {
+    if n >= 0 { cycles -= 1 } else { cycles += 1 }
+  }
+  var quotient = u32(abs_n / abs_d)
+  for _ in 0..<15 {
+    if (quotient & 0x8000) == 0 { cycles += 1 }
+    quotient = quotient << 1
+  }
+  cycles * 2
+}
+
+/// How many one bits `v` has.
+let ones_in = pure (v: u16) -> i64 => {
+  var ones: i64 = 0
+  var rest = v
+  for rest != 0 {
+    ones += i64(rest & 1)
+    rest = rest >> 1
+  }
+  ones
+}
+
+/// MULS's n: the `01` and `10` pairs in `v` with a zero appended below its lowest bit.
+let bit_pairs = pure (v: u16) -> i64 => {
+  let appended = u32(v) << 1
+  ones_in(u16((appended ~ (appended >> 1)) & 0xFFFF))
+}
+
+/// N and Z from a 32-bit result, V and C cleared, X kept.
+let long_logic_flags = pure (sr: u16, v: u32) -> u16 => {
+  var out = sr & ~(SR_N | SR_Z | SR_V | SR_C)
+  if (v & 0x80000000) != 0 { out = out | SR_N }
+  if v == 0 { out = out | SR_Z }
+  out
+}
+
+/// N and Z from the 16-bit quotient, V and C cleared, X kept.
+let word_quotient_flags = pure (sr: u16, q: u16) -> u16 => {
+  var out = sr & ~(SR_N | SR_Z | SR_V | SR_C)
+  if (q & 0x8000) != 0 { out = out | SR_N }
+  if q == 0 { out = out | SR_Z }
+  out
+}
