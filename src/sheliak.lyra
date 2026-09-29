@@ -21,8 +21,8 @@
 // for A, B and C (the Genesis's bottom row, left to right), the left shoulder, North and
 // the right shoulder for X, Y and Z; Start and Back for Start and Mode.
 //
-// The ROM is a raw image or an SMD one (the copier's interleaved format), whatever the
-// file's name (`.bin`, `.gen`, `.md`, `.smd`). A split SMD image's parts follow the first
+// The ROM is a raw image, an SMD one or an MGD one (the copiers' interleaved formats),
+// whatever the file's name (`.bin`, `.gen`, `.md`, `.smd`). A split SMD image's parts follow the first
 // on the command line, or are found beside it by their names (`game.1` then `game.2`,
 // `sf2md1.smd` then `sf2md2.smd`, `sf2a.smd` then `sf2b.smd`). A cartridge with save RAM keeps it in a
 // `.srm` file beside the ROM (the ROM's name, its extension replaced): loaded at start,

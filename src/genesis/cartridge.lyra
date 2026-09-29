@@ -24,6 +24,13 @@ module genesis
 //! even addresses' (a short last block split at its own half). The file's name is not
 //! consulted: `.bin`, `.gen` and `.md` files that are SMD images inside are common.
 //!
+//! **An MGD image** (the Multi Game Doctor's, usually `.md`) has no header: the whole file
+//! is one block laid out as an SMD block is, the odd addresses' bytes and then the even
+//! addresses'. So it is told apart by content: a file that is not SMD and does not read
+//! "SEGA" at 100 as it is, but does once put back in address order, is MGD — which also
+//! settles the order, since the other would read "ESAG". A file that reads "SEGA" neither
+//! way (a few unlicensed games leave it out) is taken as raw.
+//!
 //! **A split SMD image** is a game too big for the copier's disk, in parts: each an SMD
 //! file with its own header, byte 2 set (40) in every part but the last, and the ROM their
 //! blocks in turn. BlastEm refuses them, so there is no reference to hold them to beyond
@@ -64,15 +71,15 @@ pub struct Cartridge {
   save_dirty: bool,
 }
 
-/// The ROM image in a dump's files, in order: one file for a raw or an SMD image, or the
+/// The ROM image in a dump's files, in order: one file for a raw, SMD or MGD image, or the
 /// parts of a split SMD image — each an SMD file of its own, byte 2 set in all but the
-/// last. An SMD image's blocks are put back in address order, a raw image kept as it is.
-/// An error says what is wrong with the parts.
+/// last. An SMD or MGD image is put back in address order, a raw image kept as it is. An
+/// error says what is wrong with the parts.
 pub let rom_image = pure (files: [][]u8) -> Result<[]u8, string> => {
   if files.len() == 0 { return Err("no file given") }
   if !is_smd(files[0]) {
     if files.len() > 1 { return Err("given in parts, but its first is not an SMD file") }
-    return Ok(files[0])
+    return Ok(raw_or_mgd(files[0]))
   }
   var rom: []u8 = []
   for n, file in files {
@@ -138,6 +145,14 @@ let is_smd = pure (file: []u8) -> bool => {
   true
 }
 
+/// A file with no header as the ROM it holds: as it is if it reads "SEGA" so, put back in
+/// address order if it reads "SEGA" only then (MGD), and as it is if neither.
+let raw_or_mgd = pure (file: []u8) -> []u8 => {
+  if says_sega(file) || file.len() % 2 != 0 { return file }
+  let rom = interleaved(file, 0, file.len())
+  if says_sega(rom) { rom } else { file }
+}
+
 /// An SMD file's ROM, its blocks put back in address order.
 let smd_rom = pure (file: []u8) -> []u8 => {
   let size = file.len() - SMD_HEADER
@@ -145,15 +160,23 @@ let smd_rom = pure (file: []u8) -> []u8 => {
   var block = 0
   for block < size {
     let length = if size - block < SMD_BLOCK { size - block } else { SMD_BLOCK }
-    let half = length / 2
-    let from = SMD_HEADER + block
-    for i in 0..<half {
-      rom[block + 2 * i] = file[from + half + i]
-      rom[block + 2 * i + 1] = file[from + i]
-    }
+    let part = interleaved(file, SMD_HEADER + block, length)
+    for i in 0..<length { rom[block + i] = part[i] }
     block += SMD_BLOCK
   }
   rom
+}
+
+/// The `length` bytes of `file` from `from`, the odd addresses' and then the even
+/// addresses', put back in address order.
+let interleaved = pure (file: []u8, from: i64, length: i64) -> []u8 => {
+  let half = length / 2
+  var out: []u8 = [0; length]
+  for i in 0..<half {
+    out[2 * i] = file[from + half + i]
+    out[2 * i + 1] = file[from + i]
+  }
+  out
 }
 
 /// Whether a ROM's header begins "SEGA" (at 100, or 101 after a space), as TMSS asks.
