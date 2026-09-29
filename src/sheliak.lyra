@@ -25,16 +25,17 @@
 // whatever the file's name (`.bin`, `.gen`, `.md`, `.smd`). A split SMD image's parts
 // follow the first on the command line, or are found beside it by their names (`game.1`
 // then `game.2`, `sf2md1.smd` then `sf2md2.smd`, `sf2a.smd` then `sf2b.smd`). Any of them
-// may be in a zip or 7z archive, whose ROM — or split image's parts — is played.
+// may be in a zip, 7z or RAR 5 archive, whose ROM — or split image's parts — is played.
 //
 // A cartridge with save RAM keeps it in a `.srm` file beside the ROM (the ROM's name, its
-// extension replaced — both of them for `game.smd.zip` or `game.smd.7z`): loaded at start, written every ten
+// extension replaced — both of them for `game.smd.zip`, `.7z` or `.rar`): loaded at start, written every ten
 // seconds while the game has changed it, and on quitting — BlastEm's `save.sram` format, a
 // byte per byte of RAM. Headless runs read and write it only when given `--save`.
 
 import std.io.{ read_bytes, write_bytes }
 import std.zip.{ is_zip }
 import std.sevenzip.{ is_7z }
+import std.rar.{ is_rar }
 import std.path
 import bindings.sdl3.{
   init, quit, last_error, INIT_VIDEO, INIT_GAMEPAD,
@@ -56,7 +57,7 @@ import bindings.sdl3.{
 import m68k.{ Cpu }
 import genesis.{
   GenesisBus, genesis_bus, new_cpu, power_on, run_frame, new_mixer, mix_audio,
-  rom_image, roms_in_zip, roms_in_7z, is_split_part, next_part_path, save_bytes, load_save, set_pads,
+  rom_image, roms_in_zip, roms_in_7z, roms_in_rar, is_split_part, next_part_path, save_bytes, load_save, set_pads,
   PAD_UP, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_A, PAD_B, PAD_C, PAD_START,
   PAD_X, PAD_Y, PAD_Z, PAD_MODE,
 }
@@ -168,8 +169,8 @@ let main = () -> u8 => {
   status
 }
 
-/// The files of a dump, read: those given — a zip or 7z archive's ROM, or split image's
-/// parts, in its place — and when only the first part of a split SMD image is, the parts after it,
+/// The files of a dump, read: those given — a zip, 7z or RAR archive's ROM, or split
+/// image's parts, in its place — and when only the first part of a split SMD image is, the parts after it,
 /// by the names they are guessed to have. `None`, having said why, if one cannot be read.
 let read_rom_files = (paths: []string) -> Maybe<[][]u8> => {
   var files: [][]u8 = []
@@ -179,9 +180,15 @@ let read_rom_files = (paths: []string) -> Maybe<[][]u8> => {
       println("sheliak: cannot read ${path}")
       return None
     }
-    if is_zip(file) || is_7z(file) {
+    if is_zip(file) || is_7z(file) || is_rar(file) {
       zipped = true
-      let found = if is_zip(file) { roms_in_zip(file) } else { roms_in_7z(file) }
+      let found = if is_zip(file) {
+        roms_in_zip(file)
+      } else if is_7z(file) {
+        roms_in_7z(file)
+      } else {
+        roms_in_rar(file)
+      }
       match found {
         Ok(roms) => for rom in roms { files.push(rom) },
         Err(why) => {
@@ -347,10 +354,10 @@ let write_save = (bus: mut GenesisBus, path: string) -> void => {
 }
 
 /// The save file beside a ROM: its name with the extension replaced by `.srm` — both of a
-/// zipped ROM's, `game.smd.zip` (or `.7z`) saving to `game.srm`.
+/// zipped ROM's, `game.smd.zip` (or `.7z`, `.rar`) saving to `game.srm`.
 let save_file_for = pure (path: string) -> string => {
   var unzipped = path
-  for suffix in [".zip", ".ZIP", ".7z", ".7Z"] {
+  for suffix in [".zip", ".ZIP", ".7z", ".7Z", ".rar", ".RAR"] {
     if let Some(stem) = path.strip_suffix(suffix) { unzipped = stem }
   }
   let rom_path = if unzipped.len() < path.len() && unzipped.extension().is_some() {

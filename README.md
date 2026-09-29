@@ -33,8 +33,8 @@ A ROM may be a raw image, an SMD one or an MGD one (the Multi Game Doctor's, oft
 whatever its extension. A split SMD image is found from its first part by the names of the
 rest (`game.1`, `game.2`, …; `sf2md1.smd`, `sf2md2.smd`, …; `sf2a.smd`, `sf2b.smd`, …), or
 its parts can be given in order: `build/sheliak part1 part2 …`. Any of these may be in a
-zip or 7z archive (`game.zip`, `game.smd.7z`). A cartridge with save RAM keeps it in a
-`.srm` file beside the ROM.
+zip, 7z or RAR 5 archive (`game.zip`, `game.smd.7z`, `game.rar`). A cartridge with save RAM
+keeps it in a `.srm` file beside the ROM.
 
 ## Testing
 

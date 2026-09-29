@@ -37,7 +37,8 @@ module genesis
 //! the format; the front end finds the parts after the first by their names
 //! ([next_part_path]), or is given them.
 //!
-//! **A zip or 7z archive holds the files** ([roms_in_zip], [roms_in_7z]): the ROM in it — the one file with a
+//! **A zip, 7z or RAR 5 archive holds the files** ([roms_in_zip], [roms_in_7z],
+//! [roms_in_rar]): the ROM in it — the one file with a
 //! ROM's extension (`.bin`, `.gen`, `.md`, `.smd`, a numbered part), or the one file if
 //! none has — or a split SMD image's parts, found from the first by their names as on
 //! disk. An archive holding several ROMs is refused, naming them, rather than one picked.
@@ -48,6 +49,7 @@ module genesis
 
 import std.zip.{ ZipEntry, zip_entries, unzip }
 import std.sevenzip.{ SevenZipEntry, open_7z, extract_7z }
+import std.rar.{ RarEntry, open_rar, extract_rar }
 import std.path
 
 /// Save RAM's buses.
@@ -153,6 +155,14 @@ pub let roms_in_7z = (archive: []u8) -> Result<[][]u8, string> => {
   let contents = open_7z(archive)?
   let files = contents.entries.filter((e) => !e.directory)
   roms_in_archive(files.map((e) => e.name), (i) => extract_7z(contents, files[i]))
+}
+
+/// The ROM files a RAR 5 archive holds, as [roms_in_zip] finds them in a zip. Links, which
+/// RAR can store, are no ROM.
+pub let roms_in_rar = (archive: []u8) -> Result<[][]u8, string> => {
+  let contents = open_rar(archive)?
+  let files = contents.entries.filter((e) => !e.directory && !e.link)
+  roms_in_archive(files.map((e) => e.name), (i) => extract_rar(contents, files[i]))
 }
 
 /// The ROM files among an archive's files, named `names` and read by `extract`: the one
