@@ -97,6 +97,9 @@ const TESTS: []string = [
   "fill_active",
   "copy_active",
   "read_active",
+  "mid_cram",
+  "mid_vscroll",
+  "mid_cram_h32",
 ]
 
 /// The code of the test `name`. (A `match` rather than a table of functions: each takes the
@@ -137,7 +140,10 @@ let body = (name: string, a: mut Asm) -> void => match name {
   "dma_cram_active" => dma_cram_active(a),
   "fill_active" => fill_active(a),
   "copy_active" => copy_active(a),
-  _ => read_active(a),
+  "read_active" => read_active(a),
+  "mid_cram" => mid_cram(a),
+  "mid_vscroll" => mid_vscroll(a),
+  _ => mid_cram_h32(a),
 }
 
 /// The H slack each timing test is compared with, in slots (tests/vdp.sh reads it from the
@@ -514,6 +520,63 @@ let read_active = (a: mut Asm) -> void => {
   for _ in 0..<6 { a.w(0x3212) }
   a.end_handler(over)
   a.run_on_hint()
+}
+
+// ── Mid-line changes ─────────────────────────────────────────────────────────
+//
+// A scene changed while a line goes out, every frame, by an H interrupt at line 150 — so
+// the frame compared shows it. The changes go through the FIFO, filled first with four
+// scratch VRAM words: then each lands in the external slot the VDP gives it, not where the
+// 68000 happened to be (which the emulators do not agree on to the pixel), and the frames
+// must match pixel for pixel. The 68000 parks with interrupts on.
+
+/// Palette entries 1–6 changed mid-line and put back: vertical edges where each lands,
+/// and a CRAM dot at each.
+let mid_cram = (a: mut Asm) -> void => {
+  let over = a.begin_skip()
+  a.vector(28)
+  a.burst(4)
+  a.command(0x3, 2)
+  for i in 1..<7 { a.data(u16(0x0E0E - i * 0x0202)) }
+  a.command(0x3, 2)
+  for i in 1..<7 { a.data(palette()[i]) }
+  a.w(0x4E73)
+  a.end_skip(over)
+  scene(a, true)
+  a.upload(words_to_bytes([5, 0x3F3]), 0x1, HSCROLL_TABLE)
+  a.run_every_frame()
+}
+
+/// 2-cell vertical scroll: all 40 VSRAM words rewritten mid-line, then put back — each
+/// block fetched after its word lands takes the new value.
+let mid_vscroll = (a: mut Asm) -> void => {
+  let over = a.begin_skip()
+  a.vector(28)
+  a.burst(4)
+  a.command(0x5, 0)
+  for c in 0..<40 { a.data(u16(c * 3 + 40)) }
+  a.command(0x5, 0)
+  for c in 0..<40 { a.data(u16(c)) }
+  a.w(0x4E73)
+  a.end_skip(over)
+  scene(a, true)
+  a.reg(11, 0x04)
+  a.upload(words_to_bytes([c in 0..<40 | u16(c)]), 0x5, 0)
+  a.run_every_frame()
+}
+
+/// The background colour changed mid-line in 32-cell mode, and put back.
+let mid_cram_h32 = (a: mut Asm) -> void => {
+  let over = a.begin_skip()
+  a.vector(28)
+  a.burst(4)
+  a.command(0x3, 0x42)
+  for i in 0..<6 { a.data(u16(0x0222 * (i + 1))) }
+  a.data(palette()[0x21])
+  a.w(0x4E73)
+  a.end_skip(over)
+  scene(a, false)
+  a.run_every_frame()
 }
 
 // ── Scenes ───────────────────────────────────────────────────────────────────
@@ -1130,4 +1193,13 @@ let burst = (self: mut Asm, n: i64) -> void => {
   self.command(0x1, 0xB000)
   self.lea(VDP_DATA, 2)
   for _ in 0..<n { self.w(0x3481) }
+}
+
+/// The display on, the H interrupt at line 150 of every frame (register 10 = 150), and
+/// interrupts unmasked for good.
+let run_every_frame = (self: mut Asm) -> void => {
+  self.reg(10, 150)
+  self.reg(0, 0x14)
+  display_on(self)
+  self.set_sr(0x2000)
 }

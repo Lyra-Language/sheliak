@@ -7,9 +7,25 @@ module vdp
 //! is what a rendering bug changes. Turning that into light is the display's business (the
 //! DAC's 15 levels), and the harness does it only to compare with BlastEm's screenshots.
 //!
-//! **A line at a time, as the beam reaches it** (`beam.lyra`), from the state as it stands
-//! then — so a change between lines (a raster split, a per-line colour) shows from the next
-//! line drawn. A change in the middle of a line is not yet seen there.
+//! **Drawn as the beam goes** (`beam.lyra` calls [render_slot] at every slot), each thing
+//! read when the VDP reads it — BlastEm's schedule, 40-cell (32-cell) mode, for line L:
+//!
+//! - the sprites on it, as the line before ends (H 163; 131);
+//! - its horizontal scroll, early in its H-blank (H 244);
+//! - the planes in 16-pixel blocks, each with the vertical scroll it latches then: the
+//!   partial block at the left at H 249 (plane A) and 253 (B), block k at H 1 + 8k (A)
+//!   and 5 + 8k (B);
+//! - its pixels, two a slot, from H 6 (13 pixels of border first, so pixel x goes out at
+//!   H 6 + (x + 13) / 2, the last few after the V counter has moved on): **the layers
+//!   composed and the colour looked up in CRAM as each pixel goes out**.
+//!
+//! So a change made mid-line shows from where the VDP next reads what it changed: a colour
+//! from the next pixel out, a vertical scroll (2-cell mode) from the next block fetched, a
+//! horizontal scroll or a sprite from the next line. **A CRAM write shows as a dot** of the
+//! colour written, at the pixel going out as its slot takes it (the hardware's "CRAM dot").
+//! The vertical scroll latches once a line in full-screen mode (H 165; 243), and in 2-cell
+//! mode keeps the last block's pair — which is what the partial block at the left of the
+//! next line takes (in V-blank, or with the display off, it latches words 0 and 1 at H 220).
 
 /// A frame: `width` × `height` pixels of [pixel] values, row by row.
 pub struct Frame {
@@ -34,30 +50,95 @@ struct Dot {
 
 let clear_dot = Dot { color: 0, high: false }
 
-/// Line `y`: each pixel the frontmost opaque one of — high sprite, high plane A (or window),
-/// high plane B, low sprite, low A, low B — else the background colour; in
-/// shadow/highlight mode with an intensity as well ([compose_shadow]). The leftmost 8
-/// pixels are the background when register 0 bit 5 asks, and the whole line when the
-/// display is off.
-let render_line = (vdp: Vdp, y: i64, width: i64) -> []u16 => {
-  let background = u16(vdp.cram[i64(vdp.regs[7] & 0x3F)] & 0x0EEE)
-  if (vdp.regs[1] & 0x40) == 0 { return [background; width] }
-  let sprites = sprite_line(vdp, y, width)
-  let shadow_mode = (vdp.regs[12] & 0x08) != 0
-  let hide_left = (vdp.regs[0] & 0x20) != 0
-  let plane_b = plane_line(vdp, y, width, 1)
-  let plane_a = plane_line(vdp, y, width, 0)
-  var out: []u16 = []
-  for x in 0..<width {
-    if hide_left && x < 8 {
-      // In shadow/highlight mode the blanked column is the backdrop shadowed.
-      out.push(if shadow_mode { background | SHADOW } else { background })
-      continue
-    }
-    out.push(compose(vdp, sprites[x], plane_a[x], plane_b[x], background, shadow_mode))
+/// What the slot the beam has just reached does for the picture (called by [next_slot]):
+/// the fetches for the line coming up, the latches, and two pixels of the line going out.
+let render_slot = (vdp: mut Vdp) -> void => {
+  let s = vdp.hslot
+  let wide = h40(vdp)
+  let fetching = vdp.phase != Blank && (vdp.regs[1] & 0x40) != 0
+  let cell_scroll = (vdp.regs[11] & 0x04) != 0
+  if (!cell_scroll && s == (if wide { 165 } else { 243 })) || (cell_scroll && !fetching && s == 220) {
+    vdp.vscroll_latch[0] = vdp.vsram[0]
+    vdp.vscroll_latch[1] = vdp.vsram[1]
   }
-  out
+  if fetching {
+    let blocks: u16 = if wide { 20 } else { 16 }
+    if s == (if wide { 163 } else { 131 }) {
+      let next = i64((vdp.vcounter + 1) & 0x1FF)
+      let width = screen_width(vdp)
+      if next < active_lines(vdp) { vdp.sprites_next = sprite_line(vdp, next, width) }
+    } else if s == 244 {
+      let y = i64(vdp.vcounter)
+      vdp.line_hscroll[0] = horizontal_scroll(vdp, y, 0)
+      vdp.line_hscroll[1] = horizontal_scroll(vdp, y, 1)
+    } else if s == 249 || s == 253 {
+      fetch_block(vdp, -1, if s == 249 { 0 } else { 1 })
+    } else if s >= 1 && s < 8 * blocks && ((s & 7) == 1 || (s & 7) == 5) {
+      fetch_block(vdp, i64(s >> 3), if (s & 7) == 1 { 0 } else { 1 })
+    }
+  }
+  if s == 6 && vdp.phase == Active && i64(vdp.vcounter) < active_lines(vdp) {
+    vdp.row = i64(vdp.vcounter)
+    vdp.row_width = screen_width(vdp)
+    vdp.sprites_row = vdp.sprites_next
+  }
+  if vdp.row >= 0 && s >= 6 {
+    let left = 2 * i64(s - 6) - 13
+    put_pixel(vdp, left)
+    put_pixel(vdp, left + 1)
+  }
 }
+
+/// Pixel x of the row going out, if it is on the screen; the row, and after the last row
+/// the frame, complete with the last pixel.
+let put_pixel = (vdp: mut Vdp, x: i64) -> void => {
+  if x < 0 || x >= vdp.row_width { return }
+  vdp.drawing[vdp.row * vdp.row_width + x] = pixel_at(vdp, x)
+  if x < vdp.row_width - 1 { return }
+  let last = vdp.row == active_lines(vdp) - 1
+  vdp.drawing_width = vdp.row_width
+  vdp.row = -1
+  if last { complete_frame(vdp) }
+}
+
+/// A CRAM write as its slot takes it: the pixel going out, the second of the slot's two,
+/// shows the colour written.
+let cram_dot = (vdp: mut Vdp, color: u16) -> void => {
+  if vdp.row < 0 || vdp.hslot < 6 { return }
+  let x = 2 * i64(vdp.hslot - 6) - 12
+  if x >= 0 && x < vdp.row_width {
+    vdp.drawing[vdp.row * vdp.row_width + x] = color & 0x0EEE
+  }
+}
+
+/// Pixel x of the row going out: the frontmost opaque one of — high sprite, high plane A
+/// (or window), high plane B, low sprite, low A, low B — else the background colour; in
+/// shadow/highlight mode with an intensity as well ([compose_shadow]). The leftmost 8
+/// pixels are the background when register 0 bit 5 asks, and every pixel while the display
+/// is off.
+let pixel_at = pure (vdp: Vdp, x: i64) -> u16 => {
+  let background = u16(vdp.cram[i64(vdp.regs[7] & 0x3F)] & 0x0EEE)
+  if (vdp.regs[1] & 0x40) == 0 { return background }
+  let shadow_mode = (vdp.regs[12] & 0x08) != 0
+  if (vdp.regs[0] & 0x20) != 0 && x < 8 {
+    // In shadow/highlight mode the blanked column is the backdrop shadowed.
+    return if shadow_mode { background | SHADOW } else { background }
+  }
+  let sprite = if x < vdp.sprites_row.len() { vdp.sprites_row[x] } else { clear_dot }
+  compose(
+    vdp,
+    sprite,
+    plane_dot(vdp, x, 0),
+    plane_dot(vdp, x, 1),
+    background,
+    shadow_mode
+  )
+}
+
+let screen_width = pure (vdp: Vdp) -> i64 => if h40(vdp) { 320 } else { 256 }
+
+let active_lines = pure (vdp: Vdp) -> i64 =>
+  if (vdp.regs[1] & 0x08) != 0 { 240 } else { 224 }
 
 /// The pixel the layers make, by priority (and, in shadow/highlight mode, intensity).
 let compose = pure (
@@ -136,38 +217,55 @@ let color_of = pure (vdp: Vdp, index: u8) -> u16 => vdp.cram[i64(index & 0x3F)] 
 // hardware's "window bug"). Drawing plane pixels one by one from the scrolled position gets
 // every one of these wrong, which is how the oracle found them.
 
-/// Plane `which`'s (0 A, 1 B) dots across line `y`, plane A with the window in its place.
-let plane_line = pure (vdp: Vdp, y: i64, width: i64, which: i64) -> []Dot => {
-  let blocks = width / 16
-  let hscroll = horizontal_scroll(vdp, y, which)
-  let fine = hscroll & 15
-  // Block k (from -1, the partial one) holds plane pixels 16k - (hscroll & ~15) onward.
-  var strip: []Dot = []
-  for k in -1..<blocks {
-    for p in 0..<16 { strip.push(plane_block_dot(vdp, y, hscroll, which, k, p)) }
-  }
-  var dots: []Dot = []
-  for x in 0..<width {
-    let k = x >> 4
-    let i = x & 15
-    if which == 0 && window_block(vdp, k, y) {
-      dots.push(window_dot(vdp, x, y))
-    } else if which == 0 && k > 0 && window_block(vdp, k - 1, y) {
-      // The block after a left window: its first `fine` pixels wrap within itself.
-      dots.push(strip[(k + 1) * 16 + ((i - fine) & 15)])
-    } else {
-      dots.push(strip[(k + 1) * 16 + i - fine])
+/// Block k of line L fetched for plane `which` (0 A, 1 B; k = -1, the partial block, to
+/// 19, or 15 in 32-cell mode): its 16 pixels at the vertical scroll latched now — and, for
+/// plane A, whether the window has the block, and its pixels if so.
+let fetch_block = (vdp: mut Vdp, k: i64, which: i64) -> void => {
+  let y = i64(vdp.vcounter)
+  if (vdp.regs[11] & 0x04) != 0 {
+    if k >= 0 {
+      vdp.vscroll_latch[which] = vdp.vsram[k * 2 + which]
+    } else if which == 0 {
+      // The partial block has no column of its own: in 40-cell mode both planes take the
+      // AND of what the latches hold from the last block fetched (the model-1 behaviour
+      // the oracle emulates; MD2 VA4 and later take column 0's), in 32-cell mode zero.
+      let both = if h40(vdp) { vdp.vscroll_latch[0] & vdp.vscroll_latch[1] } else { 0 }
+      vdp.vscroll_latch[0] = both
+      vdp.vscroll_latch[1] = both
     }
   }
-  dots
+  let vscroll = i64(vdp.vscroll_latch[which] & 0x3FF)
+  for p in 0..<16 {
+    let dot = plane_block_dot(vdp, y, vdp.line_hscroll[which], vscroll, which, k, p)
+    if which == 0 { vdp.strip_a[(k + 1) * 16 + p] = dot } else { vdp.strip_b[(k + 1) * 16 + p] = dot }
+  }
+  if which == 1 || k < 0 { return }
+  vdp.window_blocks[k] = window_block(vdp, k, y)
+  if vdp.window_blocks[k] {
+    for p in 0..<16 { vdp.window_dots[k * 16 + p] = window_dot(vdp, k * 16 + p, y) }
+  }
+}
+
+/// Plane `which`'s (0 A, 1 B) dot at pixel x of the row going out, from the blocks
+/// fetched, plane A with the window in its place.
+let plane_dot = pure (vdp: Vdp, x: i64, which: i64) -> Dot => {
+  let fine = vdp.line_hscroll[which] & 15
+  let k = x >> 4
+  let i = x & 15
+  if which == 1 { return vdp.strip_b[(k + 1) * 16 + i - fine] }
+  if vdp.window_blocks[k] { return vdp.window_dots[x] }
+  // The block after a left window: its first `fine` pixels wrap within itself.
+  if k > 0 && vdp.window_blocks[k - 1] { return vdp.strip_a[(k + 1) * 16 + ((i - fine) & 15)] }
+  vdp.strip_a[(k + 1) * 16 + i - fine]
 }
 
 /// Pixel `p` of fetch block `k` of plane `which` on line `y`: the plane's pixel at column
-/// 16k - (hscroll & ~15) + p, on the row block k's vertical scroll makes.
+/// 16k - (hscroll & ~15) + p, on the row the vertical scroll makes.
 let plane_block_dot = pure (
   vdp: Vdp,
   y: i64,
   hscroll: i64,
+  vscroll: i64,
   which: i64,
   k: i64,
   p: i64
@@ -176,7 +274,7 @@ let plane_block_dot = pure (
   let rows = plane_cells((vdp.regs[16] >> 4) & 3)
   let base = if which == 0 { plane_a_base(vdp) } else { plane_b_base(vdp) }
   let px = (16 * k - (hscroll & ~15) + p) & (columns * 8 - 1)
-  let py = (y + block_vertical_scroll(vdp, k, which)) & (rows * 8 - 1)
+  let py = (y + vscroll) & (rows * 8 - 1)
   let entry = vram_entry(vdp, base + ((py >> 3) * columns + (px >> 3)) * 2)
   tile_dot(vdp, entry, px & 7, py & 7)
 }
@@ -228,23 +326,6 @@ let horizontal_scroll = pure (vdp: Vdp, y: i64, which: i64) -> i64 => {
     _ => y * 4,
   }
   i64(vram_entry(vdp, base + offset + which * 2) & 0x3FF)
-}
-
-/// The vertical scroll of plane `which` for fetch block k: VSRAM word 0 (A) or 1 (B) for the
-/// screen, or, in 2-cell mode, the pair for block k. The partial block at the left (k = -1)
-/// has no column of its own, and takes what the scroll latches still hold from the previous
-/// line's last column: in 40-cell mode, both planes get the AND of that column's two values
-/// (words 38 and 39) — the model-1 behaviour the oracle emulates; MD2 VA4 and later take
-/// column 0's instead — and in 32-cell mode, zero.
-let block_vertical_scroll = pure (vdp: Vdp, k: i64, which: i64) -> i64 => {
-  if (vdp.regs[11] & 0x04) == 0 { return i64(vdp.vsram[which] & 0x3FF) }
-  if k < 0 {
-    if !h40(vdp) { return 0 }
-    return i64(vdp.vsram[38] & vdp.vsram[39] & 0x3FF)
-  }
-  let slot = k * 2 + which
-  if slot >= VSRAM_WORDS { return 0 }
-  i64(vdp.vsram[slot] & 0x3FF)
 }
 
 /// A plane's size in cells, from its two register-16 bits: 32, 64, or 128 (`11`; `10` is
@@ -353,4 +434,21 @@ let draw_sprite = (
     let pixel = pattern_pixel(vdp, tile & 0x7FF, c & 7, r & 7)
     if pixel != 0 { dots[x] = Dot { color: palette | pixel, high: high } }
   }
+}
+
+// ── The frame ────────────────────────────────────────────────────────────────
+
+/// The widest frame, which the frame in progress is sized for.
+const MAX_PIXELS: i64 = 320 * 240
+
+/// The last row's last pixel has gone out: the frame is complete, and shown.
+let complete_frame = (vdp: mut Vdp) -> void => {
+  let height = active_lines(vdp)
+  let width = vdp.drawing_width
+  vdp.shown = Frame {
+    width: width,
+    height: height,
+    pixels: vdp.drawing.slice(0, width * height)
+  }
+  vdp.frames += 1
 }

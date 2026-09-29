@@ -146,6 +146,7 @@ let write_slot = (vdp: mut Vdp) -> void => {
     0x3 => {
       let word = if entry.partial { vdp.fifo[vdp.fifo_write].value } else { entry.value }
       vdp.cram[i64((entry.address >> 1) & 0x3F)] = word & 0x0EEE
+      cram_dot(vdp, word)
     },
     0x5 => {
       let cell = i64((entry.address >> 1) & 0x3F)

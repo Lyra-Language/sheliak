@@ -88,7 +88,24 @@ pub struct Vdp {
   hint_pending: bool,
   /// The HV counter as latched by register 0 bit 1.
   hv_latch: u16,
-  /// The frame being drawn, line by line, at the width of its last line drawn.
+  // The picture (render.lyra).
+  /// The vertical scroll latches, planes A and B.
+  vscroll_latch: [2]u16,
+  /// The line's horizontal scroll, planes A and B, as read in its H-blank.
+  line_hscroll: [2]i64,
+  /// The line's plane pixels as fetched, 16 a block from the partial block (-1) on.
+  strip_a: []Dot,
+  strip_b: []Dot,
+  /// Which of the line's blocks are the window's, and the window's pixels in them.
+  window_blocks: []bool,
+  window_dots: []Dot,
+  /// The sprites' pixels on the line coming up, and on the row going out.
+  sprites_next: []Dot,
+  sprites_row: []Dot,
+  /// The row going out (-1 while none is), and its width.
+  row: i64,
+  row_width: i64,
+  /// The frame being drawn, row by row, at the width of its last row.
   drawing: []u16,
   drawing_width: i64,
   /// The last frame completed, and how many have been.
@@ -124,6 +141,16 @@ pub let new_vdp = pure () -> Vdp => Vdp {
   vint_pending: false,
   hint_pending: false,
   hv_latch: 0,
+  vscroll_latch: #[0, 0],
+  line_hscroll: #[0, 0],
+  strip_a: [clear_dot; 21 * 16],
+  strip_b: [clear_dot; 21 * 16],
+  window_blocks: [false; 20],
+  window_dots: [clear_dot; 320],
+  sprites_next: [clear_dot; 320],
+  sprites_row: [clear_dot; 320],
+  row: -1,
+  row_width: 320,
   drawing: [0; MAX_PIXELS],
   drawing_width: 320,
   shown: Frame { width: 320, height: 224, pixels: [0; 320 * 224] },

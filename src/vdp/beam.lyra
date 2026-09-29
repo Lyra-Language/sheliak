@@ -29,9 +29,7 @@ module vdp
 //! - **Acknowledging** clears the V interrupt if it is raised and enabled, else the H
 //!   interrupt — whichever the VDP is asserting then, not the level the 68000 took.
 //!
-//! **Each active line is drawn as H reaches 0 on it**, when the beam leaves H-blank, from the
-//! state as it stands then: a change made in the H interrupt (which comes as the line
-//! begins, before its H-blank) shows on that line. Mid-line changes are not yet seen.
+//! **The picture is drawn as the beam goes**, slot by slot (`render.lyra`'s schedule).
 
 /// Master clocks in a line.
 pub const LINE_CLOCKS: i64 = 3420
@@ -114,7 +112,8 @@ let slot_clocks = pure (vdp: Vdp) -> i64 => {
 }
 
 /// The next slot begins: H moves on (past the gap in its count), a line may begin, what
-/// happens at this slot happens, and the slot does its work for the 68000 (`slots.lyra`).
+/// happens at this slot happens, and the slot does its work for the picture
+/// (`render.lyra`) and then for the 68000 (`slots.lyra`).
 let next_slot = (vdp: mut Vdp) -> void => {
   let wide = h40(vdp)
   vdp.hslot = if wide && vdp.hslot == 182 {
@@ -125,16 +124,13 @@ let next_slot = (vdp: mut Vdp) -> void => {
     (vdp.hslot + 1) & 0xFF
   }
   if vdp.hslot == (if wide { 165 } else { 133 }) { next_line(vdp) }
-  let active_lines: u16 = if (vdp.regs[1] & 0x08) != 0 { 240 } else { 224 }
-  if vdp.phase == Active && vdp.vcounter == active_lines &&
+  let blank_line = u16(active_lines(vdp))
+  if vdp.phase == Active && vdp.vcounter == blank_line &&
     vdp.hslot == (if wide { 167 } else { 135 }) {
     vdp.phase = Blank
-    complete_frame(vdp)
   }
-  if vdp.hslot == 0 {
-    if vdp.vcounter == active_lines { vdp.vint_pending = true }
-    if vdp.phase == Active && vdp.vcounter < active_lines { draw_line(vdp) }
-  }
+  if vdp.hslot == 0 && vdp.vcounter == blank_line { vdp.vint_pending = true }
+  render_slot(vdp)
   access_slot(vdp)
 }
 
@@ -156,30 +152,4 @@ let next_line = (vdp: mut Vdp) -> void => {
     vdp.hint_counter = vdp.regs[10]
   }
   if vdp.phase == Blank && vdp.vcounter == 0x1FF { vdp.phase = Preparing }
-}
-
-// ── The frame ────────────────────────────────────────────────────────────────
-
-/// The widest frame, which the frame in progress is sized for.
-const MAX_PIXELS: i64 = 320 * 240
-
-/// The line the V counter names, drawn into the frame in progress.
-let draw_line = (vdp: mut Vdp) -> void => {
-  let width: i64 = if h40(vdp) { 320 } else { 256 }
-  let y = i64(vdp.vcounter)
-  let line = render_line(vdp, y, width)
-  for x, p in line { vdp.drawing[y * width + x] = p }
-  vdp.drawing_width = width
-}
-
-/// V-blank has begun: the frame in progress is complete, and shown.
-let complete_frame = (vdp: mut Vdp) -> void => {
-  let height: i64 = if (vdp.regs[1] & 0x08) != 0 { 240 } else { 224 }
-  let width = vdp.drawing_width
-  vdp.shown = Frame {
-    width: width,
-    height: height,
-    pixels: vdp.drawing.slice(0, width * height)
-  }
-  vdp.frames += 1
 }
