@@ -19,7 +19,7 @@ product name.
 ./build.sh                  # -> build/: sheliak, cputest, legaltest, scenariotest, vdproms,
                             #    vdpcheck, padtest
 build/sheliak ROM           # play: arrows, Z/X/C = A/B/C, A/S/D = X/Y/Z, Return = Start,
-                            #    Q = Mode, F11, Escape; gamepads on ports 1 and 2;
+                            #    Q = Mode, F = full screen, Escape; gamepads on ports 1 and 2;
                             #    --pads 3 for 3-button pads
 SDL_VIDEODRIVER=dummy build/sheliak ROM --frames 600 --screenshot out.bmp   # headless
                             #    (--wav FILE: the sound; --save: use the .srm too)

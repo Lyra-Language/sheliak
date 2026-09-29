@@ -15,11 +15,11 @@
 // pad, which a few early games need (they misread a 6-button one).
 //
 // Keys (pad 1): arrows; Z, X, C for A, B, C and A, S, D above them for X, Y, Z (the
-// pad's two rows); Return for Start, Q for Mode. Escape quits; F11 toggles full screen. A
-// gamepad is a pad too — the first on port 1, the second on port 2: d-pad or left stick;
-// the West, South and East face buttons for A, B and C (the Genesis's bottom row, left to
-// right), the left shoulder, North and the right shoulder for X, Y and Z; Start and Back
-// for Start and Mode.
+// pad's two rows); Return for Start, Q for Mode. Escape quits; F toggles full screen (not
+// F11, which macOS keeps for showing the desktop). A gamepad is a pad too — the first on
+// port 1, the second on port 2: d-pad or left stick; the West, South and East face buttons
+// for A, B and C (the Genesis's bottom row, left to right), the left shoulder, North and
+// the right shoulder for X, Y and Z; Start and Back for Start and Mode.
 //
 // The ROM is a raw image (`.bin`, `.gen`, `.md`); the interleaved `.smd` format is not
 // read yet. A cartridge with save RAM keeps it in a `.srm` file beside the ROM (the ROM's
@@ -35,7 +35,7 @@ import bindings.sdl3.{
   PRESENT_INTEGER_SCALE, set_vsync, set_draw_color, clear, present, save_screenshot,
   Texture, create_streaming_texture, update_texture, destroy_texture, draw_texture,
   set_default_scale_mode, SCALE_NEAREST,
-  poll_event, KEY_ESCAPE, KEY_F11,
+  poll_event, KEY_ESCAPE, KEY_F,
   key_held, SCANCODE_UP, SCANCODE_DOWN, SCANCODE_LEFT, SCANCODE_RIGHT, SCANCODE_Z,
   SCANCODE_X, SCANCODE_C, SCANCODE_A, SCANCODE_S, SCANCODE_D, SCANCODE_Q, SCANCODE_RETURN,
   Gamepad, open_gamepad, close_gamepad, gamepad_id, gamepad_button, gamepad_axis,
@@ -231,7 +231,7 @@ let play = (
         Quit => { running = false },
         KeyDown(key) => {
           if key == KEY_ESCAPE { running = false }
-          if key == KEY_F11 {
+          if key == KEY_F {
             fullscreen = !fullscreen
             set_fullscreen(window, fullscreen)
           }
