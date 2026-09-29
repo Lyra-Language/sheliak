@@ -192,10 +192,12 @@ frame-at-a-time shortcuts from the start:
   — and refused unless the result begins "SEGA", so a later part given first is caught.
   Only a part's *name* is guessed, never its contents: a guess that finds nothing is an
   error asking for the parts in order, never a shorter ROM.
-- **A zip is read by Lyra's `std.zip`**, whose DEFLATE (`std.compress`) is held to Go's
-  in the compiler's tests. The ROM in it is the one file with a ROM's extension (or the one
-  file), or a split image's parts chained by name; an archive of several ROMs is refused,
-  naming them, rather than one picked. A zipped ROM's save file drops both extensions.
+- **A zip or 7z is read by Lyra's `std.zip` and `std.sevenzip`**, whose decompressors
+  (`std.compress`) are held to Go's DEFLATE, liblzma and 7-Zip's own archives in the
+  compiler's tests. The ROM in either is chosen one way (`roms_in_archive`): the one file
+  with a ROM's extension (or the one file), or a split image's parts chained by name; an
+  archive of several ROMs is refused, naming them, rather than one picked. An archived
+  ROM's save file drops both extensions.
 - **The mix is not checked against hardware**: the resampling, the PSG/FM balance, the
   Model 1 low-pass (3,390 Hz, BlastEm's default) and the DC block are `genesis/audio.lyra`'s
   choices; `tests/sound.sh` checks only that notes come out at their pitch.
@@ -260,7 +262,7 @@ src/vdp/             the VDP (module vdp):
                      limits, priority, shadow/highlight
 src/genesis/         the machine (module genesis):
   machine.lyra       power on, and run a frame
-  cartridge.lyra     the ROM file read (raw, SMD, split SMD, MGD, zipped); the ROM
+  cartridge.lyra     the ROM file read (raw, SMD, split SMD, MGD, zip, 7z); the ROM
                      (mirrored), save RAM, the Sega SRAM and SSF2 mappers, the header they
                      are recognised by
   sound.lyra         the Z80's side: its RAM, the bank window onto the cartridge, its clock
@@ -344,7 +346,7 @@ against a real console.
 **The front end runs a cartridge in a window** (`build/sheliak`), and `tests/vdp.sh` holds
 its picture to BlastEm's too: the texels it sends the window (`--ppm`), byte for byte against
 the screenshot, so its colour conversion is checked, not only the VDP's output. Raw, SMD, split
-SMD and MGD ROM images, zipped or not, two 6-button pads (3 with `--pads 3`; the protocol matched against BlastEm
+SMD and MGD ROM images, zipped, 7-zipped or not, two 6-button pads (3 with `--pads 3`; the protocol matched against BlastEm
 with nothing held, `pads` and `pads6`; with buttons held, `build/padtest`), frames paced to
 the console's 59.92 Hz whatever the display's rate, ~4.7 ms a frame with sound on an M-series Mac. **Cartridges**: the ROM mirrored at its
 size, save RAM (odd, even or both buses; past the ROM or through the Sega mapper, with

@@ -37,7 +37,7 @@ module genesis
 //! the format; the front end finds the parts after the first by their names
 //! ([next_part_path]), or is given them.
 //!
-//! **A zip archive holds the files** ([roms_in_zip]): the ROM in it — the one file with a
+//! **A zip or 7z archive holds the files** ([roms_in_zip], [roms_in_7z]): the ROM in it — the one file with a
 //! ROM's extension (`.bin`, `.gen`, `.md`, `.smd`, a numbered part), or the one file if
 //! none has — or a split SMD image's parts, found from the first by their names as on
 //! disk. An archive holding several ROMs is refused, naming them, rather than one picked.
@@ -47,6 +47,7 @@ module genesis
 //! reads the ROM as it lies, not through the mapper.
 
 import std.zip.{ ZipEntry, zip_entries, unzip }
+import std.sevenzip.{ SevenZipEntry, open_7z, extract_7z }
 import std.path
 
 /// Save RAM's buses.
@@ -143,27 +144,41 @@ pub let next_part_path = pure (path: string) -> Maybe<string> => {
 /// SMD image's parts in order.
 pub let roms_in_zip = pure (archive: []u8) -> Result<[][]u8, string> => {
   let entries = zip_entries(archive)?
-  var files: []ZipEntry = []
-  for entry in entries {
-    if !entry.is_directory() { files.push(entry) }
+  let files = entries.filter((e) => !e.is_directory())
+  roms_in_archive(files.map((e) => e.name), (i) => unzip(archive, files[i]))
+}
+
+/// The ROM files a 7z archive holds, as [roms_in_zip] finds them in a zip.
+pub let roms_in_7z = (archive: []u8) -> Result<[][]u8, string> => {
+  let contents = open_7z(archive)?
+  let files = contents.entries.filter((e) => !e.directory)
+  roms_in_archive(files.map((e) => e.name), (i) => extract_7z(contents, files[i]))
+}
+
+/// The ROM files among an archive's files, named `names` and read by `extract`: the one
+/// with a ROM's name (or the one file, if none has), or a split image's parts, chained
+/// from the first by name. Several ROMs are refused, naming them, rather than one picked.
+let roms_in_archive = pure (
+  names: []string,
+  extract: (i64) -> Result<[]u8, string>
+) -> Result<[][]u8, string> => {
+  var roms: []i64 = []
+  for i, name in names {
+    if looks_like_rom(name) { roms.push(i) }
   }
-  var roms: []ZipEntry = []
-  for entry in files {
-    if looks_like_rom(entry.name) { roms.push(entry) }
-  }
-  if roms.len() == 0 { roms = files }
+  if roms.len() == 0 { roms = [i in 0..<names.len() | i] }
   if roms.len() == 0 { return Err("an archive with no files in it") }
-  if roms.len() == 1 { return Ok([unzip(archive, roms[0])?]) }
+  if roms.len() == 1 { return Ok([extract(roms[0])?]) }
   // Several: a split image's parts, if the first by name leads through all of them.
-  let by_name = roms.sorted_by((a, b) => a.name <=> b.name)
-  var parts: [][]u8 = [unzip(archive, by_name[0])?]
-  var name = by_name[0].name
+  let by_name = roms.sorted_by((a, b) => names[a] <=> names[b])
+  var parts: [][]u8 = [extract(by_name[0])?]
+  var name = names[by_name[0]]
   for parts.len() < by_name.len() && is_split_part(parts[parts.len() - 1]) {
     let Some(next) = next_part_path(name) else { break }
     var found = false
-    for entry in by_name {
-      if entry.name == next {
-        parts.push(unzip(archive, entry)?)
+    for i in by_name {
+      if names[i] == next {
+        parts.push(extract(i)?)
         found = true
       }
     }
@@ -171,7 +186,7 @@ pub let roms_in_zip = pure (archive: []u8) -> Result<[][]u8, string> => {
     name = next
   }
   if parts.len() == by_name.len() { return Ok(parts) }
-  Err("an archive of several ROMs (${by_name.map((e) => e.name).join(", ")}); unzip the one to play")
+  Err("an archive of several ROMs (${by_name.map((i) => names[i]).join(", ")}); extract the one to play")
 }
 
 /// Whether a file's name says it is a ROM, or one part of one.
