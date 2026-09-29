@@ -17,7 +17,7 @@
 //
 // On macOS a menu bar opens another ROM (⌘O), pauses (⌘P) and resets (⌘R), and sets the
 // pads (3- or 6-button), the window's scale (⌘1–⌘5), full screen (⌃⌘F) and the sound
-// (mute ⇧⌘M, volume), and how the picture looks: sharp pixels, or through a shader on the
+// (mute ⇧⌘M), and how the picture looks: sharp pixels, or through a shader on the
 // GPU, scanlines or a CRT (`front/display.lyra`). Those settings are kept between runs
 // (`front/prefs.lyra`); a headless run ignores them, so a comparison never depends on how
 // someone last played — it takes `--pads` and `--display` instead, in a hidden window.
@@ -385,12 +385,13 @@ let run_window = (
     prefs_file: prefs_file,
     six_button: pads_arg.unwrap_or(prefs.six_button),
     paused: false,
+    // Not yet: `play` asks once the first frame is up, and the window's own event says
+    // when it is.
     fullscreen: false,
     native: native,
     display: Display { effect: effect, look: look_arg.unwrap_or(prefs.look) },
   }
   var (cpu, bus) = power_up(rom, session.six_button, session.save_path, true)
-  if prefs.fullscreen { toggle_fullscreen(session, window) }
   show_state(session, window)
   play(cpu, bus, session, renderer, window)
   write_save(bus, session.save_path)
@@ -434,6 +435,11 @@ let play = (
   var last = i64(ticks_ns())
   var owed: i64 = 0
   var running = true
+  // Full screen, if that is how it was left, is asked for once the window has focus:
+  // macOS moves only the active app's window into a full-screen Space, and lets an
+  // earlier request go by — a window *made* full screen is only screen-sized, not in a
+  // Space of its own. Launched from a terminal, Sheliak becomes active a moment later.
+  var fullscreen_owed = session.prefs.fullscreen
   for running {
     for {
       let Some(event) = poll_event() else { break }
@@ -449,6 +455,22 @@ let play = (
           if let Some(pad) = open_gamepad(id) { pads.push(pad) }
         },
         GamepadRemoved(id) => { pads = drop_gamepad(pads, id) },
+        // However full screen came or went — the menu, F, the green button — the
+        // checkmark and the preference follow the window.
+        Other(kind) => {
+          if kind == EVENT_FOCUS_GAINED && fullscreen_owed {
+            fullscreen_owed = false
+            if !set_fullscreen(window, true) {
+              println("sheliak: cannot go full screen: ${last_error()}")
+            }
+          }
+          if kind == EVENT_ENTER_FULLSCREEN || kind == EVENT_LEAVE_FULLSCREEN {
+            session.fullscreen = kind == EVENT_ENTER_FULLSCREEN
+            session.prefs.fullscreen = session.fullscreen
+            keep_prefs(session)
+            show_state(session, window)
+          }
+        },
         _ => {},
       }
     }
@@ -487,11 +509,9 @@ let play = (
       frames_since_save = 0
     }
     let samples = mix_audio(bus, mixer)
-    let volume = if session.prefs.muted { 0 } else { session.prefs.volume }
     if let Some(s) = stream {
-      if !session.paused && volume > 0 && queued_frames(s) < AUDIO_QUEUE_LIMIT {
-        let gain = f32(volume) / 100.0
-        put_audio(s, if volume == 100 { samples } else { samples.map((v) => v * gain) })
+      if !session.paused && !session.prefs.muted && queued_frames(s) < AUDIO_QUEUE_LIMIT {
+        put_audio(s, samples)
       }
     }
     show(renderer, screen, shown_frame(bus.vdp), session.display)
@@ -501,6 +521,12 @@ let play = (
   if let Some(s) = stream { close_audio(s) }
   release_screen(screen)
 }
+
+/// `SDL_EVENT_WINDOW_FOCUS_GAINED`, `…_ENTER_FULLSCREEN` and `…_LEAVE_FULLSCREEN`, which
+/// `bindings.sdl3` hands on as `Other`.
+const EVENT_FOCUS_GAINED: u32 = 0x20E
+const EVENT_ENTER_FULLSCREEN: u32 = 0x217
+const EVENT_LEAVE_FULLSCREEN: u32 = 0x218
 
 // ── The menus ────────────────────────────────────────────────────────────────
 
@@ -514,8 +540,6 @@ const MENU_FULL_SCREEN: i32 = 6
 const MENU_MUTE: i32 = 7
 /// 11 to 15: the window at 1× to 5×.
 const MENU_SCALE: i32 = 10
-/// 21 to 24: the volume at 25% to 100%.
-const MENU_VOLUME: i32 = 20
 /// 31 to 33: sharp pixels, scanlines, a CRT.
 const MENU_LOOK: i32 = 30
 const LOOKS: [3]string = #[LOOK_PIXELS, LOOK_SCANLINES, LOOK_CRT]
@@ -530,6 +554,8 @@ let install_menus = () -> bool => {
   separator()
   item("6-Button Pads", "", 0, MENU_PADS_6)
   item("3-Button Pads", "", 0, MENU_PADS_3)
+  separator()
+  item("Mute", "M", COMMAND, MENU_MUTE)
   menu("Video")
   for n in 1..<=5 { item("${n}×", "${n}", COMMAND, MENU_SCALE + i32(n)) }
   separator()
@@ -538,10 +564,6 @@ let install_menus = () -> bool => {
   item("CRT", "", 0, MENU_LOOK + 3)
   separator()
   item("Full Screen", "f", COMMAND | CONTROL, MENU_FULL_SCREEN)
-  menu("Sound")
-  item("Mute", "M", COMMAND, MENU_MUTE)
-  separator()
-  for k in 1..<=4 { item("${25 * k}%", "", 0, MENU_VOLUME + i32(k)) }
   window_menu()
   install("Sheliak")
 }
@@ -568,10 +590,6 @@ let on_menu = (bus: mut GenesisBus, session: mut Session, window: Window, tag: i
   } else if tag > MENU_LOOK && tag <= MENU_LOOK + 3 {
     session.display.look = LOOKS[i64(tag - MENU_LOOK - 1)]
     session.prefs.look = session.display.look
-    keep_prefs(session)
-  } else if tag > MENU_VOLUME && tag <= MENU_VOLUME + 4 {
-    session.prefs.volume = 25 * i64(tag - MENU_VOLUME)
-    session.prefs.muted = false
     keep_prefs(session)
   }
 }
@@ -622,7 +640,6 @@ let show_state = (session: ref Session, window: Window) -> void => {
   for n in 1..<=5 { set_checked(MENU_SCALE + i32(n), session.prefs.scale == n) }
   set_checked(MENU_FULL_SCREEN, session.fullscreen)
   set_checked(MENU_MUTE, session.prefs.muted)
-  for k in 1..<=4 { set_checked(MENU_VOLUME + i32(k), !session.prefs.muted && session.prefs.volume == 25 * k) }
   let shaded = session.display.effect.is_some()
   for k in 1..<=3 {
     set_checked(MENU_LOOK + i32(k), shown_look(session.display) == LOOKS[k - 1])

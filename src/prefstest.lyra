@@ -13,7 +13,6 @@ let main = () -> u8 => {
     scale: 5,
     fullscreen: true,
     six_button: false,
-    volume: 25,
     muted: true,
     look: LOOK_CRT,
   }
@@ -28,7 +27,6 @@ let main = () -> u8 => {
       scale: 2,
       fullscreen: false,
       six_button: true,
-      volume: 100,
       muted: true,
       look: LOOK_SCANLINES,
     }

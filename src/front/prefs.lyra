@@ -1,6 +1,6 @@
 module front
 //! The player's preferences, kept between runs: the window's scale, full screen, the kind of
-//! pad, the sound's volume and whether it is muted, and how the picture looks.
+//! pad, whether the sound is muted, and how the picture looks. (Loudness is the computer's.)
 //!
 //! **A text file of `key = value` lines**, read leniently: a key it does not know, a line it
 //! cannot read and a value out of range are passed over, and the default stands. A file
@@ -18,8 +18,6 @@ pub struct Prefs {
   scale: i64,
   fullscreen: bool,
   six_button: bool,
-  /// 0 to 100.
-  volume: i64,
   muted: bool,
   /// One of `display.lyra`'s looks.
   look: string,
@@ -29,7 +27,6 @@ pub let default_prefs = pure () -> Prefs => Prefs {
   scale: 3,
   fullscreen: false,
   six_button: true,
-  volume: 100,
   muted: false,
   look: LOOK_PIXELS,
 }
@@ -45,10 +42,6 @@ pub let parse_prefs = pure (text: string) -> Prefs => {
     if key == "scale" {
       if let Some(n) = value.parse_i64() {
         if n >= 1 && n <= 5 { prefs.scale = n }
-      }
-    } else if key == "volume" {
-      if let Some(n) = value.parse_i64() {
-        if n >= 0 && n <= 100 { prefs.volume = n }
       }
     } else if key == "pads" {
       if value == "3" { prefs.six_button = false }
@@ -67,7 +60,7 @@ pub let parse_prefs = pure (text: string) -> Prefs => {
 /// Preferences as a file's text.
 pub let format_prefs = pure (prefs: ref Prefs) -> string => {
   let pads = if prefs.six_button { 6 } else { 3 }
-  "scale = ${prefs.scale}\nfullscreen = ${prefs.fullscreen}\npads = ${pads}\nvolume = ${prefs.volume}\nmuted = ${prefs.muted}\ndisplay = ${prefs.look}\n"
+  "scale = ${prefs.scale}\nfullscreen = ${prefs.fullscreen}\npads = ${pads}\nmuted = ${prefs.muted}\ndisplay = ${prefs.look}\n"
 }
 
 /// Where the preferences live, or `None` without a home directory to put them in.

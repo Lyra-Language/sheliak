@@ -30,9 +30,9 @@ Mode; F full screen; Escape quits. Gamepads are pads 1 and 2. The pads are 6-but
 `--pads 3` gives the original 3-button pad, which a few early games need.
 
 On macOS the menu bar opens another ROM (⌘O; started with none, Sheliak asks for one),
-pauses (⌘P) and resets (⌘R), and sets the pads, the window's size (⌘1–⌘5), full screen
-(⌃⌘F), the volume and mute (⇧⌘M), and the look: sharp pixels, scanlines, or a CRT's
-scanlines, aperture grille and curve, drawn by a shader on the GPU. Sheliak remembers them
+pauses (⌘P) and resets (⌘R), and sets the pads, mute (⇧⌘M), the window's size (⌘1–⌘5),
+full screen (⌃⌘F), and the look: sharp pixels, scanlines, or a CRT's scanlines, aperture
+grille and curve, drawn by a shader on the GPU. Sheliak remembers them
 (`~/Library/Application Support/Sheliak/preferences`).
 
 A ROM may be a raw image, an SMD one or an MGD one (the Multi Game Doctor's, often `.md`),
