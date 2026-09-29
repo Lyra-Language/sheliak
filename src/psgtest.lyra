@@ -1,0 +1,57 @@
+// psgtest — Sheliak's PSG run on a script, printing its state after every tick in the form
+// tests/oracles/psg_blastem.c prints BlastEm's, for tests/psg.sh to compare.
+//
+//   build/psgtest < script     script lines: "w HEX" writes a byte, "t N" runs N ticks
+
+import std.io.{ read_stdin }
+import psg.{ Psg, new_psg, write_psg, tick_psg }
+
+let main = () -> void => {
+  var chip = new_psg()
+  for line in read_stdin().lines() {
+    let text = line.trim()
+    if text.len() < 3 { continue }
+    let value = parse_hex(text.slice(2, text.len()))
+    if text.starts_with("w") {
+      write_psg(chip, u8(value & 0xFF))
+      continue
+    }
+    for _ in 0..<value {
+      tick_psg(chip)
+      println(state(chip))
+    }
+  }
+}
+
+/// Outputs, noise output, attenuations, shift register — psg_blastem's line.
+let state = pure (chip: Psg) -> string => {
+  var bits = ""
+  for o in chip.output { bits = bits ++ (if o { "1" } else { "0" }) }
+  let noise = if chip.noise_out { "1" } else { "0" }
+  let v = chip.volume
+  "${bits} ${noise} ${hex(u16(v[0]))} ${hex(u16(v[1]))} ${hex(u16(v[2]))} ${hex(u16(v[3]))} ${padded(chip.lfsr)}"
+}
+
+let hex = pure (v: u16) -> string => v.to_hex()
+
+/// Four hex digits.
+let padded = pure (v: u16) -> string => {
+  var text = v.to_hex()
+  for text.len() < 4 { text = "0" ++ text }
+  text
+}
+
+let parse_hex = pure (text: string) -> i64 => {
+  var n: i64 = 0
+  for c in text {
+    let digit: i64 = match c {
+      '0'..<='9' => i64(c) - i64('0'),
+      'a'..<='f' => i64(c) - i64('a') + 10,
+      'A'..<='F' => i64(c) - i64('A') + 10,
+      _ => -1,
+    }
+    if digit < 0 { continue }
+    n = n * 16 + digit
+  }
+  n
+}

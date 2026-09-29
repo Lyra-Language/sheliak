@@ -116,7 +116,7 @@ let cram_dot = (vdp: mut Vdp, color: u16) -> void => {
 /// shadow/highlight mode with an intensity as well ([compose_shadow]). The leftmost 8
 /// pixels are the background when register 0 bit 5 asks, and every pixel while the display
 /// is off.
-let pixel_at = pure (vdp: Vdp, x: i64) -> u16 => {
+let pixel_at = pure (vdp: ref Vdp, x: i64) -> u16 => {
   let background = u16(vdp.cram[i64(vdp.regs[7] & 0x3F)] & 0x0EEE)
   if (vdp.regs[1] & 0x40) == 0 { return background }
   let shadow_mode = (vdp.regs[12] & 0x08) != 0
@@ -135,9 +135,9 @@ let pixel_at = pure (vdp: Vdp, x: i64) -> u16 => {
   )
 }
 
-let screen_width = pure (vdp: Vdp) -> i64 => if h40(vdp) { 320 } else { 256 }
+let screen_width = pure (vdp: ref Vdp) -> i64 => if h40(vdp) { 320 } else { 256 }
 
-let active_lines = pure (vdp: Vdp) -> i64 =>
+let active_lines = pure (vdp: ref Vdp) -> i64 =>
   if (vdp.regs[1] & 0x08) != 0 { 240 } else { 224 }
 
 /// The pixel the layers make, by priority (and, in shadow/highlight mode, intensity).
@@ -170,7 +170,13 @@ let compose = pure (
 ///
 /// So an operator under a high plane pixel does nothing, since it is not on top; the oracle
 /// settled this (genvdp.txt had the operators' colours the other way round).
-let compose_shadow = pure (vdp: Vdp, s: Dot, a: Dot, b: Dot, background: u16) -> u16 => {
+let compose_shadow = pure (
+  vdp: ref Vdp,
+  s: Dot,
+  a: Dot,
+  b: Dot,
+  background: u16
+) -> u16 => {
   var shown = clear_dot
   if b.color != 0 { shown = b }
   if a.color != 0 && (a.high || !shown.high) { shown = a }
@@ -204,7 +210,7 @@ let frontmost = pure (s: Dot, a: Dot, b: Dot) -> Dot => {
   clear_dot
 }
 
-let color_of = pure (vdp: Vdp, index: u8) -> u16 => vdp.cram[i64(index & 0x3F)] & 0x0EEE
+let color_of = pure (vdp: ref Vdp, index: u8) -> u16 => vdp.cram[i64(index & 0x3F)] & 0x0EEE
 
 // ── Planes ───────────────────────────────────────────────────────────────────
 //
@@ -265,7 +271,7 @@ let fetch_block = (vdp: mut Vdp, k: i64, which: i64) -> void => {
 
 /// Plane `which`'s (0 A, 1 B) dot at pixel x of the row going out, from the blocks
 /// fetched, plane A with the window in its place.
-let plane_dot = pure (vdp: Vdp, x: i64, which: i64) -> Dot => {
+let plane_dot = pure (vdp: ref Vdp, x: i64, which: i64) -> Dot => {
   let fine = vdp.line_hscroll[which] & 15
   let k = x >> 4
   let i = x & 15
@@ -278,7 +284,7 @@ let plane_dot = pure (vdp: Vdp, x: i64, which: i64) -> Dot => {
 
 /// The window's dot at screen (x, y): its own name table, never scrolled, 64 cells wide in
 /// 40-cell mode and 32 in 32-cell.
-let window_dot = pure (vdp: Vdp, x: i64, y: i64) -> Dot => {
+let window_dot = pure (vdp: ref Vdp, x: i64, y: i64) -> Dot => {
   let columns = if h40(vdp) { 64 } else { 32 }
   let entry = vram_entry(vdp, window_base(vdp) + ((y >> 3) * columns + (x >> 3)) * 2)
   tile_dot(vdp, entry, x & 7, y & 7)
@@ -287,7 +293,7 @@ let window_dot = pure (vdp: Vdp, x: i64, y: i64) -> Dot => {
 /// Whether block k (a 16-pixel column) of line y is the window's: every block on the lines
 /// register 18 gives it (above or below its row), or else the blocks register 17 gives it
 /// (left or right of its column, counted in blocks).
-let window_block = pure (vdp: Vdp, k: i64, y: i64) -> bool => {
+let window_block = pure (vdp: ref Vdp, k: i64, y: i64) -> bool => {
   let row = i64(vdp.regs[18] & 0x1F) * 8
   let in_rows = if (vdp.regs[18] & 0x80) != 0 { y >= row } else { y < row }
   if in_rows { return true }
@@ -298,7 +304,7 @@ let window_block = pure (vdp: Vdp, k: i64, y: i64) -> bool => {
 /// A name-table entry's pixel at (col, row) within its tile: priority (bit 15), palette
 /// (14–13), vertical and horizontal flip (12, 11), pattern (10–0; 32 bytes of 4-bit pixels,
 /// the left pixel of each pair in the high nibble).
-let tile_dot = pure (vdp: Vdp, entry: u16, col: i64, row: i64) -> Dot => {
+let tile_dot = pure (vdp: ref Vdp, entry: u16, col: i64, row: i64) -> Dot => {
   let r = if (entry & 0x1000) != 0 { 7 - row } else { row }
   let c = if (entry & 0x0800) != 0 { 7 - col } else { col }
   let pixel = pattern_pixel(vdp, i64(entry & 0x07FF), c, r)
@@ -306,7 +312,7 @@ let tile_dot = pure (vdp: Vdp, entry: u16, col: i64, row: i64) -> Dot => {
   Dot { color: u8(((entry >> 13) & 3) << 4) | pixel, high: (entry & 0x8000) != 0 }
 }
 
-let pattern_pixel = pure (vdp: Vdp, tile: i64, c: i64, r: i64) -> u8 => {
+let pattern_pixel = pure (vdp: ref Vdp, tile: i64, c: i64, r: i64) -> u8 => {
   let byte = vdp.vram[(tile * 32 + r * 4 + (c >> 1)) & 0xFFFF]
   if (c & 1) == 0 { byte >> 4 } else { byte & 0x0F }
 }
@@ -314,7 +320,7 @@ let pattern_pixel = pure (vdp: Vdp, tile: i64, c: i64, r: i64) -> u8 => {
 /// The horizontal scroll of plane `which` (0 A, 1 B) on line `y`, by register 11's mode:
 /// one value for the screen, one per 8-line cell row, one per line — or the first eight
 /// lines' values repeating, the mode Motorola's table calls invalid.
-let horizontal_scroll = pure (vdp: Vdp, y: i64, which: i64) -> i64 => {
+let horizontal_scroll = pure (vdp: ref Vdp, y: i64, which: i64) -> i64 => {
   let base = i64(vdp.regs[13] & 0x3F) << 10
   let offset = match vdp.regs[11] & 3 {
     0 => 0,
@@ -333,21 +339,21 @@ let plane_cells = pure (bits: u8) -> i64 => match bits {
   _ => 32,
 }
 
-let plane_a_base = pure (vdp: Vdp) -> i64 => i64(vdp.regs[2] & 0x38) << 10
+let plane_a_base = pure (vdp: ref Vdp) -> i64 => i64(vdp.regs[2] & 0x38) << 10
 
-let plane_b_base = pure (vdp: Vdp) -> i64 => i64(vdp.regs[4] & 0x07) << 13
+let plane_b_base = pure (vdp: ref Vdp) -> i64 => i64(vdp.regs[4] & 0x07) << 13
 
 /// The window's name table: register 3's bits 5–1, bit 1 ignored in 40-cell mode.
-let window_base = pure (vdp: Vdp) -> i64 => {
+let window_base = pure (vdp: ref Vdp) -> i64 => {
   let mask: u8 = if h40(vdp) { 0x3C } else { 0x3E }
   i64(vdp.regs[3] & mask) << 10
 }
 
 /// 40-cell mode: register 12's RS0 and RS1 (bits 0 and 7).
-let h40 = pure (vdp: Vdp) -> bool => (vdp.regs[12] & 0x81) != 0
+let h40 = pure (vdp: ref Vdp) -> bool => (vdp.regs[12] & 0x81) != 0
 
 /// The VRAM word at an even byte address, wrapping at 64 KB.
-let vram_entry = pure (vdp: Vdp, address: i64) -> u16 => {
+let vram_entry = pure (vdp: ref Vdp, address: i64) -> u16 => {
   let at = address & 0xFFFE
   (u16(vdp.vram[at]) << 8) | u16(vdp.vram[at + 1])
 }
@@ -359,7 +365,7 @@ let vram_entry = pure (vdp: Vdp, address: i64) -> u16 => {
 /// the list's order is sprite priority. At most 20 sprites and 320 pixels of them a line in
 /// 40-cell mode (16 and 256 in 32-cell), and 80 sprites in the list (64). A sprite at
 /// x = 0 masks the rest of the line's sprites once another sprite has been found on it.
-let sprite_line = (vdp: Vdp, y: i64, width: i64) -> []Dot => {
+let sprite_line = (vdp: ref Vdp, y: i64, width: i64) -> []Dot => {
   var dots: []Dot = [clear_dot; width]
   let wide = h40(vdp)
   let max_list = if wide { 80 } else { 64 }

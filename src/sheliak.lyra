@@ -1,13 +1,14 @@
 // sheliak — the emulator in a window: a cartridge ROM run on the Genesis model, its
-// picture shown with SDL, the keyboard and gamepads as its pads. No sound yet.
+// picture shown and its sound played with SDL, the keyboard and gamepads as its pads.
 //
 //   build/sheliak ROM                                  play
-//   build/sheliak ROM --frames N [--screenshot FILE] [--ppm FILE]
+//   build/sheliak ROM --frames N [--screenshot FILE] [--ppm FILE] [--wav FILE]
 //                                                      run N frames and quit, saving the
 //                                                      last: as SDL drew the window (BMP),
 //                                                      and as the texels sent to it (PPM,
 //                                                      which tests/vdp.sh compares with
-//                                                      BlastEm) — headless with
+//                                                      BlastEm); the sound of all N as a
+//                                                      WAV — headless with
 //                                                      SDL_VIDEODRIVER=dummy
 //
 // Keys (pad 1): arrows; Z, X, C for A, B, C; Return for Start. Escape quits; F11 toggles
@@ -33,10 +34,11 @@ import bindings.sdl3.{
   BUTTON_DPAD_UP, BUTTON_DPAD_DOWN, BUTTON_DPAD_LEFT, BUTTON_DPAD_RIGHT, BUTTON_WEST,
   BUTTON_SOUTH, BUTTON_EAST, BUTTON_START, AXIS_LEFT_X, AXIS_LEFT_Y,
   ticks_ns,
+  INIT_AUDIO, open_audio, close_audio, put_audio, queued_frames,
 }
 import m68k.{ Cpu }
 import genesis.{
-  GenesisBus, genesis_bus, new_cpu, power_on, run_frame,
+  GenesisBus, genesis_bus, new_cpu, power_on, run_frame, new_mixer, mix_audio,
   PAD_UP, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_A, PAD_B, PAD_C, PAD_START,
 }
 import vdp.{ Frame, shown_frame }
@@ -49,10 +51,15 @@ const FRAME_NS: i64 = 16688154
 const SCREEN_W: i32 = 320
 const SCREEN_H: i32 = 224
 
+/// The host's audio rate, and how much may wait in its queue before new sound is dropped
+/// (a display faster than the console's rate otherwise lets it grow without end).
+const AUDIO_RATE: i64 = 48000
+const AUDIO_QUEUE_LIMIT: i64 = 6000
+
 let main = () -> u8 => {
   let args = program_args()
   if args.len() < 2 {
-    println("usage: sheliak ROM [--frames N] [--screenshot FILE] [--ppm FILE]")
+    println("usage: sheliak ROM [--frames N] [--screenshot FILE] [--ppm FILE] [--wav FILE]")
     return 2
   }
   let Some(rom) = read_bytes(args[1]) else {
@@ -62,6 +69,7 @@ let main = () -> u8 => {
   var frames_only: i64 = -1
   var screenshot = ""
   var ppm = ""
+  var wav = ""
   var i = 2
   for i < args.len() {
     if args[i] == "--frames" && i + 1 < args.len() {
@@ -72,6 +80,9 @@ let main = () -> u8 => {
       i += 2
     } else if args[i] == "--ppm" && i + 1 < args.len() {
       ppm = args[i + 1]
+      i += 2
+    } else if args[i] == "--wav" && i + 1 < args.len() {
+      wav = args[i + 1]
       i += 2
     } else {
       println("sheliak: unknown argument ${args[i]}")
@@ -105,7 +116,7 @@ let main = () -> u8 => {
   var bus = genesis_bus(rom)
   power_on(cpu, bus)
   let status = if frames_only >= 0 {
-    run_headless(cpu, bus, renderer, frames_only, screenshot, ppm)
+    run_headless(cpu, bus, renderer, frames_only, screenshot, ppm, wav)
   } else {
     play(cpu, bus, renderer, window)
   }
@@ -122,9 +133,22 @@ let run_headless = (
   renderer: Renderer,
   frames: i64,
   screenshot: string,
-  ppm: string
+  ppm: string,
+  wav: string
 ) -> u8 => {
-  for _ in 0..<frames { run_frame(cpu, bus) }
+  var mixer = new_mixer(AUDIO_RATE)
+  var sound: []f32 = []
+  for _ in 0..<frames {
+    run_frame(cpu, bus)
+    let samples = mix_audio(bus, mixer)
+    if wav != "" {
+      for v in samples { sound.push(v) }
+    }
+  }
+  if wav != "" && !write_bytes(wav, wav_file(sound)) {
+    println("sheliak: cannot write ${wav}")
+    return 1
+  }
   var screen = new_screen()
   show(renderer, screen, shown_frame(bus.vdp))
   let saved = screenshot == "" || save_screenshot(renderer, screenshot)
@@ -164,6 +188,9 @@ let play = (
   window: Window
 ) -> u8 => {
   var screen = new_screen()
+  var mixer = new_mixer(AUDIO_RATE)
+  // No audio device (or none SDL can open) is no sound, not no emulator.
+  let stream = if init(INIT_AUDIO) { open_audio(i32(AUDIO_RATE), 2) } else { None }
   var pads: []Gamepad = []
   var fullscreen = false
   var last = i64(ticks_ns())
@@ -199,12 +226,42 @@ let play = (
       run_frame(cpu, bus)
       owed -= FRAME_NS
     }
+    let samples = mix_audio(bus, mixer)
+    if let Some(s) = stream {
+      if queued_frames(s) < AUDIO_QUEUE_LIMIT { put_audio(s, samples) }
+    }
     show(renderer, screen, shown_frame(bus.vdp))
     present(renderer)
   }
   for pad in pads { close_gamepad(pad) }
+  if let Some(s) = stream { close_audio(s) }
   release_screen(screen)
   0
+}
+
+/// Stereo samples, -1 to 1, as a 16-bit PCM WAV file at the audio rate.
+let wav_file = (samples: []f32) -> []u8 => {
+  let data_bytes = samples.len() * 2
+  var bytes: []u8 = []
+  for c in "RIFF" { bytes.push(u8(i64(c))) }
+  put_le(bytes, 36 + data_bytes, 4)
+  for c in "WAVEfmt " { bytes.push(u8(i64(c))) }
+  put_le(bytes, 16, 4)
+  put_le(bytes, 1, 2)
+  put_le(bytes, 2, 2)
+  put_le(bytes, AUDIO_RATE, 4)
+  put_le(bytes, AUDIO_RATE * 4, 4)
+  put_le(bytes, 4, 2)
+  put_le(bytes, 16, 2)
+  for c in "data" { bytes.push(u8(i64(c))) }
+  put_le(bytes, data_bytes, 4)
+  for v in samples { put_le(bytes, (f64(v) * 32767.0).round() & 0xFFFF, 2) }
+  bytes
+}
+
+/// `value`'s low `count` bytes, least significant first.
+let put_le = (bytes: mut []u8, value: i64, count: i64) -> void => {
+  for k in 0..<count { bytes.push(u8((value >> (8 * k)) & 0xFF)) }
 }
 
 // ── The picture ──────────────────────────────────────────────────────────────

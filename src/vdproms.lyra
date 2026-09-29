@@ -102,6 +102,8 @@ const TESTS: []string = [
   "mid_cram_h32",
   "pads",
   "z80_run",
+  "sound_fm",
+  "sound_psg",
 ]
 
 /// The code of the test `name`. (A `match` rather than a table of functions: each takes the
@@ -147,7 +149,9 @@ let body = (name: string, a: mut Asm) -> void => match name {
   "mid_vscroll" => mid_vscroll(a),
   "mid_cram_h32" => mid_cram_h32(a),
   "pads" => pads(a),
-  _ => z80_run(a),
+  "z80_run" => z80_run(a),
+  "sound_fm" => sound_fm(a),
+  _ => sound_psg(a),
 }
 
 /// The H slack each timing test is compared with, in slots (tests/vdp.sh reads it from the
@@ -666,6 +670,35 @@ let z80_run = (a: mut Asm) -> void => {
   }
   a.take_z80_bus()
   a.move_b_abs_abs(0xA01000, RAM + 0x10)
+}
+
+// ── Sound ────────────────────────────────────────────────────────────────────
+//
+// Notes held for the front end's audio to be checked by (`tests/sound.sh` measures their
+// pitch in its WAV output); for tests/vdp.sh they are just more ROMs that park.
+
+/// Channel 1, algorithm 7 (every operator a carrier), operator 1 alone at full volume with
+/// a fast attack, block 4, F-number 617: 617 × 2^3 × 53,267 / 2^20 ≈ 250.7 Hz.
+let sound_fm = (a: mut Asm) -> void => {
+  // The Z80 out of reset first: a Z80 held in reset never grants its bus.
+  a.move_w_imm_abs(0x0100, 0xA11200)
+  a.take_z80_bus()
+  for pair in [
+    (0x22, 0x00), (0x27, 0x00), (0x28, 0x00), (0x2B, 0x00),
+    (0xB0, 0x07), (0xB4, 0xC0),
+    (0x30, 0x01), (0x40, 0x00), (0x50, 0x1F), (0x60, 0x00), (0x70, 0x00), (0x80, 0x0F),
+    (0x34, 0x01), (0x44, 0x7F), (0x38, 0x01), (0x48, 0x7F), (0x3C, 0x01), (0x4C, 0x7F),
+    (0xA4, 0x22), (0xA0, 0x69), (0x28, 0x10),
+  ] {
+    let (register, value) = pair
+    a.ym_write(u8(register), u8(value))
+  }
+}
+
+/// PSG tone 1 at period 254 (3,579,545 / (32 × 254) ≈ 440.4 Hz), full volume; the rest
+/// silent.
+let sound_psg = (a: mut Asm) -> void => {
+  for byte in [0x9F, 0xBF, 0xDF, 0xFF, 0x8E, 0x0F, 0x90] { a.move_b_imm_abs(u8(byte), 0xC00011) }
 }
 
 // ── Scenes ───────────────────────────────────────────────────────────────────
@@ -1313,5 +1346,24 @@ let wait_z80_bus = (self: mut Asm) -> void => {
   self.w(0x0839)
   self.w(0x0000)
   self.l(0xA11100)
+  self.w(0x66F6)
+}
+
+/// A YM2612 bank-0 register written from the 68000, as software must: waiting for the busy
+/// flag before each byte.
+///
+///     wait: btst #7, $A04000 ; bne.s wait ; move.b #register, $A04000
+///     wait: btst #7, $A04000 ; bne.s wait ; move.b #value, $A04001
+let ym_write = (self: mut Asm, register: u8, value: u8) -> void => {
+  self.wait_ym()
+  self.move_b_imm_abs(register, 0xA04000)
+  self.wait_ym()
+  self.move_b_imm_abs(value, 0xA04001)
+}
+
+let wait_ym = (self: mut Asm) -> void => {
+  self.w(0x0839)
+  self.w(0x0007)
+  self.l(0xA04000)
   self.w(0x66F6)
 }

@@ -1,0 +1,129 @@
+module genesis
+//! The console's audio out: the YM2612's and the PSG's samples mixed as its analog stage
+//! mixes them, at a host's output rate.
+//!
+//! **Resampled by area** on the master clock's timeline: each output sample is the average
+//! of the chip samples that fall in its span, weighted by how much of each does — a box
+//! filter, which is also what keeps the PSG's ~223.7 kHz stream from aliasing on its way
+//! down. The two chips are resampled apart and mixed after.
+//!
+//! **The mix**: one PSG channel at full volume as loud as one FM channel at full; then
+//! the Model 1's low-pass (a single pole at 3,390 Hz, BlastEm's default for it) and a
+//! blocking of the DC the YM2612's ladder rests at. Neither the filter nor the balance is
+//! checked against hardware here; both are the ear's to judge, and the front end's to
+//! offer alternatives for.
+
+/// A resampler from one steady rate to another, on the master clock.
+struct Resampler {
+  /// Master clocks per input sample and per output sample.
+  in_span: f64,
+  out_span: f64,
+  /// How far into the output sample under way, and what has been summed into it.
+  pos: f64,
+  sum_l: f64,
+  sum_r: f64,
+}
+
+/// The mixer's state between frames: a resampler per chip, the output samples one chip
+/// has made that the other has not yet matched, and the filters.
+pub struct Mixer {
+  fm: Resampler,
+  sn: Resampler,
+  fm_out: []f64,
+  sn_out: []f64,
+  low_l: f64,
+  low_r: f64,
+  dc_in_l: f64,
+  dc_in_r: f64,
+  dc_out_l: f64,
+  dc_out_r: f64,
+  /// The low-pass's coefficient at this output rate.
+  alpha: f64,
+}
+
+/// The NTSC master clock.
+const MASTER_HZ: f64 = 53693175.0
+
+/// A mixer for output at `rate` Hz.
+pub let new_mixer = pure (rate: i64) -> Mixer => {
+  let out_span = MASTER_HZ / f64(rate)
+  Mixer {
+    fm: Resampler { in_span: f64(YM_CYCLE_CLOCKS * 24), out_span: out_span, pos: 0.0, sum_l: 0.0, sum_r: 0.0 },
+    sn: Resampler { in_span: f64(PSG_TICK_CLOCKS), out_span: out_span, pos: 0.0, sum_l: 0.0, sum_r: 0.0 },
+    fm_out: [],
+    sn_out: [],
+    low_l: 0.0,
+    low_r: 0.0,
+    dc_in_l: 0.0,
+    dc_in_r: 0.0,
+    dc_out_l: 0.0,
+    dc_out_r: 0.0,
+    alpha: 1.0 - (-2.0 * 3.141592653589793 * 3390.0 / f64(rate)).exp(),
+  }
+}
+
+/// The sound up to now: both chips run on to the bus's clock, their samples taken and
+/// mixed into stereo frames, left then right, -1 to 1.
+pub let mix_audio = (bus: mut GenesisBus, mixer: mut Mixer) -> []f32 => {
+  bus.sound.run_sound(bus.clock)
+  let fm = bus.sound.fm_samples
+  let sn = bus.sound.psg_samples
+  bus.sound.fm_samples = []
+  bus.sound.psg_samples = []
+  // An FM sample is six channels, each on the DAC once in 24 cycles at up to 3 × 256.
+  var i = 0
+  for i + 1 < fm.len() {
+    resample(mixer.fm, f64(fm[i]) / 6144.0, f64(fm[i + 1]) / 6144.0, mixer.fm_out)
+    i += 2
+  }
+  // A PSG sample is four channels of up to 32767; one at full is one FM channel at full.
+  for v in sn {
+    let level = f64(v) / 262144.0
+    resample(mixer.sn, level, level, mixer.sn_out)
+  }
+  let frames = if mixer.fm_out.len() < mixer.sn_out.len() { mixer.fm_out.len() } else { mixer.sn_out.len() }
+  let pairs = frames / 2
+  var out: []f32 = []
+  for k in 0..<pairs {
+    let l = mixer.fm_out[2 * k] + mixer.sn_out[2 * k]
+    let r = mixer.fm_out[2 * k + 1] + mixer.sn_out[2 * k + 1]
+    mixer.low_l += mixer.alpha * (l - mixer.low_l)
+    mixer.low_r += mixer.alpha * (r - mixer.low_r)
+    let dc_l = mixer.low_l - mixer.dc_in_l + 0.9987 * mixer.dc_out_l
+    let dc_r = mixer.low_r - mixer.dc_in_r + 0.9987 * mixer.dc_out_r
+    mixer.dc_in_l = mixer.low_l
+    mixer.dc_in_r = mixer.low_r
+    mixer.dc_out_l = dc_l
+    mixer.dc_out_r = dc_r
+    out.push(f32(clamp_unit(dc_l)))
+    out.push(f32(clamp_unit(dc_r)))
+  }
+  mixer.fm_out = mixer.fm_out.slice(2 * pairs, mixer.fm_out.len())
+  mixer.sn_out = mixer.sn_out.slice(2 * pairs, mixer.sn_out.len())
+  out
+}
+
+/// One input sample into its resampler: summed into the output sample under way for as
+/// much of its span as that has room for, the rest into the next; each output sample
+/// finished is the average of its span.
+let resample = (r: mut Resampler, l: f64, rr: f64, out: mut []f64) -> void => {
+  var remaining = r.in_span
+  for remaining > 0.0 {
+    let room = r.out_span - r.pos
+    let portion = if room < remaining { room } else { remaining }
+    r.sum_l += l * portion
+    r.sum_r += rr * portion
+    r.pos += portion
+    remaining -= portion
+    if r.pos >= r.out_span - 0.000001 {
+      out.push(r.sum_l / r.out_span)
+      out.push(r.sum_r / r.out_span)
+      r.sum_l = 0.0
+      r.sum_r = 0.0
+      r.pos = 0.0
+    }
+  }
+}
+
+let clamp_unit = pure (v: f64) -> f64 =>
+  if v > 1.0 { 1.0 } else if v < -1.0 { -1.0 } else { v }

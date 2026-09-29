@@ -62,7 +62,7 @@ pub let run_beam = (vdp: mut Vdp, to: i64) -> void => {
 
 /// The interrupt level the VDP asserts: 6 for a raised and enabled V interrupt (register 1
 /// bit 5), else 4 for a raised and enabled H interrupt (register 0 bit 4), else none.
-pub let vdp_interrupt_level = pure (vdp: Vdp) -> u8 => {
+pub let vdp_interrupt_level = pure (vdp: ref Vdp) -> u8 => {
   if vdp.vint_pending && (vdp.regs[1] & 0x20) != 0 { return 6 }
   if vdp.hint_pending && (vdp.regs[0] & 0x10) != 0 { return 4 }
   0
@@ -79,7 +79,7 @@ pub let acknowledge_vdp = (vdp: mut Vdp) -> void => {
 
 /// The HV counter: V in the high byte, H in the low — or both as latched, while register 0
 /// bit 1 holds them.
-pub let hv_counter = pure (vdp: Vdp) -> u16 => {
+pub let hv_counter = pure (vdp: ref Vdp) -> u16 => {
   if (vdp.regs[0] & 0x02) != 0 { return vdp.hv_latch }
   live_hv(vdp)
 }
@@ -87,10 +87,10 @@ pub let hv_counter = pure (vdp: Vdp) -> u16 => {
 /// Register 0 bit 1 set latches the HV counter as it stands, until it is cleared.
 let latch_hv = (vdp: mut Vdp) -> void => { vdp.hv_latch = live_hv(vdp) }
 
-let live_hv = pure (vdp: Vdp) -> u16 => ((vdp.vcounter & 0xFF) << 8) | vdp.hslot
+let live_hv = pure (vdp: ref Vdp) -> u16 => ((vdp.vcounter & 0xFF) << 8) | vdp.hslot
 
 /// The status register's beam bits: V interrupt raised (7), V-blank (3), H-blank (2).
-let beam_status = pure (vdp: Vdp) -> u16 => {
+let beam_status = pure (vdp: ref Vdp) -> u16 => {
   var status: u16 = 0
   if vdp.vint_pending { status = status | 0x80 }
   if vdp.phase == Blank || (vdp.regs[1] & 0x40) == 0 { status = status | 0x08 }
@@ -100,12 +100,12 @@ let beam_status = pure (vdp: Vdp) -> u16 => {
 }
 
 /// The frame last completed: the one V-blank began after.
-pub let shown_frame = pure (vdp: Vdp) -> Frame => vdp.shown
+pub let shown_frame = pure (vdp: ref Vdp) -> Frame => vdp.shown
 
 // ── Slots and lines ──────────────────────────────────────────────────────────
 
 /// The length of the current slot in master clocks.
-let slot_clocks = pure (vdp: Vdp) -> i64 => {
+let slot_clocks = pure (vdp: ref Vdp) -> i64 => {
   if !h40(vdp) { return 20 }
   if vdp.hslot >= 230 && vdp.hslot < 247 { return HSYNC_CLOCKS[i64(vdp.hslot - 230)] }
   16

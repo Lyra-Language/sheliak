@@ -1,0 +1,63 @@
+// ymtest — Sheliak's YM2612 run on a script, printing what tests/oracles/ym_nuked.c prints
+// for Nuked-OPN2, for tests/ym.sh to compare.
+//
+//   build/ymtest < script
+//
+// Script lines: "w PORT HEX" writes a byte to port 0-3; "c N" runs N cycles; "s N" runs N
+// samples, printing each
+// one's two outputs summed over its 24 cycles; "r PORT" reads the status; "t" prints the ROMs.
+
+import std.io.{ read_stdin }
+import ym2612.{ new_ym2612, write_ym, read_ym, clock_ym }
+
+let main = () -> void => {
+  var ym = new_ym2612()
+  for line in read_stdin().lines() {
+    let words = line.trim().split(" ")
+    if words.len() == 0 || words[0] == "" { continue }
+    match words[0] {
+      "w" => write_ym(ym, u8(parse(words[1], 10)), u8(parse(words[2], 16))),
+      "c" => {
+        for _ in 0..<parse(words[1], 10) { clock_ym(ym) }
+      },
+      "s" => {
+        for _ in 0..<parse(words[1], 10) {
+          var left: i64 = 0
+          var right: i64 = 0
+          for _ in 0..<24 {
+            clock_ym(ym)
+            left += ym.out_l
+            right += ym.out_r
+          }
+          println("${left} ${right}")
+        }
+      },
+      "r" => println("status ${two_hex(read_ym(ym, u8(parse(words[1], 10))))}"),
+      "t" => {
+        for i, v in ym.logsin { println("logsin ${i} ${v}") }
+        for i, v in ym.exp { println("exp ${i} ${v}") }
+      },
+      _ => {},
+    }
+  }
+}
+
+let two_hex = pure (v: u8) -> string => {
+  let text = v.to_hex()
+  if text.len() < 2 { "0" ++ text } else { text }
+}
+
+let parse = pure (text: string, base: i64) -> i64 => {
+  var n: i64 = 0
+  for c in text {
+    let digit: i64 = match c {
+      '0'..<='9' => i64(c) - i64('0'),
+      'a'..<='f' => i64(c) - i64('a') + 10,
+      'A'..<='F' => i64(c) - i64('A') + 10,
+      _ => -1,
+    }
+    if digit < 0 || digit >= base { continue }
+    n = n * base + digit
+  }
+  n
+}

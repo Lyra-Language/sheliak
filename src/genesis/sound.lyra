@@ -4,19 +4,32 @@ module genesis
 //! with its clock, a T-state every 15 master clocks, kept here and run on by the 68000's
 //! bus ([GenesisBus.run_z80]) to wherever the 68000 has got.
 //!
-//! **No sound chip is emulated yet**: the YM2612 reads as idle (not busy, no timer
-//! overflowed) and its writes, and the PSG's, are dropped. **The window reaches the
-//! cartridge only**: a Z80 read of the 68000's RAM or I/O through it answers FF, and a
-//! write there is dropped.
+//! **The sound chips live here too** — the YM2612 at 4000–5FFF (ports 0–3, mirrored) and
+//! the PSG at 7F11 — as the 68000 reaches them as well (A04000, C00011). Each keeps its own
+//! clock (the YM2612 a cycle every 42 master clocks, the PSG a tick every 240) and is run
+//! on to the time of every access, from either CPU, and before the front end takes the
+//! samples ([run_sound]): what a chip does between two accesses no one can see. Each
+//! sample is kept, the YM2612's two outputs summed over its 24 cycles (~53.3 kHz) and the
+//! PSG's four channels summed (~223.7 kHz), for the front end to mix and resample.
+//!
+//! **The window reaches the cartridge only**: a Z80 read of the 68000's RAM or I/O
+//! through it answers FF, and a write there is dropped.
 //!
 //! **Its /INT** is the VDP's: held low from the slot the 68000's V interrupt is raised in,
 //! for 2,573 master clocks (BlastEm's measured ~171 Z80 clocks).
 
 import z80.{ Z80Bus }
+import psg.{ Psg, new_psg, write_psg, tick_psg, channel_level }
+import ym2612.{ Ym2612, new_ym2612, write_ym, read_ym, clock_ym }
 
 /// Master clocks per Z80 T-state, and how long the VDP holds the Z80's /INT.
 pub const Z80_CLOCKS: i64 = 15
 const Z80_INT_CLOCKS: i64 = 2573
+
+/// Master clocks per YM2612 cycle (its 7.67 MHz input, divided by 6) and per PSG tick (the
+/// Z80's clock, divided by 16).
+pub const YM_CYCLE_CLOCKS: i64 = 42
+pub const PSG_TICK_CLOCKS: i64 = 240
 
 /// What the Z80 is wired to.
 pub struct Z80Side {
@@ -34,6 +47,17 @@ pub struct Z80Side {
   in_reset: bool,
   /// The master clock the VDP last pulled /INT low at.
   int_from: i64,
+  /// The sound chips, the master clock each has run to, and the samples they have made
+  /// since the front end last took them: the YM2612's left and right in turn, the PSG's
+  /// one; the YM2612's outputs so far in the sample under way.
+  ym: Ym2612,
+  psg: Psg,
+  ym_clock: i64,
+  psg_clock: i64,
+  fm_samples: []i32,
+  psg_samples: []i32,
+  ym_left: i64,
+  ym_right: i64,
 }
 
 pub let new_z80_side = pure (rom: []u8) -> Z80Side => Z80Side {
@@ -44,6 +68,54 @@ pub let new_z80_side = pure (rom: []u8) -> Z80Side => Z80Side {
   bus_requested: false,
   in_reset: true,
   int_from: -Z80_INT_CLOCKS,
+  ym: new_ym2612(),
+  psg: new_psg(),
+  ym_clock: 0,
+  psg_clock: 0,
+  fm_samples: [],
+  psg_samples: [],
+  ym_left: 0,
+  ym_right: 0,
+}
+
+/// Run both sound chips on to master clock `to`, keeping their samples.
+pub let run_sound = (self: mut Z80Side, to: i64) -> void => {
+  for self.ym_clock + YM_CYCLE_CLOCKS <= to {
+    clock_ym(self.ym)
+    self.ym_left += self.ym.out_l
+    self.ym_right += self.ym.out_r
+    if self.ym.cycle == 0 {
+      self.fm_samples.push(i32(self.ym_left))
+      self.fm_samples.push(i32(self.ym_right))
+      self.ym_left = 0
+      self.ym_right = 0
+    }
+    self.ym_clock += YM_CYCLE_CLOCKS
+  }
+  for self.psg_clock + PSG_TICK_CLOCKS <= to {
+    tick_psg(self.psg)
+    var level: i64 = 0
+    for channel in 0..<4 { level += channel_level(self.psg, channel) }
+    self.psg_samples.push(i32(level))
+    self.psg_clock += PSG_TICK_CLOCKS
+  }
+}
+
+/// A byte written to the YM2612's port (0–3) or read from it, the chips run on to `at`.
+pub let write_fm = (self: mut Z80Side, at: i64, port: u8, value: u8) -> void => {
+  self.run_sound(at)
+  write_ym(self.ym, port & 3, value)
+}
+
+pub let read_fm = (self: mut Z80Side, at: i64, port: u8) -> u8 => {
+  self.run_sound(at)
+  read_ym(self.ym, port & 3)
+}
+
+/// A byte written to the PSG, the chips run on to `at`.
+pub let write_sn = (self: mut Z80Side, at: i64, value: u8) -> void => {
+  self.run_sound(at)
+  write_psg(self.psg, value)
 }
 
 impl Z80Bus for Z80Side {
@@ -53,6 +125,8 @@ impl Z80Bus for Z80Side {
   }
   read = (self, address) => {
     self.clock += 3 * Z80_CLOCKS
+    let a = i64(address)
+    if a >= 0x4000 && a < 0x6000 { return self.read_fm(self.clock, u8(a & 3)) }
     self.peek(address)
   }
   write = (self, address, value) => {
@@ -75,24 +149,30 @@ impl Z80Bus for Z80Side {
   }
 }
 
-/// A byte of the Z80's map: RAM (mirrored at 2000), the YM2612 (idle), the bank window.
-let peek = pure (self: Z80Side, address: u16) -> u8 => {
+/// A byte of the Z80's map as it stands: RAM (mirrored at 2000), the bank window. (The
+/// YM2612, which must be run on first, is read by `read`.)
+let peek = pure (self: ref Z80Side, address: u16) -> u8 => {
   let a = i64(address)
   if a < 0x4000 { return self.ram[a & 0x1FFF] }
-  if a < 0x6000 { return 0 }
+  if a < 0x6000 { return self.ym.status }
   if a < 0x8000 { return 0xFF }
   let target = i64((self.bank << 15) | u32(a & 0x7FFF))
   if target < 0x400000 && target < self.rom.len() { return self.rom[target] }
   0xFF
 }
 
-/// A byte written by the Z80: RAM, or the bank register (6000–60FF), which takes bit 0 as
-/// the top bit of nine, shifting the rest down.
+/// A byte written by the Z80: RAM; the YM2612 (4000–5FFF); the bank register (6000–60FF),
+/// which takes bit 0 as the top bit of nine, shifting the rest down; the PSG (7F11 and its
+/// odd neighbours to 7F17).
 let poke = (self: mut Z80Side, address: u16, value: u8) -> void => {
   let a = i64(address)
   if a < 0x4000 {
     self.ram[a & 0x1FFF] = value
-  } else if a >= 0x6000 && a < 0x6100 {
+  } else if a < 0x6000 {
+    self.write_fm(self.clock, u8(a & 3), value)
+  } else if a < 0x6100 {
     self.bank = ((self.bank >> 1) | (u32(value & 1) << 8)) & 0x1FF
-  }
+  } else if a >= 0x7F10 && a < 0x7F18 && (a & 1) == 1 {
+      self.write_sn(self.clock, value)
+    }
 }

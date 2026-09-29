@@ -284,13 +284,13 @@ pub let round_up = pure (n: i64, m: i64) -> i64 => ((n + m - 1) / m) * m
 
 /// Whether register 1 enables DMA (M1, bit 4). A command with CD5 set does nothing more
 /// than an ordinary command while it is clear.
-let dma_enabled = pure (vdp: Vdp) -> bool => (vdp.regs[1] & 0x10) != 0
+let dma_enabled = pure (vdp: ref Vdp) -> bool => (vdp.regs[1] & 0x10) != 0
 
 /// Register 23's bits 7–6: a VRAM fill (`10`), a VRAM copy (`11`); bit 7 clear is a
 /// 68000 → VDP transfer.
-let fill_mode = pure (vdp: Vdp) -> bool => (vdp.regs[23] & 0xC0) == 0x80
-let copy_mode = pure (vdp: Vdp) -> bool => (vdp.regs[23] & 0xC0) == 0xC0
-let transfer_mode = pure (vdp: Vdp) -> bool => (vdp.regs[23] & 0x80) == 0
+let fill_mode = pure (vdp: ref Vdp) -> bool => (vdp.regs[23] & 0xC0) == 0x80
+let copy_mode = pure (vdp: ref Vdp) -> bool => (vdp.regs[23] & 0xC0) == 0xC0
+let transfer_mode = pure (vdp: ref Vdp) -> bool => (vdp.regs[23] & 0x80) == 0
 
 /// The DMA a command with CD5 starts: a fill waits for the data write that supplies its
 /// value; a copy runs from the next slot; a 68000 → VDP transfer takes the bus — three
@@ -309,10 +309,10 @@ let start_dma = (vdp: mut Vdp) -> bool => {
 
 /// Whether a 68000 → VDP transfer is running — while it is, the bus sets [dma_word] from
 /// [dma_source] and steps the VDP a slot at a time, the 68000 held.
-pub let dma_68k_running = pure (vdp: Vdp) -> bool => vdp.dma_run && transfer_mode(vdp)
+pub let dma_68k_running = pure (vdp: ref Vdp) -> bool => vdp.dma_run && transfer_mode(vdp)
 
 /// The 68000 address the transfer's next word comes from: registers 21–23 hold it in words.
-pub let dma_source = pure (vdp: Vdp) -> u32 =>
+pub let dma_source = pure (vdp: ref Vdp) -> u32 =>
   (u32(vdp.regs[23] & 0x7F) << 17) | (u32(vdp.regs[22]) << 9) | (u32(vdp.regs[21]) << 1)
 
 /// The transfer has ended: the 68000 goes on from the slot after the last one it ran in.

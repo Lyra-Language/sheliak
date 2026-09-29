@@ -24,6 +24,9 @@ tests/fetch_z80.sh          # SingleStepTests Z80 suite -> build/deps/z80 (~1.3 
 tests/z80.sh                # every Z80 test file (1,604 files, 1.6M tests, ~85 s)
 tests/z80.sh 00 "dd cb __ 06"   # just these
 build/z80scenarios          # the Z80's interrupts, HALT, EI, RETN
+tests/psg.sh                # the PSG against BlastEm's, tick by tick (random scripts)
+tests/ym.sh                 # the YM2612 against Nuked-OPN2, sample by sample, bit for bit
+tests/sound.sh              # a note from each chip through the front end, its pitch measured
 tests/scenarios.sh          # interrupt, STOP and trace scenarios on a scripted bus
 tests/vdp.sh                # VDP test ROMs on Sheliak and BlastEm, compared (needs SDL2)
 tests/vdp.sh fill copy      # just these
@@ -151,6 +154,23 @@ frame-at-a-time shortcuts from the start:
   byte.
 - **Hot paths do not allocate** (`noalloc` where it can be said): the 68000 alone is ~7.6
   million cycles a second.
+- **A large struct is read through `ref`, never a bare parameter**: a bare parameter is a
+  copy, and the bus, the VDP and the YM2612 are kilobytes. Passing them bare cost the
+  emulator two thirds of its time (a frame 14 ms, then 4.7 ms with `ref`).
+- **The YM2612's oracle is Nuked-OPN2** (LGPL-2.1, `tests/ym.sh`), a transcription of the
+  decapped die, downloaded pinned and built into a separate harness
+  (`tests/oracles/ym_nuked.c`) — never linked, and read for behaviour, never copied: Sheliak's
+  YM2612 is its own structure, its ROMs generated from their formulas (and checked equal to
+  the chip's). It must match Nuked's output sample for sample, bit for bit, on random
+  scripts of every register (the LSI test registers aside). The chip type is the YM2612
+  (the ladder effect), status read on port 0.
+- **The PSG's oracle is BlastEm's `psg.c`**, built into `tests/oracles/psg_blastem.c` from the
+  pinned BlastEm tree: its state compared tick by tick. Where SMS Power's hardware tests
+  and BlastEm part (a data byte to a latched volume or noise register), Sheliak follows the
+  hardware and the scripts avoid the case.
+- **The mix is not checked against hardware**: the resampling, the PSG/FM balance, the
+  Model 1 low-pass (3,390 Hz, BlastEm's default) and the DC block are `genesis/audio.lyra`'s
+  choices; `tests/sound.sh` checks only that notes come out at their pitch.
 
 ## Layout
 
@@ -160,6 +180,8 @@ Module paths resolve under `src/` (the entry file's directory), so entry points 
 src/sheliak.lyra     the emulator in an SDL window: frames paced to 59.92 Hz, the picture
                      through the DAC's levels, keyboard and gamepads as pads 1 and 2
 src/padtest.lyra     the controller ports with buttons held, read through the bus
+src/psgtest.lyra     the PSG on a script, its state printed per tick
+src/ymtest.lyra      the YM2612 on a script, its output printed per sample
 src/cputest.lyra     68000 test runner: one SingleStepTests file on stdin
 src/z80test.lyra     Z80 test runner: one SingleStepTests file on stdin
 src/z80scenarios.lyra  the Z80's interrupts, scenario by scenario, on a scripted bus
@@ -191,6 +213,10 @@ src/z80/             the Z80 (module z80):
                      registers and the unprefixed instructions, decoded by x/y/z/p/q
   prefixed.lyra      CB, DD CB / FD CB, ED (block instructions and their repeat flags)
   alu.lyra           arithmetic and the flags, bits 5 and 3 included
+src/psg/psg.lyra     the SN76489 (module psg): tone and noise channels, the Sega LFSR
+src/ym2612/ym2612.lyra  the YM2612 (module ym2612), cycle by cycle: the register file,
+                     phase and envelope generators, SSG-EG, LFO, operators and algorithms,
+                     channel accumulation, the multiplexed 9-bit DAC and its ladder, timers
 src/vdp/             the VDP (module vdp):
   vdp.lyra           memories, registers, the control and data ports, status, DMA's start
   slots.lyra         the access slots: which slots are the 68000's, the FIFO, reads fetched
@@ -205,7 +231,8 @@ src/vdp/             the VDP (module vdp):
 src/genesis/         the machine (module genesis):
   machine.lyra       power on, and run a frame
   sound.lyra         the Z80's side: its RAM, the bank window onto the cartridge, its clock
-                     and /INT (from the VDP); the sound chips idle
+                     and /INT (from the VDP); the YM2612 and PSG, clocked, their samples
+  audio.lyra         the analog stage: both chips resampled by area, mixed, filtered
   io.lyra            the I/O chip (3-button pads, TH-multiplexed) and the Z80's RAM and bus
                      lines (no Z80 runs: its bus is granted at once)
   bus.lyra           the 68000's memory map: ROM, work RAM, the VDP ports, I/O, Z80, TMSS;
@@ -223,6 +250,10 @@ tests/vdp.sh         fetch and build BlastEm (pinned), run every VDP test ROM on
 tests/blastem_patches.py  the oracle's three patches (none to anything it emulates)
 tests/frame_compare.py    Sheliak's VDP output against BlastEm's screenshot, pixel for pixel
 tests/ram_compare.py      work RAM, exact but for a timing ROM's H counters, within its slack
+tests/oracles/       the C harnesses around the sound oracles (Nuked-OPN2, BlastEm's PSG)
+tests/psg.sh, psg_script.py  the PSG against BlastEm's
+tests/ym.sh, ym_script.py    the YM2612 against Nuked-OPN2
+tests/sound.sh, wav_pitch.py the sound path end to end
 ```
 
 ## Status
@@ -266,15 +297,23 @@ T-state resolution, undocumented flags, WZ and the 2018 block-repeat flags inclu
 its interrupt scenarios; it runs in the Genesis (`z80_run` matches BlastEm: a program
 loaded by the 68000, the bank window, V-blank interrupts frame by frame). **Not yet**: its
 reach into the 68000's RAM and I/O through the window (FF, dropped), the 68000's stall when
-it does, the VDP and PSG at 7Fxx, and the sound chips themselves.
+it does, and the VDP at 7F00.
+
+**The sound chips are built** — the YM2612 matching Nuked-OPN2 bit for bit on random scripts
+of every register (algorithms, feedback, envelopes and SSG-EG, detune, the LFO, channel 3's
+special and CSM modes, the DAC and its ladder, the timers and busy flag), the PSG matching
+BlastEm's tick for tick — both on the bus (68000 and Z80), and the front end plays them:
+mixed, filtered, resampled to 48 kHz through SDL, or written to a WAV (`--wav`). A frame,
+sound and all, takes ~4.7 ms. **Not yet**: the YM2612's test registers; a mix checked
+against a real console.
 
 **The front end runs a cartridge in a window** (`build/sheliak`), and `tests/vdp.sh` holds
 its picture to BlastEm's too: the texels it sends the window (`--ppm`), byte for byte against
 the screenshot, so its colour conversion is checked, not only the VDP's output. Raw ROM images, two
 3-button pads (the protocol matched against BlastEm with nothing held, `pads`; with buttons
 held, `build/padtest`), frames paced to the console's 59.92 Hz whatever the display's rate,
-~5.5 ms a frame on an M-series Mac. **Not yet: sound (the YM2612, the PSG)**, cartridge
-SRAM and mappers, 6-button pads, `.smd` images, regions other than US NTSC.
+~4.7 ms a frame with sound on an M-series Mac. **Not yet**: cartridge SRAM and mappers,
+6-button pads, `.smd` images, regions other than US NTSC.
 
 **Open**: the VDP's registers at power-on (the ROMs set every one; BlastEm starts register
 10 at FF, uncited), and the beam's position and the H interrupt counter with them (Sheliak

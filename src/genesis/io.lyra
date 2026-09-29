@@ -40,7 +40,7 @@ let read_port = pure (port: Port, held: u8) -> u8 => {
 /// A byte read from the I/O chip, A10000–A1001F (odd addresses; an even one reads the same
 /// byte): the version register, the three ports' data and control registers. The serial
 /// registers read zero.
-let read_io = pure (bus: GenesisBus, a: u32) -> u8 => match (a >> 1) & 0x0F {
+let read_io = pure (bus: ref GenesisBus, a: u32) -> u8 => match (a >> 1) & 0x0F {
   0 => VERSION,
   1 => read_port(bus.ports[0], bus.pads[0]),
   2 => read_port(bus.ports[1], bus.pads[1]),
@@ -59,21 +59,31 @@ let write_io = (bus: mut GenesisBus, a: u32, value: u8) -> void => {
 }
 
 /// A byte of the Z80's space as the 68000 reads it, A00000–A0FFFF: its RAM (8 KB,
-/// mirrored once), the YM2612's status (never busy), and nothing else.
-let read_z80_space = pure (bus: GenesisBus, a: u32) -> u8 => {
+/// mirrored once), the YM2612's status as last read (`read_z80_fm` reads it afresh), and
+/// nothing else.
+let read_z80_space = pure (bus: ref GenesisBus, a: u32) -> u8 => {
   let offset = a & 0xFFFF
   if offset < 0x4000 { return bus.sound.ram[i64(offset & 0x1FFF)] }
+  if offset < 0x6000 { return bus.sound.ym.status }
   0
 }
 
+/// The YM2612's status, read by the 68000 at A04000–A05FFF: the chips run on first.
+let read_z80_fm = (bus: mut GenesisBus, a: u32) -> u8 =>
+  bus.sound.read_fm(bus.clock, u8(a & 3))
+
 let write_z80_space = (bus: mut GenesisBus, a: u32, value: u8) -> void => {
   let offset = a & 0xFFFF
-  if offset < 0x4000 { bus.sound.ram[i64(offset & 0x1FFF)] = value }
+  if offset < 0x4000 {
+    bus.sound.ram[i64(offset & 0x1FFF)] = value
+  } else if offset < 0x6000 {
+    bus.sound.write_fm(bus.clock, u8(offset & 3), value)
+  }
 }
 
 /// The Z80 bus request register (A11100) as read: bit 0 of its even byte is clear once the
 /// bus is the 68000's — as soon as it is asked for, the Z80 stopping between instructions,
 /// but only while the Z80 is out of reset: a Z80 held in reset never grants its bus
 /// (BlastEm's model, and why Sega's start-up sequence releases the reset first).
-let read_bus_request = pure (bus: GenesisBus) -> u8 =>
+let read_bus_request = pure (bus: ref GenesisBus) -> u8 =>
   if bus.sound.bus_requested && !bus.sound.in_reset { 0 } else { 1 }

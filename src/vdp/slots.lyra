@@ -44,7 +44,7 @@ let empty_entry = FifoEntry { ready: 0, address: 0, code: 0, value: 0, partial: 
 
 /// The slot's length in master clocks for the FIFO's and the reads' latencies (16 or 20,
 /// whatever horizontal sync does to the slots themselves).
-let slot_unit = pure (vdp: Vdp) -> i64 => if h40(vdp) { 16 } else { 20 }
+let slot_unit = pure (vdp: ref Vdp) -> i64 => if h40(vdp) { 16 } else { 20 }
 
 /// Run the beam on by one slot, and do what that slot does.
 pub let step_slot = (vdp: mut Vdp) -> void => {
@@ -54,12 +54,12 @@ pub let step_slot = (vdp: mut Vdp) -> void => {
 
 /// The master clock the VDP counts a 68000 access at `now` from, as BlastEm has it: the
 /// first slot boundary no more than a slot (less one clock) before it.
-let seen_at = pure (vdp: Vdp, now: i64) -> i64 => {
+let seen_at = pure (vdp: ref Vdp, now: i64) -> i64 => {
   let lag: i64 = if h40(vdp) { 15 } else { 19 }
   if vdp.clock >= now - lag { vdp.clock } else { vdp.clock + slot_clocks(vdp) }
 }
 
-let fifo_full = pure (vdp: Vdp) -> bool => vdp.fifo_write == vdp.fifo_read
+let fifo_full = pure (vdp: ref Vdp) -> bool => vdp.fifo_write == vdp.fifo_read
 
 /// A word into the FIFO, a slot free to take it two slots after `from`.
 let enqueue = (vdp: mut Vdp, from: i64, value: u16) -> void => {

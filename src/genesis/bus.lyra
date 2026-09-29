@@ -105,6 +105,11 @@ impl Bus for GenesisBus {
     // A byte of a VDP port is a word access to it: the port acts once, and the byte
     // is the half the address names.
     self.tick(4)
+    if a >= 0xA04000 && a < 0xA06000 {
+      let status = read_z80_fm(self, a)
+      self.open_bus = (u16(status) << 8) | u16(status)
+      return status
+    }
     let word = if a >= 0xC00000 && a < 0xC00020 { self.read_vdp(a & 0xFFFFFE) } else { self.peek_word(a & 0xFFFFFE) }
     self.open_bus = word
     if (a & 1) == 0 { u8(word >> 8) } else { u8(word & 0xFF) }
@@ -116,8 +121,11 @@ impl Bus for GenesisBus {
       let at = i64(a & 0xFFFE)
       self.ram[at] = u8(value >> 8)
       self.ram[at + 1] = u8(value & 0xFF)
-    } else if a >= 0xC00000 && a < 0xC00020 {
+    } else if a >= 0xC00000 && a < 0xC00010 {
       self.write_vdp(a, value)
+    } else if a >= 0xC00010 && a < 0xC00018 {
+      // A word to the PSG's port: its low byte.
+      self.sound.write_sn(self.clock, u8(value & 0xFF))
     } else {
       self.write_other(a & 0xFFFFFE, u8(value >> 8))
       self.write_other(a | 1, u8(value & 0xFF))
@@ -132,9 +140,11 @@ impl Bus for GenesisBus {
     if a >= 0xE00000 {
       self.ram[i64(a & 0xFFFF)] = value
     } else if a >= 0xC00000 && a < 0xC00010 {
-      // A byte written to a VDP port is that byte in both halves of a word. (C00011–17, the
-      // PSG, is not a VDP port and is ignored until the PSG is built.)
+      // A byte written to a VDP port is that byte in both halves of a word.
       self.write_vdp(a & 0xFFFFFE, word)
+    } else if a >= 0xC00010 && a < 0xC00018 {
+      // The PSG, at the odd bytes C00011–C00017.
+      if (a & 1) == 1 { self.sound.write_sn(self.clock, value) }
     } else {
       self.write_other(a, value)
     }
@@ -197,7 +207,7 @@ let run_z80 = (self: mut GenesisBus) -> void => {
 /// The word at an even address outside the VDP, with no bus cycle: ROM, work RAM, the Z80's
 /// space, the I/O chip (its byte in both halves), the Z80 bus request. Also what a
 /// 68000 → VDP DMA reads, which is why it takes no time here.
-let peek_word = pure (self: GenesisBus, a: u32) -> u16 => {
+let peek_word = pure (self: ref GenesisBus, a: u32) -> u16 => {
   if a < 0x400000 {
     let at = i64(a & 0x3FFFFE)
     if at + 1 < self.rom.len() { return (u16(self.rom[at]) << 8) | u16(self.rom[at + 1]) }
