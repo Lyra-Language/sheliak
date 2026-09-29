@@ -3,18 +3,22 @@
 //   build/vdpcheck ROM PARK_ADDRESS OUT_DIR
 //
 // Resets the 68000 on a Genesis bus holding ROM and steps it until the PC reaches
-// PARK_ADDRESS (hex) — the ROM's closing `bra.s *` — then writes, into OUT_DIR, the files
-// BlastEm's debugger is asked for: vram.bin, cram.bin, vsram.bin (words big-endian),
-// regs.bin, ram.bin (the first 256 bytes of work RAM), state.txt (address and code
-// registers), and frame.bin — the frame the VDP's state draws (width and height, then a
-// pixel per u16, all big-endian; tests/frame_compare.py reads it). Exits 1 if the ROM never parks (a step limit), or takes an exception.
+// PARK_ADDRESS (hex) — the ROM's closing `bra.s *` — and on, parked, until three more frames
+// have been drawn, as BlastEm is run two frames past it and then asked for the next one.
+// Then writes, into OUT_DIR, the files BlastEm's debugger is asked for: vram.bin, cram.bin,
+// vsram.bin (words big-endian), regs.bin, ram.bin (the first 256 bytes of work RAM),
+// state.txt (address and code registers), and frame.bin — the last frame drawn (width and
+// height, then a pixel per u16, all big-endian; tests/frame_compare.py reads it). Exits 1
+// if the ROM never parks (a step limit), or takes an exception.
 
 import std.io.{ read_bytes, write_bytes, write_file, create_dir_all }
 import m68k.{ step, reset, cpu_with }
 import genesis.{ GenesisBus, genesis_bus }
-import vdp.{ render_frame }
+import vdp.{ shown_frame }
 
 const STEP_LIMIT: i64 = 1000000
+/// Frames drawn past the parking loop before the dump.
+const SETTLE_FRAMES: i64 = 3
 const ERROR_LOOP: u32 = 0x1FC
 
 let main = () -> u8 => {
@@ -54,6 +58,8 @@ let main = () -> u8 => {
     step(cpu, bus)
     steps += 1
   }
+  let settled = bus.vdp.frames + SETTLE_FRAMES
+  for bus.vdp.frames < settled { step(cpu, bus) }
   dump(bus, args[3])
 }
 
@@ -74,7 +80,7 @@ let dump = (bus: GenesisBus, out: string) -> u8 => {
   var regs: []u8 = []
   for r in v.regs { regs.push(r) }
   let ram = [i in 0..<256 | bus.ram[i]]
-  let frame = render_frame(v)
+  let frame = shown_frame(v)
   var image: []u8 = [
     u8(frame.width >> 8),
     u8(frame.width & 0xFF),

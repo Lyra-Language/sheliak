@@ -7,9 +7,9 @@ module vdp
 //! is what a rendering bug changes. Turning that into light is the display's business (the
 //! DAC's 15 levels), and the harness does it only to compare with BlastEm's screenshots.
 //!
-//! **Drawn from the state as it stands** — every line sees the same registers, scroll
-//! tables and sprites. The timing slice renders each line as the beam reaches it, which is
-//! what mid-frame effects (raster splits, per-line colour changes) need.
+//! **A line at a time, as the beam reaches it** (`beam.lyra`), from the state as it stands
+//! then — so a change between lines (a raster split, a per-line colour) shows from the next
+//! line drawn. A change in the middle of a line is not yet seen there.
 
 /// A frame: `width` × `height` pixels of [pixel] values, row by row.
 pub struct Frame {
@@ -22,17 +22,6 @@ pub struct Frame {
 pub const NORMAL: u16 = 0x0000
 pub const SHADOW: u16 = 0x1000
 pub const HIGHLIGHT: u16 = 0x2000
-
-/// The frame the VDP's current state draws.
-pub let render_frame = (vdp: Vdp) -> Frame => {
-  let width = if h40(vdp) { 320 } else { 256 }
-  let height = if (vdp.regs[1] & 0x08) != 0 { 240 } else { 224 }
-  var pixels: []u16 = []
-  for y in 0..<height {
-    for p in render_line(vdp, y, width) { pixels.push(p) }
-  }
-  Frame { width: width, height: height, pixels: pixels }
-}
 
 // ── A line ───────────────────────────────────────────────────────────────────
 

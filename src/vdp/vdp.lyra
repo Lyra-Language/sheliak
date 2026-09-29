@@ -1,8 +1,9 @@
 module vdp
 //! The Genesis video display processor (Yamaha YM7101): its memories, registers and ports,
-//! and DMA. This slice is the **programming interface** — what the 68000 sees through the
-//! control and data ports — with every access taking effect at once; rendering, the access
-//! slots that pace it, the FIFO and the interrupts are the slices after it (CLAUDE.md).
+//! and DMA: the **programming interface**, what the 68000 sees through the control and data
+//! ports, with every access taking effect at once — the access slots that pace it and the
+//! FIFO's waiting are the slice to come (CLAUDE.md). The beam, and with it the status bits,
+//! the HV counter and the interrupts, is `beam.lyra`; drawing a line, `render.lyra`.
 //!
 //! **Checked against BlastEm** (`tests/vdp.sh`): test ROMs program the VDP, both emulators
 //! run them to a parking loop, and the memories, registers, address and code registers are
@@ -59,9 +60,30 @@ pub struct Vdp {
   fifo_next: i64,
   /// The last value a data-port read returned, which a read under a write code returns again.
   prefetch: u16,
+  // The beam (beam.lyra).
+  /// The master clock at which the current slot began.
+  clock: i64,
+  /// The H counter: the current slot.
+  hslot: u16,
+  /// The V counter, 9 bits.
+  vcounter: u16,
+  phase: Phase,
+  /// Lines until the H interrupt, counting down.
+  hint_counter: u8,
+  /// The V and H interrupts have been raised and not yet acknowledged.
+  vint_pending: bool,
+  hint_pending: bool,
+  /// The HV counter as latched by register 0 bit 1.
+  hv_latch: u16,
+  /// The frame being drawn, line by line, at the width of its last line drawn.
+  drawing: []u16,
+  drawing_width: i64,
+  /// The last frame completed, and how many have been.
+  shown: Frame,
+  frames: i64,
 }
 
-/// A VDP at power-on: memories and registers zero.
+/// A VDP at power-on: memories and registers zero, the beam at the top of an active frame.
 pub let new_vdp = pure () -> Vdp => Vdp {
   vram: [0; VRAM_SIZE],
   cram: [0; CRAM_WORDS],
@@ -75,6 +97,18 @@ pub let new_vdp = pure () -> Vdp => Vdp {
   fifo: #[0, 0, 0, 0],
   fifo_next: 0,
   prefetch: 0,
+  clock: 0,
+  hslot: 0,
+  vcounter: 0,
+  phase: Active,
+  hint_counter: 0,
+  vint_pending: false,
+  hint_pending: false,
+  hv_latch: 0,
+  drawing: [0; MAX_PIXELS],
+  drawing_width: 320,
+  shown: Frame { width: 320, height: 224, pixels: [0; 320 * 224] },
+  frames: 0,
 }
 
 // ── The ports ────────────────────────────────────────────────────────────────
@@ -98,6 +132,7 @@ pub let write_control = (vdp: mut Vdp, value: u16) -> void => {
   vdp.code = (vdp.code & 0x3C) | u8(value >> 14)
   if (value & 0xC000) == 0x8000 {
     let reg = i64((value >> 8) & 0x1F)
+    if reg == 0 && (value & 0x02) != 0 && (vdp.regs[0] & 0x02) == 0 { latch_hv(vdp) }
     if reg < 24 { vdp.regs[reg] = u8(value & 0xFF) & REGISTER_BITS[reg] }
     return
   }
@@ -153,11 +188,12 @@ pub let read_data = (vdp: mut Vdp) -> u16 => {
 }
 
 /// The status register, read from the control port; reading it also ends a half-written
-/// command. The fixed bits (`0011 01`), and FIFO empty — this slice has no FIFO and no
-/// beam, so the timing bits are zero.
-pub let read_status = (vdp: mut Vdp) -> u16 => {
+/// command. Bits 15–10 are not the VDP's: they are whatever the 68000's bus last carried
+/// (`open_bus`, the bus's to know). FIFO empty (bit 9) always, as nothing waits in it yet;
+/// the beam's bits ([beam_status]); DMA busy never, as a DMA completes at once.
+pub let read_status = (vdp: mut Vdp, open_bus: u16) -> u16 => {
   vdp.pending = false
-  0x3400 | 0x0200
+  (open_bus & 0xFC00) | 0x0200 | beam_status(vdp)
 }
 
 // ── DMA ──────────────────────────────────────────────────────────────────────

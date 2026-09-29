@@ -3,10 +3,17 @@ module genesis
 //! the VDP's ports — wired as the console wires them. A chip is a module (`m68k`, `vdp`);
 //! this is where they meet (CLAUDE.md's rule).
 //!
-//! **What is here is what the VDP's first slice needs**: ROM at 000000–3FFFFF, work RAM at
-//! E00000–FFFFFF (64 KB, mirrored), the VDP at C00000–C0001F, the version register, and the
-//! TMSS register taking its write. No wait states, no Z80, no sound, no controllers, no
-//! interrupts yet: every access costs its four cycles and nothing more.
+//! **What is here is what the VDP needs**: ROM at 000000–3FFFFF, work RAM at E00000–FFFFFF
+//! (64 KB, mirrored), the VDP at C00000–C0001F, the version register, and the TMSS register
+//! taking its write. No wait states, no Z80, no sound, no controllers yet.
+//!
+//! **Time is the master clock**, ≈53.69 MHz, kept here: a 68000 cycle is 7 of it, and an
+//! access its four cycles. The VDP's beam is caught up to it whenever the 68000 is about to
+//! see the VDP — a port access, the interrupt pins it samples at every fetch — so what the
+//! 68000 sees is where the beam stands then.
+//!
+//! **DRAM refresh** takes 2 cycles in every 128 of the 68000's (BlastEm's figure, which it
+//! applies approximately, at its synchronisation points; here at every access and idle).
 
 import m68k.{ Bus }
 import vdp.{
@@ -18,7 +25,11 @@ import vdp.{
   read_status,
   dma_active,
   dma_source,
-  dma_write
+  dma_write,
+  run_beam,
+  hv_counter,
+  vdp_interrupt_level,
+  acknowledge_vdp
 }
 
 /// The machine's memory map, as the 68000 reaches it.
@@ -28,9 +39,21 @@ pub struct GenesisBus {
   /// 64 KB of work RAM.
   ram: []u8,
   vdp: Vdp,
-  /// Cycles elapsed, counted from the accesses and idles the 68000 makes.
-  cycles: i64,
+  /// The master clock: time since power-on.
+  clock: i64,
+  /// Master clocks since the last refresh.
+  refresh: i64,
+  /// The last word the 68000's data bus carried, which a read of an undriven line (the
+  /// status register's top six bits) returns.
+  open_bus: u16,
 }
+
+/// Master clocks per 68000 cycle.
+pub const CPU_CLOCKS: i64 = 7
+
+/// 68000 cycles between refreshes, and the cycles a refresh takes.
+const REFRESH_INTERVAL: i64 = 128 * CPU_CLOCKS
+const REFRESH_DELAY: i64 = 2 * CPU_CLOCKS
 
 /// The version register's value: an overseas (US) NTSC console with no expansion unit and
 /// no TMSS — version 0, so a ROM that checks for TMSS writes nothing to it.
@@ -41,63 +64,93 @@ pub let genesis_bus = pure (rom: []u8) -> GenesisBus => GenesisBus {
   rom: rom,
   ram: [0; 65536],
   vdp: new_vdp(),
-  cycles: 0,
+  clock: 0,
+  refresh: 0,
+  open_bus: 0,
 }
+
+/// Run the machine's clock on to master clock `to`, the VDP with it — for a caller that has
+/// nothing for the 68000 to do meanwhile.
+pub let run_vdp_to = (self: mut GenesisBus, to: i64) -> void => run_beam(self.vdp, to)
 
 impl Bus for GenesisBus {
   read_word = (self, addr, fc) => {
-    self.cycles += 4
     let a = addr & 0xFFFFFF
-    if a >= 0xC00000 && a < 0xC00020 { return self.read_vdp(a) }
-    self.peek_word(a)
+    let word = if a >= 0xC00000 && a < 0xC00020 { self.read_vdp(a) } else { self.peek_word(a) }
+    self.tick(4)
+    self.open_bus = word
+    word
   }
   read_byte = (self, addr, fc) => {
-    self.cycles += 4
     let a = addr & 0xFFFFFF
     // A byte of a VDP port is a word access to it: the port acts once, and the byte
     // is the half the address names.
     let word = if a >= 0xC00000 && a < 0xC00020 { self.read_vdp(a & 0xFFFFFE) } else { self.peek_word(a & 0xFFFFFE) }
+    self.tick(4)
+    self.open_bus = word
     if (a & 1) == 0 { u8(word >> 8) } else { u8(word & 0xFF) }
   }
   write_word = (self, addr, fc, value) => {
-    self.cycles += 4
     let a = addr & 0xFFFFFF
     if a >= 0xE00000 {
       let at = i64(a & 0xFFFE)
       self.ram[at] = u8(value >> 8)
       self.ram[at + 1] = u8(value & 0xFF)
-      return
+    } else if a >= 0xC00000 && a < 0xC00020 {
+      self.write_vdp(a, value)
     }
-    if a >= 0xC00000 && a < 0xC00020 { self.write_vdp(a, value) }
+    self.tick(4)
+    self.open_bus = value
   }
   write_byte = (self, addr, fc, value) => {
-    self.cycles += 4
     let a = addr & 0xFFFFFF
+    // A byte written is on both halves of the data bus.
+    let word = (u16(value) << 8) | u16(value)
     if a >= 0xE00000 {
       self.ram[i64(a & 0xFFFF)] = value
-      return
+    } else if a >= 0xC00000 && a < 0xC00010 {
+      // A byte written to a VDP port is that byte in both halves of a word. (C00011–17, the
+      // PSG, is not a VDP port and is ignored until the PSG is built.)
+      self.write_vdp(a & 0xFFFFFE, word)
     }
-    // A byte written to a VDP port is that byte in both halves of a word. (C00011–17, the
-    // PSG, is not a VDP port and is ignored until the PSG is built.)
-    if a >= 0xC00000 && a < 0xC00010 { self.write_vdp(
-      a & 0xFFFFFE,
-      (u16(value) << 8) | u16(value)
-    ) }
+    self.tick(4)
+    self.open_bus = word
   }
   test_and_set_byte = (self, addr, fc) => {
     // The Genesis never completes TAS's write: the read-modify-write cycle is not one its
     // bus arbiter supports, so only the read happens.
-    self.cycles += 10
     let a = addr & 0xFFFFFF
     let word = self.peek_word(a & 0xFFFFFE)
+    self.tick(10)
+    self.open_bus = word
     if (a & 1) == 0 { u8(word >> 8) } else { u8(word & 0xFF) }
   }
-  interrupt_level = (self) => 0
+  interrupt_level = (self) => {
+    run_beam(self.vdp, self.clock)
+    vdp_interrupt_level(self.vdp)
+  }
   acknowledge_interrupt = (self, level) => {
-    self.cycles += 4
+    run_beam(self.vdp, self.clock)
+    acknowledge_vdp(self.vdp)
+    // The Genesis answers every acknowledge with VPA — autovectored, as a 6800-style
+    // cycle, which waits for the E clock (a tenth of the 68000's): 5 cycles more than an
+    // ordinary bus cycle, and up to 9 more for E's phase. (BlastEm's figures, from its
+    // measurements: 9–18 cycles in all.)
+    self.tick(4)
+    self.tick(5 + (self.clock / CPU_CLOCKS) % 10)
     24 + u32(level)
   }
-  idle = (self, n) => { self.cycles += n }
+  idle = (self, n) => self.tick(i64(n))
+}
+
+/// `n` 68000 cycles pass, and the refreshes due in them.
+let tick = (self: mut GenesisBus, n: i64) -> void => {
+  self.clock += n * CPU_CLOCKS
+  self.refresh += n * CPU_CLOCKS
+  for self.refresh >= REFRESH_INTERVAL {
+    self.refresh -= REFRESH_INTERVAL
+    self.clock += REFRESH_DELAY
+  }
 }
 
 /// The word at an even address outside the VDP, with no bus cycle: ROM, work RAM, the
@@ -116,18 +169,22 @@ let peek_word = pure (self: GenesisBus, a: u32) -> u16 => {
   0
 }
 
-/// A word read from the VDP's ports: data (C00000–03), control (C00004–07), HV counter
-/// (C00008–0F, zero until the VDP has a beam).
-let read_vdp = (self: mut GenesisBus, a: u32) -> u16 => match (a >> 2) & 7 {
-  0 => read_data(self.vdp),
-  1 => read_status(self.vdp),
-  _ => 0,
+/// A word read from the VDP's ports, the beam caught up first: data (C00000–03), control
+/// (C00004–07), HV counter (C00008–0F).
+let read_vdp = (self: mut GenesisBus, a: u32) -> u16 => {
+  run_beam(self.vdp, self.clock)
+  match (a >> 2) & 7 {
+    0 => read_data(self.vdp),
+    1 => read_status(self.vdp, self.open_bus),
+    _ => hv_counter(self.vdp),
+  }
 }
 
 /// A word written to the VDP's ports. A control write may start a 68000 → VDP transfer,
 /// which the bus feeds from its own memory, word by word, here — instantly, until the VDP
 /// has the access slots that pace it and the 68000 is frozen for it.
 let write_vdp = (self: mut GenesisBus, a: u32, value: u16) -> void => {
+  run_beam(self.vdp, self.clock)
   match (a >> 2) & 7 {
     0 => write_data(self.vdp, value),
     1 => {

@@ -20,6 +20,7 @@ const BOUNDARY_TABLE: u32 = 0x1FFF0
 
 const VDP_DATA: u32 = 0xC00000
 const VDP_CONTROL: u32 = 0xC00004
+const VDP_HV: u32 = 0xC00008
 const RAM: u32 = 0xFF0000
 
 let main = () -> u8 => {
@@ -34,7 +35,7 @@ let main = () -> u8 => {
     return 1
   }
   for name in TESTS {
-    var a = Asm { code: [], blobs: [] }
+    var a = Asm { code: [], blobs: [], vectors: [] }
     tmss(a)
     // Every register set first, as a game's start-up does, so what the VDP holds at power-on
     // — which differs between emulators, and is not well documented for the hardware — plays
@@ -45,10 +46,12 @@ let main = () -> u8 => {
     body(name, a)
     let park = CODE + u32(a.code.len())
     a.w(0x60FE)
+    let slack = hslack(name)
     if !write_bytes(
       "${out}/${name}.bin",
       rom(a)
-    ) || !write_file("${out}/${name}.park", park.to_hex()) {
+    ) || !write_file("${out}/${name}.park", park.to_hex()) ||
+      (slack >= 0 && !write_file("${out}/${name}.hslack", "${slack}")) {
       println("vdproms: cannot write ${name}")
       return 1
     }
@@ -81,6 +84,11 @@ const TESTS: []string = [
   "draw_h32",
   "draw_left_blank",
   "draw_wide_plane",
+  "vblank_edges",
+  "hblank_edges",
+  "vint",
+  "hint",
+  "hv_latch",
 ]
 
 /// The code of the test `name`. (A `match` rather than a table of functions: each takes the
@@ -108,7 +116,26 @@ let body = (name: string, a: mut Asm) -> void => match name {
   "draw_shadow_blank" => draw_shadow_blank(a),
   "draw_h32" => draw_h32(a),
   "draw_left_blank" => draw_left_blank(a),
-  _ => draw_wide_plane(a),
+  "draw_wide_plane" => draw_wide_plane(a),
+  "vblank_edges" => vblank_edges(a),
+  "hblank_edges" => hblank_edges(a),
+  "vint" => vint(a),
+  "hint" => hint(a),
+  _ => hv_latch(a),
+}
+
+/// The H slack each timing test is compared with, in slots (tests/vdp.sh reads it from the
+/// ROM's `.hslack`); none for the rest, whose RAM must match exactly.
+///
+/// - **8 for an H read as a handler starts.** Sheliak's 68000 takes Motorola's 44 cycles to
+///   enter an interrupt (Yacht's sequence), BlastEm's about 10 fewer, and BlastEm's STOP
+///   looks for the interrupt every 4 cycles: about 5 slots, one way.
+/// - **16 for an edge a loop polls for** — a loop of 16 slots, which sees the edge anywhere
+///   in one of them.
+let hslack = pure (name: string) -> i64 => match name {
+  "vint" | "hint" => 8,
+  "vblank_edges" | "hblank_edges" | "hv_latch" => 16,
+  _ => -1,
 }
 
 // ── The tests ────────────────────────────────────────────────────────────────
@@ -287,6 +314,96 @@ let dma_disabled = (a: mut Asm) -> void => {
   a.command(0x21, 0x0500)
   a.data(0x9876)
   a.data(0x5432)
+}
+
+// ── Timing ───────────────────────────────────────────────────────────────────
+//
+// What the beam does, seen as a program sees it: the HV counter read at an edge of the
+// blanking flags, in an interrupt handler, under the latch. Each HV read is split in two, as
+// tests/vdp.sh compares them: the V counter into work RAM from FF0010 on, which must match
+// exactly, and the H counter from FF0080 on, which must match within the slack the ROM's
+// `.hslack` file gives ([hslack]) — the two emulators' 68000s need not take an interrupt,
+// or a refresh, at the same cycle. All in 40-cell mode, which the comparison of H assumes.
+//
+// **Measured from an interrupt, not a polling loop**: the 68000 waits in STOP, so it enters
+// the handler a fixed time after the VDP raises the interrupt, and what the handler sees is
+// the same whatever the beam was doing at power-on (which the emulators need not agree on).
+// A loop polling for an edge still sees it only when it next looks, anywhere in its 16
+// slots, so an edge polled for has a looser slack than an interrupt's arrival.
+
+/// The V-blank flag's edges, twice each: set as line 224 begins, clear at line 511.
+let vblank_edges = (a: mut Asm) -> void => {
+  a.timing_setup(0x44)
+  a.wait_status(3, true)
+  for _ in 0..<2 {
+    a.wait_status(3, false)
+    a.record_hv()
+    a.wait_status(3, true)
+    a.record_hv()
+  }
+}
+
+/// The H-blank flag's edges, measured from four H interrupts (register 10 = 30): the HV
+/// counter as the handler starts, as H-blank ends (H 0), and as the next begins (past 178).
+let hblank_edges = (a: mut Asm) -> void => {
+  let over = a.begin_skip()
+  a.vector(28)
+  a.record_hv()
+  a.wait_status(2, false)
+  a.record_hv()
+  a.wait_status(2, true)
+  a.record_hv()
+  a.w(0x4E73)
+  a.end_skip(over)
+  a.timing_setup(0x44)
+  a.reg(10, 30)
+  a.reg(0, 0x14)
+  a.wait_for_interrupts(RAM + 0x10 + 12)
+}
+
+/// Four V interrupts, each recording the HV counter and the status register's low byte
+/// (the interrupt raised flag must read clear, acknowledged).
+let vint = (a: mut Asm) -> void => {
+  let over = a.begin_skip()
+  a.vector(30)
+  a.record_hv()
+  a.record_status()
+  a.w(0x4E73)
+  a.end_skip(over)
+  a.timing_setup(0x64)
+  a.wait_for_interrupts(RAM + 0x10 + 8)
+}
+
+/// Sixteen H interrupts every 31st line (register 10 = 30).
+let hint = (a: mut Asm) -> void => {
+  let over = a.begin_skip()
+  a.vector(28)
+  a.record_hv()
+  a.w(0x4E73)
+  a.end_skip(over)
+  a.timing_setup(0x44)
+  a.reg(10, 30)
+  a.reg(0, 0x14)
+  a.wait_for_interrupts(RAM + 0x10 + 16)
+}
+
+/// The HV counter latched (register 0 bit 1) just after V-blank ends, read twice 80 cycles
+/// apart: the difference, which must be zero, and the latched value.
+///
+///     move.w $C00008, d0 ; 20 × nop ; move.w $C00008, d1
+///     sub.w  d0, d1      ; move.w d1, (a0)+
+let hv_latch = (a: mut Asm) -> void => {
+  a.timing_setup(0x44)
+  a.sync_to_display()
+  a.reg(0, 0x06)
+  a.w(0x3039)
+  a.l(VDP_HV)
+  for _ in 0..<20 { a.w(0x4E71) }
+  a.w(0x3239)
+  a.l(VDP_HV)
+  a.w(0x9240)
+  a.w(0x30C1)
+  a.split_d0()
 }
 
 // ── Scenes ───────────────────────────────────────────────────────────────────
@@ -577,6 +694,7 @@ let rom = (a: Asm) -> []u8 => {
   put_long(image, 0, 0x00FFFE00)
   put_long(image, 4, CODE)
   for v in 2..<64 { put_long(image, v * 4, ERROR_LOOP) }
+  for v in a.vectors { put_long(image, v.number * 4, v.address) }
   let header = "SEGA MEGA DRIVE "
   for i, c in header { image[0x100 + i] = u8(i64(c)) }
   put_long(image, 0x1A0, 0)
@@ -621,6 +739,13 @@ struct Asm {
   code: []u8,
   /// Data placed in ROM from DATA on, for DMA to upload.
   blobs: []u8,
+  /// Exception vectors pointed into the code, the rest at the error loop.
+  vectors: []Vector,
+}
+
+struct Vector {
+  number: i64,
+  address: u32,
 }
 
 /// Where scene data goes in ROM: after the tables, before the 128 KB boundary table.
@@ -740,4 +865,121 @@ let wait_dma = (self: mut Asm) -> void => {
   self.w(0x0800)
   self.w(0x0001)
   self.w(0x66F4)
+}
+
+// ── Timing code ──
+
+/// The address the next instruction is encoded at.
+let here = pure (self: Asm) -> u32 => CODE + u32(self.code.len())
+
+/// Exception vector `number` pointed at the next instruction.
+let vector = (self: mut Asm, number: i64) -> void =>
+  self.vectors.push(Vector { number: number, address: self.here() })
+
+/// `bra.w` over what follows, to [end_skip]; returns where its displacement goes.
+let begin_skip = (self: mut Asm) -> i64 => {
+  self.w(0x6000)
+  let at = self.code.len()
+  self.w(0)
+  at
+}
+
+/// The branch [begin_skip] made lands here.
+let end_skip = (self: mut Asm, at: i64) -> void => {
+  let displacement = u16(self.code.len() - at)
+  self.code[at] = u8(displacement >> 8)
+  self.code[at + 1] = u8(displacement & 0xFF)
+}
+
+/// move.w #value, sr
+let set_sr = (self: mut Asm, value: u16) -> void => {
+  self.w(0x46FC)
+  self.w(value)
+}
+
+/// lea (xxx).l, An
+let lea = (self: mut Asm, address: u32, an: i64) -> void => {
+  self.w(u16(0x41F9 | (an << 9)))
+  self.l(address)
+}
+
+/// 40-cell mode, register 1 as given, a0 at the exact table and a1 at the tolerant one.
+let timing_setup = (self: mut Asm, reg1: i64) -> void => {
+  self.reg(12, 0x81)
+  self.reg(1, reg1)
+  self.lea(RAM + 0x10, 0)
+  self.lea(RAM + 0x80, 1)
+}
+
+/// Wait until status bit `bit` reads `set`:
+///
+///     loop: move.w $C00004, d0
+///           btst   #bit, d0
+///           beq.s  loop          (bne.s, to wait for it clear)
+let wait_status = (self: mut Asm, bit: u16, set: bool) -> void => {
+  self.w(0x3039)
+  self.l(VDP_CONTROL)
+  self.w(0x0800)
+  self.w(bit)
+  self.w(if set { 0x67F4 } else { 0x66F4 })
+}
+
+/// Through a V-blank to its end: the beam at the top of the frame, whatever it was doing.
+let sync_to_display = (self: mut Asm) -> void => {
+  self.wait_status(3, true)
+  self.wait_status(3, false)
+}
+
+/// The HV counter into d0, then [split_d0].
+let record_hv = (self: mut Asm) -> void => {
+  self.w(0x3039)
+  self.l(VDP_HV)
+  self.split_d0()
+}
+
+/// An HV value in d0 recorded: H to (a1)+, V to (a0)+.
+///
+///     move.b d0, (a1)+ ; lsr.w #8, d0 ; move.b d0, (a0)+
+let split_d0 = (self: mut Asm) -> void => {
+  self.w(0x12C0)
+  self.w(0xE048)
+  self.w(0x10C0)
+}
+
+/// The status register's low byte to (a0)+: move.b $C00005, (a0)+
+let record_status = (self: mut Asm) -> void => {
+  self.w(0x10F9)
+  self.l(VDP_CONTROL + 1)
+}
+
+/// Through a V-blank, so the H interrupt counter has been reloaded; then whatever is still
+/// pending taken and recorded out of the way, past the RAM compared (what was raised before
+/// depends on the counter's power-on value, which the emulators need not agree on) — a
+/// `nop` unmasked, as BlastEm's 68000 takes an interrupt one instruction later than
+/// Sheliak's after the mask is lowered (which is right is not yet settled); then,
+/// with a0 and a1 at the tables, wait in STOP until the handlers have moved a0 to `end`, and
+/// mask interrupts again.
+///
+///           move.w #$2000, sr ; nop ; move.w #$2700, sr
+///           lea    tables, a0 ; lea tables, a1
+///           move.w #$2000, sr
+///     loop: stop   #$2000
+///           cmpa.l #end, a0 ; bne.s loop
+///           move.w #$2700, sr
+let wait_for_interrupts = (self: mut Asm, end: u32) -> void => {
+  self.lea(RAM + 0x100, 0)
+  self.lea(RAM + 0x180, 1)
+  self.sync_to_display()
+  self.set_sr(0x2000)
+  self.w(0x4E71)
+  self.set_sr(0x2700)
+  self.lea(RAM + 0x10, 0)
+  self.lea(RAM + 0x80, 1)
+  self.set_sr(0x2000)
+  self.w(0x4E72)
+  self.w(0x2000)
+  self.w(0xB1FC)
+  self.l(end)
+  self.w(0x66F4)
+  self.set_sr(0x2700)
 }

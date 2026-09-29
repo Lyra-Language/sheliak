@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
 # Check Sheliak's VDP against BlastEm: every test ROM (src/vdproms.lyra) is run on both,
-# to its parking loop, and the VDP's memories, registers, address and code registers and
-# the start of work RAM are compared.
+# to its parking loop, and the VDP's memories, registers, address and code registers, the
+# start of work RAM and the frame are compared — a timing ROM's H counters within the slack
+# its `.hslack` gives (tests/ram_compare.py).
 #
 #   tests/vdp.sh               # every ROM
 #   tests/vdp.sh fill copy     # just these
@@ -43,8 +44,9 @@ fetch_blastem() {
 
 # Run ROM on BlastEm to PARK, then two frames more — the program is parked, so nothing new is
 # written, and whatever the VDP still had in hand (its FIFO, a DMA running in the access
-# slots) completes — saving the settled state into OUT. Sheliak has no timing yet, so the
-# settled state is what the two can agree on.
+# slots) completes — saving the settled state into OUT, and the next frame. Sheliak's
+# accesses and DMA take effect at once, so the settled state is what the two can agree on
+# until they do not; vdpcheck runs the same three frames past PARK.
 run_blastem() {
   local rom="$1" park="$2" out="$3"
   mkdir -p "$out"
@@ -117,9 +119,14 @@ for name in "${names[@]}"; do
   run_blastem "$rom" "$park" "$WORK/blastem/$name" || { failed=$((failed + 1)); continue; }
   "$ROOT/build/vdpcheck" "$rom" "$park" "$WORK/sheliak/$name" || { failed=$((failed + 1)); continue; }
   differs=()
-  for file in vram.bin cram.bin vsram.bin regs.bin ram.bin state.txt; do
+  for file in vram.bin cram.bin vsram.bin regs.bin state.txt; do
     cmp -s "$WORK/blastem/$name/$file" "$WORK/sheliak/$name/$file" || differs+=("$file")
   done
+  # A timing ROM's H counters are compared within its slack (tests/ram_compare.py).
+  slack=()
+  [ -f "$WORK/roms/$name.hslack" ] && slack=("$(cat "$WORK/roms/$name.hslack")")
+  "$ROOT/tests/ram_compare.py" "$WORK/sheliak/$name/ram.bin" "$WORK/blastem/$name/ram.bin" ${slack[@]+"${slack[@]}"} \
+    >"$WORK/sheliak/$name/ram.txt" || differs+=("ram.bin")
   # register_bits sets V30 on an NTSC console, a mode no NTSC display shows; its frame is
   # not compared.
   if [ "$name" != register_bits ] && ! "$ROOT/tests/frame_compare.py" "$WORK/sheliak/$name/frame.bin" "$WORK/blastem/$name/frame.ppm" \
@@ -130,7 +137,7 @@ for name in "${names[@]}"; do
     echo "$name: matches"
   else
     echo "$name: differs in ${differs[*]}"
-    sed 's/^/    /' "$WORK/sheliak/$name/frame.txt"
+    cat "$WORK/sheliak/$name/frame.txt" "$WORK/sheliak/$name/ram.txt" 2>/dev/null | sed 's/^/    /' 
     failed=$((failed + 1))
   fi
 done

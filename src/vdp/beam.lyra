@@ -1,0 +1,184 @@
+module vdp
+//! The beam: where the VDP is in its frame, on the master clock. A line is 3420 master
+//! clocks, cut into **access slots** — the H counter counts them — and the V counter counts
+//! lines; the V-blank and H-blank flags, the H and V interrupts and the drawing of each line
+//! all follow from where the two stand.
+//!
+//! **The beam is caught up, not driven**: the bus calls [run_beam] with the master clock
+//! whenever the 68000 is about to see the VDP (a port access, the interrupt pins), and every
+//! slot that has begun by then begins, its events with it. Nothing the VDP does between two
+//! looks can be seen, so nothing is lost by doing it late.
+//!
+//! **What the oracle settled** (BlastEm, `tests/vdp.sh`'s timing ROMs), NTSC:
+//!
+//! - A 40-cell line is 210 slots: H counts 0–182 then 229–255. Slots are 16 master clocks,
+//!   but the 17 of horizontal sync (230–246), which take 18–20 (332 in all). A 32-cell line
+//!   is 171 slots of 20: H counts 0–147 then 233–255.
+//! - The V counter changes as H reaches 165 (40-cell) or 133 (32-cell): a line, as the
+//!   counters see it, begins there. V counts 0–234 then 485–511 in 28-line mode (262 lines),
+//!   0–255 then 506–511 in 30-line mode.
+//! - **V-blank** begins two slots into line 224 (240) and ends as the line counter reaches
+//!   511; the flag reads set while it lasts, or while the display is off. **H-blank** reads
+//!   set past H 178 (40-cell) or 233 (32-cell) until H wraps to 0.
+//! - **The V interrupt** is raised at H 0 of line 224 (240), after V-blank has begun.
+//! - **The H interrupt counter** moves as each line begins: outside the active lines it is
+//!   reloaded from register 10; inside, it counts down, and on a line that finds it at zero
+//!   the interrupt is raised and the counter reloaded. Line 224's beginning still counts, so
+//!   register 10 = 0 raises 225 interrupts a frame. It runs whether or not the interrupt is
+//!   enabled, and a raised interrupt stays raised until acknowledged.
+//! - **Acknowledging** clears the V interrupt if it is raised and enabled, else the H
+//!   interrupt — whichever the VDP is asserting then, not the level the 68000 took.
+//!
+//! **Each active line is drawn as H reaches 0 on it**, when the beam leaves H-blank, from the
+//! state as it stands then: a change made in the H interrupt (which comes as the line
+//! begins, before its H-blank) shows on that line. Mid-line changes are not yet seen.
+
+/// Master clocks in a line.
+pub const LINE_CLOCKS: i64 = 3420
+
+/// The 17 horizontal-sync slots of a 40-cell line, H 230–246, in master clocks.
+const HSYNC_CLOCKS: [17]i64 = #[
+  19, 20, 20, 20, 18, 20, 20, 20, 18,
+  20, 20, 20, 18, 20, 20, 20, 19,
+]
+
+/// Where the beam is between the frame's active lines and its blanking, as the H interrupt
+/// counter and the V-blank flag see it.
+pub data Phase =
+  /// Drawing lines.
+  Active
+  /// The last blank line (V 511): V-blank has ended, but the counter is still reloaded.
+  | Preparing
+  /// V-blank.
+  | Blank
+
+/// Run the beam to master clock `to`: every slot beginning at or before it begins.
+pub let run_beam = (vdp: mut Vdp, to: i64) -> void => {
+  var next = vdp.clock + slot_clocks(vdp)
+  for next <= to {
+    vdp.clock = next
+    next_slot(vdp)
+    next = vdp.clock + slot_clocks(vdp)
+  }
+}
+
+/// The interrupt level the VDP asserts: 6 for a raised and enabled V interrupt (register 1
+/// bit 5), else 4 for a raised and enabled H interrupt (register 0 bit 4), else none.
+pub let vdp_interrupt_level = pure (vdp: Vdp) -> u8 => {
+  if vdp.vint_pending && (vdp.regs[1] & 0x20) != 0 { return 6 }
+  if vdp.hint_pending && (vdp.regs[0] & 0x10) != 0 { return 4 }
+  0
+}
+
+/// The 68000 acknowledges an interrupt: the one the VDP is asserting now is cleared.
+pub let acknowledge_vdp = (vdp: mut Vdp) -> void => {
+  if vdp.vint_pending && (vdp.regs[1] & 0x20) != 0 {
+    vdp.vint_pending = false
+  } else if vdp.hint_pending && (vdp.regs[0] & 0x10) != 0 {
+    vdp.hint_pending = false
+  }
+}
+
+/// The HV counter: V in the high byte, H in the low — or both as latched, while register 0
+/// bit 1 holds them.
+pub let hv_counter = pure (vdp: Vdp) -> u16 => {
+  if (vdp.regs[0] & 0x02) != 0 { return vdp.hv_latch }
+  live_hv(vdp)
+}
+
+/// Register 0 bit 1 set latches the HV counter as it stands, until it is cleared.
+let latch_hv = (vdp: mut Vdp) -> void => { vdp.hv_latch = live_hv(vdp) }
+
+let live_hv = pure (vdp: Vdp) -> u16 => ((vdp.vcounter & 0xFF) << 8) | vdp.hslot
+
+/// The status register's beam bits: V interrupt raised (7), V-blank (3), H-blank (2).
+let beam_status = pure (vdp: Vdp) -> u16 => {
+  var status: u16 = 0
+  if vdp.vint_pending { status = status | 0x80 }
+  if vdp.phase == Blank || (vdp.regs[1] & 0x40) == 0 { status = status | 0x08 }
+  let hblank_from: u16 = if h40(vdp) { 178 } else { 233 }
+  if vdp.hslot > hblank_from { status = status | 0x04 }
+  status
+}
+
+/// The frame last completed: the one V-blank began after.
+pub let shown_frame = pure (vdp: Vdp) -> Frame => vdp.shown
+
+// ── Slots and lines ──────────────────────────────────────────────────────────
+
+/// The length of the current slot in master clocks.
+let slot_clocks = pure (vdp: Vdp) -> i64 => {
+  if !h40(vdp) { return 20 }
+  if vdp.hslot >= 230 && vdp.hslot < 247 { return HSYNC_CLOCKS[i64(vdp.hslot - 230)] }
+  16
+}
+
+/// The next slot begins: H moves on (past the gap in its count), a line may begin, and
+/// what happens at this slot happens.
+let next_slot = (vdp: mut Vdp) -> void => {
+  let wide = h40(vdp)
+  vdp.hslot = if wide && vdp.hslot == 182 {
+    229
+  } else if !wide && vdp.hslot == 147 {
+    233
+  } else {
+    (vdp.hslot + 1) & 0xFF
+  }
+  if vdp.hslot == (if wide { 165 } else { 133 }) { next_line(vdp) }
+  let active_lines: u16 = if (vdp.regs[1] & 0x08) != 0 { 240 } else { 224 }
+  if vdp.phase == Active && vdp.vcounter == active_lines &&
+    vdp.hslot == (if wide { 167 } else { 135 }) {
+    vdp.phase = Blank
+    complete_frame(vdp)
+  }
+  if vdp.hslot == 0 {
+    if vdp.vcounter == active_lines { vdp.vint_pending = true }
+    if vdp.phase == Active && vdp.vcounter < active_lines { draw_line(vdp) }
+  }
+}
+
+/// A line begins: the V counter moves on (jumping the lines the count skips), and the H
+/// interrupt counter with it.
+let next_line = (vdp: mut Vdp) -> void => {
+  let v30 = (vdp.regs[1] & 0x08) != 0
+  let jump_from: u16 = if v30 { 0x100 } else { 0xEB }
+  let jump_to: u16 = if v30 { 0x1FA } else { 0x1E5 }
+  let v = vdp.vcounter + 1
+  vdp.vcounter = if v == jump_from { jump_to } else { v & 0x1FF }
+  if vdp.phase == Preparing { vdp.phase = Active }
+  if vdp.phase != Active {
+    vdp.hint_counter = vdp.regs[10]
+  } else if vdp.hint_counter != 0 {
+    vdp.hint_counter -= 1
+  } else {
+    vdp.hint_pending = true
+    vdp.hint_counter = vdp.regs[10]
+  }
+  if vdp.phase == Blank && vdp.vcounter == 0x1FF { vdp.phase = Preparing }
+}
+
+// ── The frame ────────────────────────────────────────────────────────────────
+
+/// The widest frame, which the frame in progress is sized for.
+const MAX_PIXELS: i64 = 320 * 240
+
+/// The line the V counter names, drawn into the frame in progress.
+let draw_line = (vdp: mut Vdp) -> void => {
+  let width: i64 = if h40(vdp) { 320 } else { 256 }
+  let y = i64(vdp.vcounter)
+  let line = render_line(vdp, y, width)
+  for x, p in line { vdp.drawing[y * width + x] = p }
+  vdp.drawing_width = width
+}
+
+/// V-blank has begun: the frame in progress is complete, and shown.
+let complete_frame = (vdp: mut Vdp) -> void => {
+  let height: i64 = if (vdp.regs[1] & 0x08) != 0 { 240 } else { 224 }
+  let width = vdp.drawing_width
+  vdp.shown = Frame {
+    width: width,
+    height: height,
+    pixels: vdp.drawing.slice(0, width * height)
+  }
+  vdp.frames += 1
+}
