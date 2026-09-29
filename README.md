@@ -28,7 +28,10 @@ build/sheliak game.bin    # plays a raw ROM image
 Keys (pad 1): arrows; Z, X, C for A, B, C and A, S, D for X, Y, Z; Return for Start, Q for
 Mode; F full screen; Escape quits. Gamepads are pads 1 and 2. The pads are 6-button;
 `--pads 3` gives the original 3-button pad, which a few early games need. A ROM may be a
-raw image or an SMD one, whatever its extension. A cartridge with save RAM keeps it in a
+raw image or an SMD one, whatever its extension. A split SMD image is found from its
+first part by the names of the rest (`game.1`, `game.2`, …; `sf2md1.smd`, `sf2md2.smd`, …;
+`sf2a.smd`, `sf2b.smd`, …), or its parts can be given in order:
+`build/sheliak part1 part2 …`. A cartridge with save RAM keeps it in a
 `.srm` file beside the ROM.
 
 ## Testing

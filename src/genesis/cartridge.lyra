@@ -21,9 +21,14 @@ module genesis
 //! **A ROM file is a raw image or an SMD one** ([rom_image]), told apart by the SMD copier's
 //! header, as BlastEm tells them: 512 bytes whose bytes 1, 8 and 9 are 03 AA BB and 3–7 are
 //! zero. Then the ROM follows in 16 KB blocks, each the odd addresses' bytes and then the
-//! even addresses' (a short last block split at its own half). A split image — byte 2 set,
-//! one part of several — is refused. The file's name is not consulted: `.bin`, `.gen` and
-//! `.md` files that are SMD images inside are common.
+//! even addresses' (a short last block split at its own half). The file's name is not
+//! consulted: `.bin`, `.gen` and `.md` files that are SMD images inside are common.
+//!
+//! **A split SMD image** is a game too big for the copier's disk, in parts: each an SMD
+//! file with its own header, byte 2 set (40) in every part but the last, and the ROM their
+//! blocks in turn. BlastEm refuses them, so there is no reference to hold them to beyond
+//! the format; the front end finds the parts after the first by their names
+//! ([next_part_path]), or is given them.
 //!
 //! **Not here**: the serial EEPROMs some cartridges carry (no header declares them — BlastEm
 //! finds them in a database), the lock-on and unlicensed mappers. The Z80's bank window
@@ -59,25 +64,64 @@ pub struct Cartridge {
   save_dirty: bool,
 }
 
-/// The ROM image in a file as dumped: an SMD image's blocks put back in address order, a
-/// raw image as it is. An error for a split SMD image.
-pub let rom_image = pure (file: []u8) -> Result<[]u8, string> => {
-  if !is_smd(file) { return Ok(file) }
-  if file[2] != 0 { return Err("a split SMD image (one part of several), which is not read") }
-  let size = file.len() - SMD_HEADER
-  var rom: []u8 = [0; size]
-  var block = 0
-  for block < size {
-    let length = if size - block < SMD_BLOCK { size - block } else { SMD_BLOCK }
-    let half = length / 2
-    let from = SMD_HEADER + block
-    for i in 0..<half {
-      rom[block + 2 * i] = file[from + half + i]
-      rom[block + 2 * i + 1] = file[from + i]
+/// The ROM image in a dump's files, in order: one file for a raw or an SMD image, or the
+/// parts of a split SMD image — each an SMD file of its own, byte 2 set in all but the
+/// last. An SMD image's blocks are put back in address order, a raw image kept as it is.
+/// An error says what is wrong with the parts.
+pub let rom_image = pure (files: [][]u8) -> Result<[]u8, string> => {
+  if files.len() == 0 { return Err("no file given") }
+  if !is_smd(files[0]) {
+    if files.len() > 1 { return Err("given in parts, but its first is not an SMD file") }
+    return Ok(files[0])
+  }
+  var rom: []u8 = []
+  for n, file in files {
+    let last = n == files.len() - 1
+    if !is_smd(file) { return Err("part ${n + 1} of a split SMD image is not an SMD file") }
+    if last && file[2] != 0 {
+      return Err("a split SMD image whose part ${n + 2} is missing (another follows part ${n + 1})")
     }
-    block += SMD_BLOCK
+    if !last && file[2] == 0 {
+      return Err("a split SMD image ending at part ${n + 1}, but more parts follow it")
+    }
+    for b in smd_rom(file) { rom.push(b) }
+  }
+  if files.len() > 1 && !says_sega(rom) {
+    return Err("a split SMD image given from a later part than its first (no \"SEGA\" at 100)")
   }
   Ok(rom)
+}
+
+/// Whether a file is a part of a split SMD image with more parts after it.
+pub let is_split_part = pure (file: []u8) -> bool => is_smd(file) && file[2] != 0
+
+/// The name the next part of a split SMD image has, guessed from this part's by the three
+/// ways copiers and dumpers number them: the extension (`game.1`, `game.001`); failing
+/// that, the digits the name ends in (`sf2md1.smd`); failing that, the letter it ends in
+/// (`sf2a.smd`). `None` when none of them can be counted on.
+pub let next_part_path = pure (path: string) -> Maybe<string> => {
+  let runes = path.to_runes()
+  var base = 0
+  var dot = -1
+  for i, c in runes {
+    if c == '/' {
+      base = i + 1
+      dot = -1
+    } else if c == '.' && i > base {
+      dot = i
+    }
+  }
+  let stem_end = if dot >= 0 { dot } else { runes.len() }
+  if dot >= 0 && dot + 1 < runes.len() && all_digits(runes, dot + 1, runes.len()) {
+    return Some(counted_on(path, runes, dot + 1, runes.len()))
+  }
+  var digits = stem_end
+  for digits > base && is_digit(runes[digits - 1]) { digits -= 1 }
+  if digits < stem_end { return Some(counted_on(path, runes, digits, stem_end)) }
+  if stem_end == base { return None }
+  let c = runes[stem_end - 1]
+  if !(c >= 'a' && c < 'z') && !(c >= 'A' && c < 'Z') { return None }
+  Some(path.slice(0, stem_end - 1) ++ "${rune(i64(c) + 1)}" ++ path.slice(stem_end, runes.len()))
 }
 
 const SMD_HEADER: i64 = 512
@@ -92,6 +136,47 @@ let is_smd = pure (file: []u8) -> bool => {
     if file[i] != 0 { return false }
   }
   true
+}
+
+/// An SMD file's ROM, its blocks put back in address order.
+let smd_rom = pure (file: []u8) -> []u8 => {
+  let size = file.len() - SMD_HEADER
+  var rom: []u8 = [0; size]
+  var block = 0
+  for block < size {
+    let length = if size - block < SMD_BLOCK { size - block } else { SMD_BLOCK }
+    let half = length / 2
+    let from = SMD_HEADER + block
+    for i in 0..<half {
+      rom[block + 2 * i] = file[from + half + i]
+      rom[block + 2 * i + 1] = file[from + i]
+    }
+    block += SMD_BLOCK
+  }
+  rom
+}
+
+/// Whether a ROM's header begins "SEGA" (at 100, or 101 after a space), as TMSS asks.
+let says_sega = pure (rom: []u8) -> bool => {
+  if rom.len() < 0x105 { return false }
+  let at = if rom[0x100] == 0x20 { 0x101 } else { 0x100 }
+  rom[at] == 0x53 && rom[at + 1] == 0x45 && rom[at + 2] == 0x47 && rom[at + 3] == 0x41
+}
+
+let is_digit = pure (c: rune) -> bool => c >= '0' && c <= '9'
+
+let all_digits = pure (runes: []rune, from: i64, to: i64) -> bool => {
+  for i in from..<to {
+    if !is_digit(runes[i]) { return false }
+  }
+  true
+}
+
+/// `path` with the number at runes `from..<to` one more, kept as wide (`009` → `010`).
+let counted_on = pure (path: string, runes: []rune, from: i64, to: i64) -> string => {
+  var n: i64 = 0
+  for i in from..<to { n = n * 10 + (i64(runes[i]) - i64('0')) }
+  path.slice(0, from) ++ "${n + 1}".pad_start(to - from, "0") ++ path.slice(to, runes.len())
 }
 
 /// A cartridge from a ROM image, its header read.

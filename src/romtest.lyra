@@ -1,29 +1,83 @@
-// romtest — ROM files as dumped, read back as the ROM images inside them: raw, and SMD
-// (made here from a known image by the copier's layout, written out independently of
-// `rom_image`'s reading of it).
+// romtest — ROM files as dumped, read back as the ROM images inside them: raw, SMD and
+// split SMD (made here from a known image by the copier's layout, written out
+// independently of `rom_image`'s reading of it); and the names a split image's next part
+// is looked for by.
 //
 //   build/romtest        prints each failure, then a verdict; exits 1 on any
 
-import genesis.{ rom_image }
+import genesis.{ rom_image, next_part_path }
 
 let main = () -> u8 => {
   var failed = 0
   // Two whole blocks and a short one, so the last block's own half is exercised.
   let image = test_image(2 * 0x4000 + 7232)
-  failed += expect_image("raw image", image, image)
-  failed += expect_image("SMD image", smd_file(image, 0), image)
-  failed += expect_image("SMD image of whole blocks", smd_file(test_image(0x8000), 0), test_image(0x8000))
-  failed += expect_refused("split SMD image", smd_file(image, 1))
+  failed += expect_image("raw image", [image], image)
+  failed += expect_image("SMD image", [smd_file(image, 0)], image)
+  failed += expect_image("SMD image of whole blocks", [smd_file(test_image(0x8000), 0)], test_image(0x8000))
   // The magic bytes with 3–7 not zero is not the copier's header: the file is raw.
   var not_smd = smd_file(image, 0)
   not_smd[5] = 1
-  failed += expect_image("near-SMD header", not_smd, not_smd)
+  failed += expect_image("near-SMD header", [not_smd], not_smd)
+  failed += split_images()
+  failed += part_names()
   if failed == 0 {
     println("romtest: all passed")
     return 0
   }
   println("romtest: ${failed} failed")
   1
+}
+
+// ── Split SMD images ─────────────────────────────────────────────────────────
+
+/// A 5-block image in three parts — two blocks, two, then one short — read whole; and
+/// refused with a part missing, out of order, or ending early, or with a raw file given as
+/// a part.
+let split_images = () -> i64 => {
+  let image = test_image(4 * 0x4000 + 5000)
+  let part1 = smd_file(image.slice(0, 0x8000), 0x40)
+  let part2 = smd_file(image.slice(0x8000, 0x10000), 0x40)
+  let part3 = smd_file(image.slice(0x10000, image.len()), 0)
+  var failed = expect_image("split SMD image", [part1, part2, part3], image)
+  failed += expect_refused("split SMD image, last part missing", [part1, part2])
+  failed += expect_refused("split SMD image from its second part", [part2, part3])
+  failed += expect_refused("split SMD image, first part given alone", [part1])
+  failed += expect_refused("split SMD image ending early", [smd_file(image.slice(0, 0x8000), 0), part3])
+  failed += expect_refused("raw file as a part", [part1, image.slice(0x8000, image.len())])
+  failed += expect_refused("raw file with parts after it", [image, part3])
+  failed
+}
+
+// ── Part names ───────────────────────────────────────────────────────────────
+
+let part_names = () -> i64 => {
+  let cases: [](string, string) = [
+    ("game.1", "game.2"),
+    ("roms/game.009", "roms/game.010"),
+    ("game.99", "game.100"),
+    ("sf2md1.smd", "sf2md2.smd"),
+    ("roms.2/sf2md9.SMD", "roms.2/sf2md10.SMD"),
+    ("sf2a.smd", "sf2b.smd"),
+    ("roms/SF2A.SMD", "roms/SF2B.SMD"),
+    ("dir.1/game", "dir.1/gamf"),
+  ]
+  var failed = 0
+  for case in cases {
+    let (path, want) = case
+    let got = next_part_path(path)
+    if got != Some(want) {
+      println("next part after ${path}: ${got.unwrap_or("none")}, want ${want}")
+      failed += 1
+    }
+  }
+  // Nothing to count on: a last letter z, no name at all.
+  for path in ["gamez.smd", "roms/", ""] {
+    if let Some(got) = next_part_path(path) {
+      println("next part after \"${path}\": ${got}, want none")
+      failed += 1
+    }
+  }
+  failed
 }
 
 /// `size` bytes no two neighbours of which are alike, "SEGA" where a header says it.
@@ -65,7 +119,7 @@ let smd_file = pure (image: []u8, split: u8) -> []u8 => {
   file
 }
 
-let expect_image = (name: string, file: []u8, want: []u8) -> i64 => match rom_image(file) {
+let expect_image = (name: string, files: [][]u8, want: []u8) -> i64 => match rom_image(files) {
   Ok(got) => {
     if got == want { return 0 }
     println("${name}: ${got.len()} bytes read back, differing from the ${want.len()} wanted")
@@ -77,7 +131,7 @@ let expect_image = (name: string, file: []u8, want: []u8) -> i64 => match rom_im
   },
 }
 
-let expect_refused = (name: string, file: []u8) -> i64 => match rom_image(file) {
+let expect_refused = (name: string, files: [][]u8) -> i64 => match rom_image(files) {
   Ok(_) => {
     println("${name}: read, not refused")
     1

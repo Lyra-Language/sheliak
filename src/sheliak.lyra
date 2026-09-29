@@ -1,7 +1,7 @@
 // sheliak — the emulator in a window: a cartridge ROM run on the Genesis model, its
 // picture shown and its sound played with SDL, the keyboard and gamepads as its pads.
 //
-//   build/sheliak ROM [--pads 3]                       play
+//   build/sheliak ROM [PART …] [--pads 3]              play
 //   build/sheliak ROM --frames N [--screenshot FILE] [--ppm FILE] [--wav FILE] [--save]
 //                                                      run N frames and quit, saving the
 //                                                      last: as SDL drew the window (BMP),
@@ -22,7 +22,9 @@
 // the right shoulder for X, Y and Z; Start and Back for Start and Mode.
 //
 // The ROM is a raw image or an SMD one (the copier's interleaved format), whatever the
-// file's name (`.bin`, `.gen`, `.md`, `.smd`). A cartridge with save RAM keeps it in a
+// file's name (`.bin`, `.gen`, `.md`, `.smd`). A split SMD image's parts follow the first
+// on the command line, or are found beside it by their names (`game.1` then `game.2`,
+// `sf2md1.smd` then `sf2md2.smd`, `sf2a.smd` then `sf2b.smd`). A cartridge with save RAM keeps it in a
 // `.srm` file beside the ROM (the ROM's name, its extension replaced): loaded at start,
 // written every ten seconds while the game has changed it, and on quitting — BlastEm's
 // `save.sram` format, a byte per byte of RAM. Headless runs read and write it only when
@@ -49,7 +51,7 @@ import bindings.sdl3.{
 import m68k.{ Cpu }
 import genesis.{
   GenesisBus, genesis_bus, new_cpu, power_on, run_frame, new_mixer, mix_audio,
-  rom_image, save_bytes, load_save, set_pads,
+  rom_image, is_split_part, next_part_path, save_bytes, load_save, set_pads,
   PAD_UP, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_A, PAD_B, PAD_C, PAD_START,
   PAD_X, PAD_Y, PAD_Z, PAD_MODE,
 }
@@ -71,20 +73,10 @@ const AUDIO_QUEUE_LIMIT: i64 = 6000
 let main = () -> u8 => {
   let args = program_args()
   if args.len() < 2 {
-    println("usage: sheliak ROM [--pads 3] [--frames N] [--screenshot FILE] [--ppm FILE] [--wav FILE] [--save]")
+    println("usage: sheliak ROM [PART …] [--pads 3] [--frames N] [--screenshot FILE] [--ppm FILE] [--wav FILE] [--save]")
     return 2
   }
-  let Some(file) = read_bytes(args[1]) else {
-    println("sheliak: cannot read ${args[1]}")
-    return 1
-  }
-  let rom = match rom_image(file) {
-    Ok(image) => image,
-    Err(why) => {
-      println("sheliak: ${args[1]} is ${why}")
-      return 1
-    },
-  }
+  var paths = [args[1]]
   var frames_only: i64 = -1
   var screenshot = ""
   var ppm = ""
@@ -111,10 +103,21 @@ let main = () -> u8 => {
     } else if args[i] == "--wav" && i + 1 < args.len() {
       wav = args[i + 1]
       i += 2
+    } else if !args[i].starts_with("--") {
+      paths.push(args[i])
+      i += 1
     } else {
       println("sheliak: unknown argument ${args[i]}")
       return 2
     }
+  }
+  let Some(files) = read_rom_files(paths) else { return 1 }
+  let rom = match rom_image(files) {
+    Ok(image) => image,
+    Err(why) => {
+      println("sheliak: ${args[1]} is ${why}")
+      return 1
+    },
   }
   if !init(INIT_VIDEO | INIT_GAMEPAD) {
     println("sheliak: SDL_Init failed: ${last_error()}")
@@ -159,6 +162,38 @@ let main = () -> u8 => {
   quit()
   status
 }
+
+/// The files of a dump, read: those given, and when only the first part of a split SMD
+/// image is, the parts after it, by the names they are guessed to have. `None`, having
+/// said why, if one cannot be read.
+let read_rom_files = (paths: []string) -> Maybe<[][]u8> => {
+  var files: [][]u8 = []
+  for path in paths {
+    let Some(file) = read_bytes(path) else {
+      println("sheliak: cannot read ${path}")
+      return None
+    }
+    files.push(file)
+  }
+  if paths.len() > 1 { return Some(files) }
+  var path = paths[0]
+  for files.len() < MAX_PARTS && is_split_part(files[files.len() - 1]) {
+    let Some(next) = next_part_path(path) else {
+      println("sheliak: ${path} is one part of a split SMD image; give its parts in order")
+      return None
+    }
+    let Some(file) = read_bytes(next) else {
+      println("sheliak: ${path} is one part of a split SMD image, and its next part, ${next}, cannot be read; give its parts in order")
+      return None
+    }
+    files.push(file)
+    path = next
+  }
+  Some(files)
+}
+
+/// Parts looked for by name, at most: a guess that goes astray stops here.
+const MAX_PARTS: i64 = 16
 
 /// Run `frames` frames as fast as they go, show the last, and save it if asked.
 let run_headless = (
