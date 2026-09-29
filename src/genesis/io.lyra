@@ -1,40 +1,95 @@
 module genesis
 //! The console's I/O chip, and the Z80's corner of the 68000's map: the controller ports
-//! with 3-button pads; the Z80's 8 KB of RAM (where a game loads its sound driver) and its
-//! bus request line. The sound chips read as idle.
+//! with 3- or 6-button pads; the Z80's 8 KB of RAM (where a game loads its sound driver) and
+//! its bus request line.
+//!
+//! **A pad answers by the TH line** (bit 6) the console drives. A 3-button pad: TH high, C,
+//! B, right, left, down, up; TH low, start, A, 0, 0, down, up — each line low for held. A
+//! **6-button pad** counts TH's rising edges and answers the third and fourth phases
+//! differently: after two, TH low reads its signature, 0 0 0 0 in the direction bits;
+//! after three, TH high reads C, B, Mode, X, Y, Z, and TH low all four direction bits high.
+//! Left alone for 56,000 master clocks (~1 ms), its count starts over (BlastEm's model and
+//! figure; `tests/vdp.sh`'s `pads6`). BlastEm reports B and C released in the X/Y/Z phase;
+//! the documented pad reports them, and Sheliak follows the pad (`build/padtest`).
+//!
+//! Not modelled: the slow rise of TH through its pull-up when the console stops driving it
+//! low, which BlastEm counts as an edge ~210 master clocks later; here it is at once. (The
+//! one at power-on is modelled: [new_port].)
 
-/// Pad buttons, as a mask of those held — the front end's to set in [GenesisBus.pads].
-pub const PAD_UP: u8 = 0x01
-pub const PAD_DOWN: u8 = 0x02
-pub const PAD_LEFT: u8 = 0x04
-pub const PAD_RIGHT: u8 = 0x08
-pub const PAD_B: u8 = 0x10
-pub const PAD_C: u8 = 0x20
-pub const PAD_A: u8 = 0x40
-pub const PAD_START: u8 = 0x80
+/// Pad buttons, as a mask of those held — the front end's to set in [GenesisBus.pads]. X,
+/// Y, Z and Mode are a 6-button pad's.
+pub const PAD_UP: u16 = 0x001
+pub const PAD_DOWN: u16 = 0x002
+pub const PAD_LEFT: u16 = 0x004
+pub const PAD_RIGHT: u16 = 0x008
+pub const PAD_B: u16 = 0x010
+pub const PAD_C: u16 = 0x020
+pub const PAD_A: u16 = 0x040
+pub const PAD_START: u16 = 0x080
+pub const PAD_X: u16 = 0x100
+pub const PAD_Y: u16 = 0x200
+pub const PAD_Z: u16 = 0x400
+pub const PAD_MODE: u16 = 0x800
+
+/// How long a 6-button pad keeps its count with TH left alone, in master clocks.
+const TH_TIMEOUT: i64 = 56000
 
 /// One controller port: what the 68000 last wrote to its data register, and its control
-/// register, whose bits say which lines the console drives (1) and which the pad does.
+/// register, whose bits say which lines the console drives (1) and which the pad does; the
+/// kind of pad in it, and a 6-button pad's count of TH's rising edges and when it lapses.
 pub struct Port {
   data: u8,
   control: u8,
+  six_button: bool,
+  th_count: u8,
+  th_timeout: i64,
 }
 
-pub let new_port = pure () -> Port => Port { data: 0, control: 0 }
+/// A port at power-on. TH, an input, rises through its pull-up as the console powers up —
+/// ~210 master clocks in, BlastEm's slow-rise figure — and a 6-button pad counts that rise:
+/// a program cycling TH within the first millisecond finds the count one ahead.
+pub let new_port = pure (six_button: bool) -> Port => Port {
+  data: 0,
+  control: 0,
+  six_button: six_button,
+  th_count: if six_button { 1 } else { 0 },
+  th_timeout: if six_button { POWER_ON_RISE + TH_TIMEOUT } else { 0 },
+}
 
-/// A controller port's data register as read, the pad in it holding `held`. A 3-button
-/// pad answers on its lines (low for held) by the TH line (bit 6) the console drives — TH
-/// high: C, B, right, left, down, up; TH low: start, A, 0, 0, down, up — and TH reads high
-/// when the console leaves it undriven. Lines the console drives read back what it wrote.
-let read_port = pure (port: Port, held: u8) -> u8 => {
-  let th = (port.control & 0x40) == 0 || (port.data & 0x40) != 0
-  let pad: u8 = if th {
-    0x40 | (~held & 0x3F)
+const POWER_ON_RISE: i64 = 210
+
+/// TH as the pad sees it: what the console drives, or high through the pull-up.
+let th_high = pure (port: ref Port) -> bool =>
+  (port.control & 0x40) == 0 || (port.data & 0x40) != 0
+
+/// A controller port's data register as read at master clock `now`, the pad in it holding
+/// `held`. Lines the console drives read back what it wrote.
+let read_port = pure (port: ref Port, held: u16, now: i64) -> u8 => {
+  let phase = if port.six_button && now < port.th_timeout { port.th_count } else { 0 }
+  let a_start = (((held >> 6) & 1) << 4) | (((held >> 7) & 1) << 5)
+  let pressed: u16 = if th_high(port) {
+    if phase == 3 {
+      // Z, Y, X, Mode, then B and C.
+      ((held >> 10) & 1) | (((held >> 9) & 1) << 1) | (((held >> 8) & 1) << 2) |
+        (((held >> 11) & 1) << 3) | (held & 0x30)
+    } else {
+      held & 0x3F
+    }
   } else {
-    let pressed = (held & 0x03) | (((held >> 6) & 1) << 4) | (((held >> 7) & 1) << 5)
-    ~pressed & 0x33
+    if phase == 2 { 0x0F | a_start } else if phase == 3 { a_start } else { 0x0C | (held & 0x03) | a_start }
   }
+  let pad = (if th_high(port) { 0x40 } else { 0 }) | u8(~pressed & 0x3F)
   (port.data & port.control & 0x7F) | (pad & ~port.control & 0x7F) | (port.data & 0x80)
+}
+
+/// The port's registers changed at master clock `now`: if TH moved, a 6-button pad counts
+/// a rise (starting over if its last count lapsed) and its timeout starts again.
+let th_moved = (port: mut Port, was_high: bool, now: i64) -> void => {
+  let high = th_high(port)
+  if !port.six_button || high == was_high { return }
+  if now >= port.th_timeout { port.th_count = 0 }
+  if high && port.th_count < 255 { port.th_count += 1 }
+  port.th_timeout = now + TH_TIMEOUT
 }
 
 /// A byte read from the I/O chip, A10000–A1001F (odd addresses; an even one reads the same
@@ -42,9 +97,9 @@ let read_port = pure (port: Port, held: u8) -> u8 => {
 /// registers read zero.
 let read_io = pure (bus: ref GenesisBus, a: u32) -> u8 => match (a >> 1) & 0x0F {
   0 => VERSION,
-  1 => read_port(bus.ports[0], bus.pads[0]),
-  2 => read_port(bus.ports[1], bus.pads[1]),
-  3 => read_port(bus.ports[2], 0),
+  1 => read_port(bus.ports[0], bus.pads[0], bus.clock),
+  2 => read_port(bus.ports[1], bus.pads[1], bus.clock),
+  3 => read_port(bus.ports[2], 0, bus.clock),
   4 => bus.ports[0].control,
   5 => bus.ports[1].control,
   6 => bus.ports[2].control,
@@ -54,8 +109,11 @@ let read_io = pure (bus: ref GenesisBus, a: u32) -> u8 => match (a >> 1) & 0x0F 
 /// A byte written to the I/O chip.
 let write_io = (bus: mut GenesisBus, a: u32, value: u8) -> void => {
   let register = i64((a >> 1) & 0x0F)
-  if register >= 1 && register <= 3 { bus.ports[register - 1].data = value }
-  if register >= 4 && register <= 6 { bus.ports[register - 4].control = value }
+  if register < 1 || register > 6 { return }
+  let n = (register - 1) % 3
+  let was_high = th_high(bus.ports[n])
+  if register <= 3 { bus.ports[n].data = value } else { bus.ports[n].control = value }
+  th_moved(bus.ports[n], was_high, bus.clock)
 }
 
 /// A byte of the Z80's space as the 68000 reads it, A00000–A0FFFF: its RAM (8 KB,

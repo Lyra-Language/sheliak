@@ -13,8 +13,9 @@ non-commercial is linked in. Lives in the Lyra workspace beside `lyra/`; the wor
 ../lyra/build.sh            # the compiler, with std/ beside it
 ./build.sh                  # -> build/: sheliak, cputest, legaltest, scenariotest, vdproms,
                             #    vdpcheck, padtest
-build/sheliak ROM           # play: arrows, Z/X/C = A/B/C, Return = Start, F11, Escape;
-                            #    gamepads on ports 1 and 2
+build/sheliak ROM           # play: arrows, Z/X/C = A/B/C, A/S/D = X/Y/Z, Return = Start,
+                            #    Q = Mode, F11, Escape; gamepads on ports 1 and 2;
+                            #    --pads 3 for 3-button pads
 SDL_VIDEODRIVER=dummy build/sheliak ROM --frames 600 --screenshot out.bmp   # headless
                             #    (--wav FILE: the sound; --save: use the .srm too)
 tests/fetch.sh              # SingleStepTests 68000 suite -> build/deps/680x0 (~200 MB, once)
@@ -242,8 +243,9 @@ src/genesis/         the machine (module genesis):
   sound.lyra         the Z80's side: its RAM, the bank window onto the cartridge, its clock
                      and /INT (from the VDP); the YM2612 and PSG, clocked, their samples
   audio.lyra         the analog stage: both chips resampled by area, mixed, filtered
-  io.lyra            the I/O chip (3-button pads, TH-multiplexed) and the Z80's RAM and bus
-                     lines (no Z80 runs: its bus is granted at once)
+  io.lyra            the I/O chip: 3- and 6-button pads (TH-multiplexed; the 6-button's
+                     edge count, timeout and power-on rise); the Z80's RAM and bus request
+                     as the 68000 sees them
   bus.lyra           the 68000's memory map: ROM, work RAM, the VDP ports, I/O, Z80, TMSS;
                      the master clock, refresh, the interrupt pins and E-clock acknowledge;
                      the 68000 held by the VDP, and fed to it during a transfer
@@ -319,13 +321,13 @@ against a real console.
 **The front end runs a cartridge in a window** (`build/sheliak`), and `tests/vdp.sh` holds
 its picture to BlastEm's too: the texels it sends the window (`--ppm`), byte for byte against
 the screenshot, so its colour conversion is checked, not only the VDP's output. Raw ROM images, two
-3-button pads (the protocol matched against BlastEm with nothing held, `pads`; with buttons
-held, `build/padtest`), frames paced to the console's 59.92 Hz whatever the display's rate,
+6-button pads (3 with `--pads 3`; the protocol matched against BlastEm with nothing held,
+`pads` and `pads6`; with buttons held, `build/padtest`), frames paced to the console's 59.92 Hz whatever the display's rate,
 ~4.7 ms a frame with sound on an M-series Mac. **Cartridges**: the ROM mirrored at its
 size, save RAM (odd, even or both buses; past the ROM or through the Sega mapper, with
 write-protect), the SSF2 bank mapper, and save files beside the ROM. **Not yet**: serial
 EEPROM saves (the cartridges that carry one are known only by a database), lock-on and
-unlicensed mappers, the Z80's bank window through the mapper, 6-button pads, `.smd`
+unlicensed mappers, the Z80's bank window through the mapper, `.smd`
 images, regions other than US NTSC.
 
 **Open**: the VDP's registers at power-on (the ROMs set every one; BlastEm starts register

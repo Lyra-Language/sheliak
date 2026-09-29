@@ -88,8 +88,8 @@ EOF
 
 # BlastEm's configuration in the scratch home: its defaults, with the NTSC overscan set to
 # hide the border entirely (the values its own default.cfg suggests for that), so a
-# screenshot is exactly the 320x224 active display, and 3-button pads in both ports (its
-# default is 6-button), the pad Sheliak has.
+# screenshot is exactly the 320x224 active display. Its pads are left at its default,
+# 6-button in both ports, as Sheliak's are.
 configure_blastem() {
   local dir="$WORK/home/.config/blastem"
   mkdir -p "$dir"
@@ -99,9 +99,7 @@ source = open(sys.argv[1]).read()
 old = "\t\t\ttop 2\n\t\t\tbottom 1\n"
 assert source.count(old) >= 1, "default.cfg changed; revisit the overscan override"
 source = source.replace(old, "\t\t\ttop 11\n\t\t\tbottom 8\n", 1)
-pads = "\t\t1 gamepad6.1\n\t\t2 gamepad6.2\n"
-assert source.count(pads) >= 1, "default.cfg changed; revisit the pad override"
-source = source.replace(pads, "\t\t1 gamepad3.1\n\t\t2 gamepad3.2\n", 1)
+assert "\t\t1 gamepad6.1\n\t\t2 gamepad6.2\n" in source, "default.cfg's pads changed"
 open(sys.argv[2], "w").write(source)
 EOF
 }

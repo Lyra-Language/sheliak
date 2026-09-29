@@ -108,6 +108,7 @@ const TESTS: []string = [
   "mid_vscroll",
   "mid_cram_h32",
   "pads",
+  "pads6",
   "z80_run",
   "sound_fm",
   "sound_psg",
@@ -160,6 +161,7 @@ let body = (name: string, a: mut Asm) -> void => match name {
   "mid_vscroll" => mid_vscroll(a),
   "mid_cram_h32" => mid_cram_h32(a),
   "pads" => pads(a),
+  "pads6" => pads6(a),
   "z80_run" => z80_run(a),
   "sound_fm" => sound_fm(a),
   "sound_psg" => sound_psg(a),
@@ -630,6 +632,28 @@ let pads = (a: mut Asm) -> void => {
     }
   }
   a.move_b_abs_abs(0xA10001, at)
+}
+
+/// Both ports' 6-button pads, nothing held, through four rises and falls of TH — the
+/// signature (direction bits low) in the second fall, the X/Y/Z phase in the third rise, its
+/// direction bits high in the third fall — then, a frame on (the count lapsed), again.
+let pads6 = (a: mut Asm) -> void => {
+  a.reg(1, 0x44)
+  var at = RAM + 0x10
+  for pass in 0..<2 {
+    if pass == 1 { a.sync_to_display() }
+    for port in 0..<2 {
+      let data_port = 0xA10003 + u32(port) * 2
+      a.move_b_imm_abs(0x40, 0xA10009 + u32(port) * 2)
+      for _ in 0..<4 {
+        a.move_b_imm_abs(0x40, data_port)
+        a.move_b_abs_abs(data_port, at)
+        a.move_b_imm_abs(0x00, data_port)
+        a.move_b_abs_abs(data_port, at + 1)
+        at += 2
+      }
+    }
+  }
 }
 
 // ── The Z80 ──────────────────────────────────────────────────────────────────

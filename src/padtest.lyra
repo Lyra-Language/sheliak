@@ -7,14 +7,14 @@
 
 import m68k.{ Bus }
 import genesis.{
-  genesis_bus, PAD_UP, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_A, PAD_B, PAD_C,
-  PAD_START,
+  GenesisBus, genesis_bus, set_pads, PAD_UP, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_A, PAD_B,
+  PAD_C, PAD_START, PAD_X, PAD_Y, PAD_Z, PAD_MODE,
 }
 
 let main = () -> u8 => {
   var failed = 0
   // Held → (TH high, TH low) for port 1, the console driving TH (control 0x40).
-  let cases: [](u8, u8, u8) = [
+  let cases: [](u16, u8, u8) = [
     (0, 0x7F, 0x33),
     (PAD_UP, 0x7E, 0x32),
     (PAD_DOWN | PAD_RIGHT, 0x75, 0x31),
@@ -28,6 +28,7 @@ let main = () -> u8 => {
   for case in cases {
     let (held, high, low) = case
     var bus = genesis_bus([0; 512])
+    set_pads(bus, false)
     bus.pads[0] = held
     bus.write_byte(0xA10009, 1, 0x40)
     bus.write_byte(0xA10003, 1, 0x40)
@@ -50,6 +51,10 @@ let main = () -> u8 => {
     println("port 2 word: ${port2.to_hex()}, want 6f6f")
     failed += 1
   }
+  failed += six_button_phases()
+  failed += six_button_lapse()
+  failed += six_button_at_power_on()
+  failed += three_button_has_no_phases()
   if failed == 0 {
     println("padtest: all passed")
     return 0
@@ -57,3 +62,76 @@ let main = () -> u8 => {
   println("padtest: ${failed} failed")
   1
 }
+
+// ── The 6-button pad ─────────────────────────────────────────────────────────
+
+/// With X, C, A and up held, a millisecond past power-on, TH driven high and low four times:
+/// the first two phases as a 3-button pad (but the second's TH-low, the signature,
+/// direction bits all low), the third with Mode X Y Z (and C, B) on TH high and the
+/// direction bits high on TH low, the fourth as the first.
+let six_button_phases = () -> i64 => {
+  var bus = genesis_bus([0; 512])
+  bus.pads[0] = PAD_X | PAD_C | PAD_A | PAD_UP
+  bus.clock += 60000
+  bus.write_byte(0xA10009, 1, 0x40)
+  let got = th_sequence(bus, 4)
+  let want: []u8 = [0x5E, 0x22, 0x5E, 0x20, 0x5B, 0x2F, 0x5E, 0x22]
+  check_reads("6-button phases", got, want)
+}
+
+/// Left alone past its timeout, the pad counts from the start again: three rises later it
+/// is in the X/Y/Z phase once more, where Y, Z and Mode show.
+let six_button_lapse = () -> i64 => {
+  var bus = genesis_bus([0; 512])
+  bus.pads[0] = PAD_Y | PAD_Z | PAD_MODE
+  bus.write_byte(0xA10009, 1, 0x40)
+  th_sequence(bus, 4)
+  bus.clock += 60000
+  let got = th_sequence(bus, 3)
+  // Y, Z, Mode: bits 1, 0, 3 low.
+  let want: []u8 = [0x7F, 0x33, 0x7F, 0x30, 0x74, 0x3F]
+  check_reads("6-button count lapsing", got, want)
+}
+
+/// Straight after power-on the pad has already counted TH's rise through its pull-up, so the
+/// first cycle is its second: the signature comes after one rise, X after two.
+let six_button_at_power_on = () -> i64 => {
+  var bus = genesis_bus([0; 512])
+  bus.pads[0] = PAD_X | PAD_C | PAD_A | PAD_UP
+  bus.write_byte(0xA10009, 1, 0x40)
+  let got = th_sequence(bus, 3)
+  let want: []u8 = [0x5E, 0x20, 0x5B, 0x2F, 0x5E, 0x22]
+  check_reads("6-button pad at power-on", got, want)
+}
+
+/// A 3-button pad holding X answers the same in every phase.
+let three_button_has_no_phases = () -> i64 => {
+  var bus = genesis_bus([0; 512])
+  set_pads(bus, false)
+  bus.pads[0] = PAD_X | PAD_UP
+  bus.write_byte(0xA10009, 1, 0x40)
+  let got = th_sequence(bus, 4)
+  let want: []u8 = [0x7E, 0x32, 0x7E, 0x32, 0x7E, 0x32, 0x7E, 0x32]
+  check_reads("3-button pad", got, want)
+}
+
+/// TH driven low then high `rises` times (it starts low, the control write having made it
+/// an output), port 1 read after each rise and each fall.
+let th_sequence = (bus: mut GenesisBus, rises: i64) -> []u8 => {
+  var got: []u8 = []
+  for _ in 0..<rises {
+    bus.write_byte(0xA10003, 1, 0x40)
+    got.push(bus.read_byte(0xA10003, 1))
+    bus.write_byte(0xA10003, 1, 0x00)
+    got.push(bus.read_byte(0xA10003, 1))
+  }
+  got
+}
+
+let check_reads = (name: string, got: []u8, want: []u8) -> i64 => {
+  if got == want { return 0 }
+  println("${name}: read ${hex_list(got)}, want ${hex_list(want)}")
+  1
+}
+
+let hex_list = pure (bytes: []u8) -> string => bytes.map((b) => b.to_hex()).join(" ")

@@ -5,7 +5,7 @@ module genesis
 //!
 //! **What is here is what a game needs to run without sound**: ROM at 000000–3FFFFF, work
 //! RAM at E00000–FFFFFF (64 KB, mirrored), the VDP at C00000–C0001F, the I/O chip with two
-//! 3-button pads (`io.lyra`), the Z80 and its side of the machine (`sound.lyra`), and the
+//! 3- or 6-button pads (`io.lyra`), the Z80 and its side of the machine (`sound.lyra`), and the
 //! TMSS register taking its write. No wait states, no sound chips, no cartridge hardware
 //! (EEPROM, lock-on) yet — the cartridge's ROM, save RAM and Sega mapper are
 //! `cartridge.lyra`'s.
@@ -56,9 +56,10 @@ pub struct GenesisBus {
   /// status register's top six bits) returns.
   open_bus: u16,
   /// The controller ports (1, 2, expansion), and the buttons held on the pads in the first
-  /// two — the front end's to set, a `PAD_*` mask each.
+  /// two — the front end's to set, a `PAD_*` mask each. Both hold 6-button pads, as most
+  /// players' do; [set_pads] changes that.
   ports: [3]Port,
-  pads: [2]u8,
+  pads: [2]u16,
   /// The Z80, and what it is wired to — run on at every 68000 bus cycle ([run_z80]).
   z80: Z80Cpu,
   sound: Z80Side,
@@ -83,10 +84,17 @@ pub let genesis_bus = pure (rom: []u8) -> GenesisBus => GenesisBus {
   clock: 0,
   refresh: 0,
   open_bus: 0,
-  ports: #[new_port(), new_port(), new_port()],
+  ports: #[new_port(true), new_port(true), new_port(false)],
   pads: #[0, 0],
   z80: new_z80(),
   sound: new_z80_side(rom),
+}
+
+/// The kind of pad in ports 1 and 2: 6-button, or the original 3 (which a few early games
+/// need, misreading a 6-button pad).
+pub let set_pads = (self: mut GenesisBus, six_button: bool) -> void => {
+  self.ports[0] = new_port(six_button)
+  self.ports[1] = new_port(six_button)
 }
 
 /// Run the machine's clock on to master clock `to`, the VDP with it — for a caller that has
