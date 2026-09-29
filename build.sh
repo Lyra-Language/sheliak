@@ -2,8 +2,9 @@
 #
 # Build Sheliak's programs into build/.
 #
-#   ./build.sh              # build/: the 68000 test runners (cputest, legaltest,
-#                           # scenariotest) and the VDP harness (vdproms, vdpcheck)
+#   ./build.sh              # build/: the emulator (sheliak), the 68000 test runners
+#                           # (cputest, legaltest, scenariotest), the VDP harness
+#                           # (vdproms, vdpcheck) and the pad test (padtest)
 #
 # Uses the sibling compiler, ../lyra/build/lyrac (run ../lyra/build.sh first), whose
 # install layout puts `std/` and `bindings/` beside it. Override with $LYRAC.
@@ -23,3 +24,5 @@ mkdir -p "$ROOT/build"
 "$LYRAC" build -o "$ROOT/build/scenariotest" "$ROOT/src/scenariotest.lyra"
 "$LYRAC" build -o "$ROOT/build/vdproms" "$ROOT/src/vdproms.lyra"
 "$LYRAC" build -o "$ROOT/build/vdpcheck" "$ROOT/src/vdpcheck.lyra"
+"$LYRAC" build -o "$ROOT/build/padtest" "$ROOT/src/padtest.lyra"
+"$LYRAC" build -o "$ROOT/build/sheliak" "$ROOT/src/sheliak.lyra"

@@ -1,0 +1,329 @@
+// sheliak — the emulator in a window: a cartridge ROM run on the Genesis model, its
+// picture shown with SDL, the keyboard and gamepads as its pads. No sound yet.
+//
+//   build/sheliak ROM                                  play
+//   build/sheliak ROM --frames N [--screenshot FILE] [--ppm FILE]
+//                                                      run N frames and quit, saving the
+//                                                      last: as SDL drew the window (BMP),
+//                                                      and as the texels sent to it (PPM,
+//                                                      which tests/vdp.sh compares with
+//                                                      BlastEm) — headless with
+//                                                      SDL_VIDEODRIVER=dummy
+//
+// Keys (pad 1): arrows; Z, X, C for A, B, C; Return for Start. Escape quits; F11 toggles
+// full screen. A gamepad is a pad too — the first on port 1, the second on port 2: d-pad
+// or left stick, the West, South and East face buttons for A, B and C (the Genesis's
+// bottom row, left to right), Start for Start.
+//
+// The ROM is a raw image (`.bin`, `.gen`, `.md`); the interleaved `.smd` format is not
+// read yet.
+
+import std.io.{ read_bytes, write_bytes }
+import bindings.sdl3.{
+  init, quit, last_error, INIT_VIDEO, INIT_GAMEPAD,
+  Window, create_window, destroy_window, set_fullscreen, WINDOW_RESIZABLE,
+  Renderer, Rect, rgb, create_renderer, destroy_renderer, set_logical_presentation,
+  PRESENT_INTEGER_SCALE, set_vsync, set_draw_color, clear, present, save_screenshot,
+  Texture, create_streaming_texture, update_texture, destroy_texture, draw_texture,
+  set_default_scale_mode, SCALE_NEAREST,
+  poll_event, KEY_ESCAPE, KEY_F11,
+  key_held, SCANCODE_UP, SCANCODE_DOWN, SCANCODE_LEFT, SCANCODE_RIGHT, SCANCODE_Z,
+  SCANCODE_X, SCANCODE_C, SCANCODE_RETURN,
+  Gamepad, open_gamepad, close_gamepad, gamepad_id, gamepad_button, gamepad_axis,
+  BUTTON_DPAD_UP, BUTTON_DPAD_DOWN, BUTTON_DPAD_LEFT, BUTTON_DPAD_RIGHT, BUTTON_WEST,
+  BUTTON_SOUTH, BUTTON_EAST, BUTTON_START, AXIS_LEFT_X, AXIS_LEFT_Y,
+  ticks_ns,
+}
+import m68k.{ Cpu }
+import genesis.{
+  GenesisBus, genesis_bus, new_cpu, power_on, run_frame,
+  PAD_UP, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_A, PAD_B, PAD_C, PAD_START,
+}
+import vdp.{ Frame, shown_frame }
+
+/// An NTSC frame: 262 lines of 3420 master clocks at 53.693175 MHz, in nanoseconds.
+const FRAME_NS: i64 = 16688154
+
+/// The screen as the logical size SDL scales up: 40-cell mode's, which a 32-cell frame is
+/// stretched across, as a television did.
+const SCREEN_W: i32 = 320
+const SCREEN_H: i32 = 224
+
+let main = () -> u8 => {
+  let args = program_args()
+  if args.len() < 2 {
+    println("usage: sheliak ROM [--frames N] [--screenshot FILE] [--ppm FILE]")
+    return 2
+  }
+  let Some(rom) = read_bytes(args[1]) else {
+    println("sheliak: cannot read ${args[1]}")
+    return 1
+  }
+  var frames_only: i64 = -1
+  var screenshot = ""
+  var ppm = ""
+  var i = 2
+  for i < args.len() {
+    if args[i] == "--frames" && i + 1 < args.len() {
+      frames_only = parse_count(args[i + 1])
+      i += 2
+    } else if args[i] == "--screenshot" && i + 1 < args.len() {
+      screenshot = args[i + 1]
+      i += 2
+    } else if args[i] == "--ppm" && i + 1 < args.len() {
+      ppm = args[i + 1]
+      i += 2
+    } else {
+      println("sheliak: unknown argument ${args[i]}")
+      return 2
+    }
+  }
+  if !init(INIT_VIDEO | INIT_GAMEPAD) {
+    println("sheliak: SDL_Init failed: ${last_error()}")
+    return 1
+  }
+  let Some(window) = create_window(
+    "Sheliak",
+    SCREEN_W * 3,
+    SCREEN_H * 3,
+    WINDOW_RESIZABLE
+  ) else {
+    println("sheliak: cannot open a window: ${last_error()}")
+    quit()
+    return 1
+  }
+  let Some(renderer) = create_renderer(window) else {
+    println("sheliak: cannot make a renderer: ${last_error()}")
+    destroy_window(window)
+    quit()
+    return 1
+  }
+  set_logical_presentation(renderer, SCREEN_W, SCREEN_H, PRESENT_INTEGER_SCALE)
+  set_default_scale_mode(renderer, SCALE_NEAREST)
+  set_vsync(renderer, frames_only < 0)
+  var cpu = new_cpu()
+  var bus = genesis_bus(rom)
+  power_on(cpu, bus)
+  let status = if frames_only >= 0 {
+    run_headless(cpu, bus, renderer, frames_only, screenshot, ppm)
+  } else {
+    play(cpu, bus, renderer, window)
+  }
+  destroy_renderer(renderer)
+  destroy_window(window)
+  quit()
+  status
+}
+
+/// Run `frames` frames as fast as they go, show the last, and save it if asked.
+let run_headless = (
+  cpu: mut Cpu,
+  bus: mut GenesisBus,
+  renderer: Renderer,
+  frames: i64,
+  screenshot: string,
+  ppm: string
+) -> u8 => {
+  for _ in 0..<frames { run_frame(cpu, bus) }
+  var screen = new_screen()
+  show(renderer, screen, shown_frame(bus.vdp))
+  let saved = screenshot == "" || save_screenshot(renderer, screenshot)
+  present(renderer)
+  let dumped = ppm == "" || write_bytes(ppm, texels_ppm(screen))
+  release_screen(screen)
+  if !saved {
+    println("sheliak: cannot save ${screenshot}: ${last_error()}")
+    return 1
+  }
+  if !dumped {
+    println("sheliak: cannot write ${ppm}")
+    return 1
+  }
+  0
+}
+
+/// The screen's texels as a binary PPM, red, green, blue a pixel.
+let texels_ppm = pure (screen: Screen) -> []u8 => {
+  var bytes: []u8 = []
+  for c in "P6\n${screen.width} ${screen.height}\n255\n" { bytes.push(u8(i64(c))) }
+  for t in screen.texels {
+    bytes.push(u8((t >> 16) & 0xFF))
+    bytes.push(u8((t >> 8) & 0xFF))
+    bytes.push(u8(t & 0xFF))
+  }
+  bytes
+}
+
+/// Play until the window closes or Escape: frames run at the console's rate — however many
+/// are due since the last look, so a display faster or slower than 59.92 Hz neither speeds
+/// the game up nor slows it down — and the latest shown.
+let play = (
+  cpu: mut Cpu,
+  bus: mut GenesisBus,
+  renderer: Renderer,
+  window: Window
+) -> u8 => {
+  var screen = new_screen()
+  var pads: []Gamepad = []
+  var fullscreen = false
+  var last = i64(ticks_ns())
+  var owed: i64 = 0
+  var running = true
+  for running {
+    for {
+      let Some(event) = poll_event() else { break }
+      match event {
+        Quit => { running = false },
+        KeyDown(key) => {
+          if key == KEY_ESCAPE { running = false }
+          if key == KEY_F11 {
+            fullscreen = !fullscreen
+            set_fullscreen(window, fullscreen)
+          }
+        },
+        GamepadAdded(id) => {
+          if let Some(pad) = open_gamepad(id) { pads.push(pad) }
+        },
+        GamepadRemoved(id) => { pads = drop_gamepad(pads, id) },
+        _ => {},
+      }
+    }
+    bus.pads[0] = keyboard_buttons() | (if pads.len() > 0 { gamepad_buttons(pads[0]) } else { 0 })
+    bus.pads[1] = if pads.len() > 1 { gamepad_buttons(pads[1]) } else { 0 }
+    let now = i64(ticks_ns())
+    owed += now - last
+    last = now
+    // After a stall (a window drag, a breakpoint) the lost time is forgiven, not raced.
+    if owed > 4 * FRAME_NS { owed = FRAME_NS }
+    for owed >= FRAME_NS {
+      run_frame(cpu, bus)
+      owed -= FRAME_NS
+    }
+    show(renderer, screen, shown_frame(bus.vdp))
+    present(renderer)
+  }
+  for pad in pads { close_gamepad(pad) }
+  release_screen(screen)
+  0
+}
+
+// ── The picture ──────────────────────────────────────────────────────────────
+
+/// A streaming texture the size of the frames going into it, and a buffer of texels to
+/// fill it from.
+struct Screen {
+  texture: Maybe<Texture>,
+  texels: []u32,
+  width: i64,
+  height: i64,
+  /// Every VDP pixel value's colour ([pixel_color]), looked up rather than computed.
+  colors: []u32,
+}
+
+let new_screen = pure () -> Screen => Screen {
+  texture: None,
+  texels: [],
+  width: 0,
+  height: 0,
+  colors: [p in 0..<0x4000 | pixel_color(u16(p))],
+}
+
+let release_screen = (screen: Screen) -> void => {
+  if let Some(texture) = screen.texture { destroy_texture(texture) }
+}
+
+/// Draw `frame` over the whole logical screen, a new texture made first if its size
+/// changed.
+let show = (renderer: Renderer, screen: mut Screen, frame: Frame) -> void => {
+  if frame.width != screen.width || frame.height != screen.height {
+    if let Some(old) = screen.texture { destroy_texture(old) }
+    screen.texture = create_streaming_texture(renderer, frame.width, frame.height)
+    screen.texels = [0; frame.width * frame.height]
+    screen.width = frame.width
+    screen.height = frame.height
+  }
+  for i, p in frame.pixels { screen.texels[i] = screen.colors[i64(p & 0x3FFF)] }
+  set_draw_color(renderer, rgb(0, 0, 0))
+  clear(renderer)
+  let Some(texture) = screen.texture else { return }
+  update_texture(texture, screen.texels)
+  let whole = Rect { x: 0.0, y: 0.0, w: f32(frame.width), h: f32(frame.height) }
+  let screen_rect = Rect { x: 0.0, y: 0.0, w: f32(SCREEN_W), h: f32(SCREEN_H) }
+  draw_texture(renderer, texture, whole, screen_rect)
+}
+
+/// The DAC's 15 measured levels: a component c (0–7) is level 2c at normal intensity, c in
+/// shadow, c + 7 in highlight — the same light `tests/frame_compare.py` compares.
+const LEVELS: [15]u32 = #[
+  0, 27, 49, 71, 87, 103, 119, 130,
+  146, 157, 174, 190, 206, 228, 255,
+]
+
+/// A VDP pixel (a CRAM colour, `----bbb-ggg-rrr-`, and its intensity in bits 13–12) as
+/// `0x00RRGGBB`.
+let pixel_color = pure (pixel: u16) -> u32 => {
+  let intensity = (pixel >> 12) & 3
+  var rgb_value: u32 = 0
+  for shift in [1, 5, 9] {
+    let c = i64((pixel >> u16(shift)) & 7)
+    let level = if intensity == 2 { LEVELS[c + 7] } else if intensity == 1 { LEVELS[c] } else { LEVELS[2 * c] }
+    // Red (bits 3–1) is the texel's high byte, blue (11–9) its low.
+    rgb_value = rgb_value | (level << u32(16 - (shift / 4) * 8))
+  }
+  rgb_value
+}
+
+// ── The pads ─────────────────────────────────────────────────────────────────
+
+/// Pad 1's buttons held on the keyboard, by key position.
+let keyboard_buttons = () -> u8 => {
+  var held: u8 = 0
+  if key_held(SCANCODE_UP) { held = held | PAD_UP }
+  if key_held(SCANCODE_DOWN) { held = held | PAD_DOWN }
+  if key_held(SCANCODE_LEFT) { held = held | PAD_LEFT }
+  if key_held(SCANCODE_RIGHT) { held = held | PAD_RIGHT }
+  if key_held(SCANCODE_Z) { held = held | PAD_A }
+  if key_held(SCANCODE_X) { held = held | PAD_B }
+  if key_held(SCANCODE_C) { held = held | PAD_C }
+  if key_held(SCANCODE_RETURN) { held = held | PAD_START }
+  held
+}
+
+/// A gamepad's buttons as a Genesis pad's: the d-pad or the left stick past a third of its
+/// travel, West, South and East for A, B and C, Start.
+let gamepad_buttons = (pad: Gamepad) -> u8 => {
+  let x = i64(gamepad_axis(pad, AXIS_LEFT_X))
+  let y = i64(gamepad_axis(pad, AXIS_LEFT_Y))
+  var held: u8 = 0
+  if gamepad_button(pad, BUTTON_DPAD_UP) || y < -STICK { held = held | PAD_UP }
+  if gamepad_button(pad, BUTTON_DPAD_DOWN) || y > STICK { held = held | PAD_DOWN }
+  if gamepad_button(pad, BUTTON_DPAD_LEFT) || x < -STICK { held = held | PAD_LEFT }
+  if gamepad_button(pad, BUTTON_DPAD_RIGHT) || x > STICK { held = held | PAD_RIGHT }
+  if gamepad_button(pad, BUTTON_WEST) { held = held | PAD_A }
+  if gamepad_button(pad, BUTTON_SOUTH) { held = held | PAD_B }
+  if gamepad_button(pad, BUTTON_EAST) { held = held | PAD_C }
+  if gamepad_button(pad, BUTTON_START) { held = held | PAD_START }
+  held
+}
+
+/// A third of the stick's travel.
+const STICK: i64 = 11000
+
+/// The gamepads still plugged in, `id` closed.
+let drop_gamepad = (pads: []Gamepad, id: u32) -> []Gamepad => {
+  var kept: []Gamepad = []
+  for pad in pads {
+    if gamepad_id(pad) == id { close_gamepad(pad) } else { kept.push(pad) }
+  }
+  kept
+}
+
+/// A decimal count, or -1 if `text` is not one.
+let parse_count = pure (text: string) -> i64 => {
+  var n: i64 = 0
+  for c in text {
+    if c < '0' || c > '9' { return -1 }
+    n = n * 10 + (i64(c) - i64('0'))
+  }
+  n
+}

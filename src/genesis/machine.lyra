@@ -1,0 +1,27 @@
+module genesis
+//! The whole console run as a front end runs it: a 68000 reset on a [GenesisBus], and a
+//! frame at a time.
+
+import m68k.{ Cpu, cpu_with, reset, step }
+
+/// A 68000 in supervisor mode, interrupts masked, before [power_on] resets it.
+pub let new_cpu = pure () -> Cpu => cpu_with(
+  #[0, 0, 0, 0, 0, 0, 0, 0],
+  #[0, 0, 0, 0, 0, 0, 0],
+  0,
+  0,
+  0x2700,
+  0,
+  0,
+  0
+)
+
+/// Power on: the 68000 reset from the cartridge's vectors.
+pub let power_on = (cpu: mut Cpu, bus: mut GenesisBus) -> void => reset(cpu, bus)
+
+/// Run until the VDP completes its next frame (the last row of it gone out), which is then
+/// its shown frame.
+pub let run_frame = (cpu: mut Cpu, bus: mut GenesisBus) -> void => {
+  let target = bus.vdp.frames + 1
+  for bus.vdp.frames < target { step(cpu, bus) }
+}

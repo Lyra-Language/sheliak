@@ -1,0 +1,79 @@
+module genesis
+//! The console's I/O chip and the Z80's corner of the 68000's map — as much of each as a
+//! game touches to start and to play without sound: the controller ports with 3-button
+//! pads, the Z80's bus request and reset lines, and its 8 KB of RAM (where a game loads
+//! its sound driver). **No Z80 runs yet**: a request for its bus is granted at once, and
+//! the sound chips are written to and read as idle.
+
+/// Pad buttons, as a mask of those held — the front end's to set in [GenesisBus.pads].
+pub const PAD_UP: u8 = 0x01
+pub const PAD_DOWN: u8 = 0x02
+pub const PAD_LEFT: u8 = 0x04
+pub const PAD_RIGHT: u8 = 0x08
+pub const PAD_B: u8 = 0x10
+pub const PAD_C: u8 = 0x20
+pub const PAD_A: u8 = 0x40
+pub const PAD_START: u8 = 0x80
+
+/// One controller port: what the 68000 last wrote to its data register, and its control
+/// register, whose bits say which lines the console drives (1) and which the pad does.
+pub struct Port {
+  data: u8,
+  control: u8,
+}
+
+pub let new_port = pure () -> Port => Port { data: 0, control: 0 }
+
+/// A controller port's data register as read, the pad in it holding `held`. A 3-button
+/// pad answers on its lines (low for held) by the TH line (bit 6) the console drives — TH
+/// high: C, B, right, left, down, up; TH low: start, A, 0, 0, down, up — and TH reads high
+/// when the console leaves it undriven. Lines the console drives read back what it wrote.
+let read_port = pure (port: Port, held: u8) -> u8 => {
+  let th = (port.control & 0x40) == 0 || (port.data & 0x40) != 0
+  let pad: u8 = if th {
+    0x40 | (~held & 0x3F)
+  } else {
+    let pressed = (held & 0x03) | (((held >> 6) & 1) << 4) | (((held >> 7) & 1) << 5)
+    ~pressed & 0x33
+  }
+  (port.data & port.control & 0x7F) | (pad & ~port.control & 0x7F) | (port.data & 0x80)
+}
+
+/// A byte read from the I/O chip, A10000–A1001F (odd addresses; an even one reads the same
+/// byte): the version register, the three ports' data and control registers. The serial
+/// registers read zero.
+let read_io = pure (bus: GenesisBus, a: u32) -> u8 => match (a >> 1) & 0x0F {
+  0 => VERSION,
+  1 => read_port(bus.ports[0], bus.pads[0]),
+  2 => read_port(bus.ports[1], bus.pads[1]),
+  3 => read_port(bus.ports[2], 0),
+  4 => bus.ports[0].control,
+  5 => bus.ports[1].control,
+  6 => bus.ports[2].control,
+  _ => 0,
+}
+
+/// A byte written to the I/O chip.
+let write_io = (bus: mut GenesisBus, a: u32, value: u8) -> void => {
+  let register = i64((a >> 1) & 0x0F)
+  if register >= 1 && register <= 3 { bus.ports[register - 1].data = value }
+  if register >= 4 && register <= 6 { bus.ports[register - 4].control = value }
+}
+
+/// A byte of the Z80's space as the 68000 reads it, A00000–A0FFFF: its RAM (8 KB,
+/// mirrored once), the YM2612's status (never busy), and nothing else.
+let read_z80_space = pure (bus: GenesisBus, a: u32) -> u8 => {
+  let offset = a & 0xFFFF
+  if offset < 0x4000 { return bus.z80_ram[i64(offset & 0x1FFF)] }
+  0
+}
+
+let write_z80_space = (bus: mut GenesisBus, a: u32, value: u8) -> void => {
+  let offset = a & 0xFFFF
+  if offset < 0x4000 { bus.z80_ram[i64(offset & 0x1FFF)] = value }
+}
+
+/// The Z80 bus request register (A11100) as read: bit 0 of its even byte is clear once the
+/// bus is the 68000's — at once, here, as no Z80 holds it.
+let read_bus_request = pure (bus: GenesisBus) -> u8 =>
+  if bus.z80_bus_requested { 0 } else { 1 }

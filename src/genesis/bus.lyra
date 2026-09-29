@@ -3,9 +3,11 @@ module genesis
 //! the VDP's ports — wired as the console wires them. A chip is a module (`m68k`, `vdp`);
 //! this is where they meet (CLAUDE.md's rule).
 //!
-//! **What is here is what the VDP needs**: ROM at 000000–3FFFFF, work RAM at E00000–FFFFFF
-//! (64 KB, mirrored), the VDP at C00000–C0001F, the version register, and the TMSS register
-//! taking its write. No wait states, no Z80, no sound, no controllers yet.
+//! **What is here is what a game needs to run without sound**: ROM at 000000–3FFFFF, work
+//! RAM at E00000–FFFFFF (64 KB, mirrored), the VDP at C00000–C0001F, the I/O chip with two
+//! 3-button pads (`io.lyra`), the Z80's RAM and bus lines (no Z80 runs), and the TMSS
+//! register taking its write. No wait states, no sound, no cartridge hardware (SRAM,
+//! mappers) yet.
 //!
 //! **Time is the master clock**, ≈53.69 MHz, kept here: a 68000 cycle is 7 of it, and an
 //! access its four cycles. The VDP's beam is caught up to it whenever the 68000 is about to
@@ -51,6 +53,13 @@ pub struct GenesisBus {
   /// The last word the 68000's data bus carried, which a read of an undriven line (the
   /// status register's top six bits) returns.
   open_bus: u16,
+  /// The controller ports (1, 2, expansion), and the buttons held on the pads in the first
+  /// two — the front end's to set, a `PAD_*` mask each.
+  ports: [3]Port,
+  pads: [2]u8,
+  /// The Z80's 8 KB of RAM, and its bus request line as the 68000 last set it.
+  z80_ram: []u8,
+  z80_bus_requested: bool,
 }
 
 /// Master clocks per 68000 cycle.
@@ -72,6 +81,10 @@ pub let genesis_bus = pure (rom: []u8) -> GenesisBus => GenesisBus {
   clock: 0,
   refresh: 0,
   open_bus: 0,
+  ports: #[new_port(), new_port(), new_port()],
+  pads: #[0, 0],
+  z80_ram: [0; 8192],
+  z80_bus_requested: false,
 }
 
 /// Run the machine's clock on to master clock `to`, the VDP with it — for a caller that has
@@ -104,6 +117,9 @@ impl Bus for GenesisBus {
       self.ram[at + 1] = u8(value & 0xFF)
     } else if a >= 0xC00000 && a < 0xC00020 {
       self.write_vdp(a, value)
+    } else {
+      self.write_other(a & 0xFFFFFE, u8(value >> 8))
+      self.write_other(a | 1, u8(value & 0xFF))
     }
     self.open_bus = value
   }
@@ -118,6 +134,8 @@ impl Bus for GenesisBus {
       // A byte written to a VDP port is that byte in both halves of a word. (C00011–17, the
       // PSG, is not a VDP port and is ignored until the PSG is built.)
       self.write_vdp(a & 0xFFFFFE, word)
+    } else {
+      self.write_other(a, value)
     }
     self.open_bus = word
   }
@@ -158,8 +176,9 @@ let tick = (self: mut GenesisBus, n: i64) -> void => {
   }
 }
 
-/// The word at an even address outside the VDP, with no bus cycle: ROM, work RAM, the
-/// version register. Also what a 68000 → VDP DMA reads, which is why it takes no time here.
+/// The word at an even address outside the VDP, with no bus cycle: ROM, work RAM, the Z80's
+/// space, the I/O chip (its byte in both halves), the Z80 bus request. Also what a
+/// 68000 → VDP DMA reads, which is why it takes no time here.
 let peek_word = pure (self: GenesisBus, a: u32) -> u16 => {
   if a < 0x400000 {
     let at = i64(a & 0x3FFFFE)
@@ -170,8 +189,29 @@ let peek_word = pure (self: GenesisBus, a: u32) -> u16 => {
     let at = i64(a & 0xFFFE)
     return (u16(self.ram[at]) << 8) | u16(self.ram[at + 1])
   }
-  if a >= 0xA10000 && a < 0xA10002 { return (u16(VERSION) << 8) | u16(VERSION) }
+  if a >= 0xA00000 && a < 0xA10000 {
+    return (u16(read_z80_space(self, a)) << 8) | u16(read_z80_space(self, a | 1))
+  }
+  if a >= 0xA10000 && a < 0xA10020 {
+    let byte = read_io(self, a)
+    return (u16(byte) << 8) | u16(byte)
+  }
+  if a == 0xA11100 { return u16(read_bus_request(self)) << 8 }
   0
+}
+
+/// A byte written outside RAM and the VDP: into the Z80's space, the I/O chip, or the Z80's
+/// bus request line (A11100, bit 0 of its even byte). The Z80 reset line (A11200) and the
+/// TMSS register (A14000) take their writes and change nothing, as no Z80 runs and this
+/// console has no TMSS.
+let write_other = (self: mut GenesisBus, a: u32, value: u8) -> void => {
+  if a >= 0xA00000 && a < 0xA10000 {
+    write_z80_space(self, a, value)
+  } else if a >= 0xA10000 && a < 0xA10020 {
+    write_io(self, a, value)
+  } else if a == 0xA11100 {
+    self.z80_bus_requested = (value & 1) != 0
+  }
 }
 
 /// A word read from the VDP's ports, the beam caught up first: data (C00000–03), control

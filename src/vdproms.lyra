@@ -100,6 +100,7 @@ const TESTS: []string = [
   "mid_cram",
   "mid_vscroll",
   "mid_cram_h32",
+  "pads",
 ]
 
 /// The code of the test `name`. (A `match` rather than a table of functions: each takes the
@@ -143,7 +144,8 @@ let body = (name: string, a: mut Asm) -> void => match name {
   "read_active" => read_active(a),
   "mid_cram" => mid_cram(a),
   "mid_vscroll" => mid_vscroll(a),
-  _ => mid_cram_h32(a),
+  "mid_cram_h32" => mid_cram_h32(a),
+  _ => pads(a),
 }
 
 /// The H slack each timing test is compared with, in slots (tests/vdp.sh reads it from the
@@ -579,6 +581,36 @@ let mid_cram_h32 = (a: mut Asm) -> void => {
   a.run_every_frame()
 }
 
+// ── The I/O chip ─────────────────────────────────────────────────────────────
+
+/// Both controller ports read, no button held: with TH driven high and low (control bit 6
+/// set), undriven, and with every line driven; the version and control registers too.
+///
+///     move.b $A1000x, $FF00yy
+let pads = (a: mut Asm) -> void => {
+  var at = RAM + 0x10
+  for port in 0..<2 {
+    let data_port = 0xA10003 + u32(port) * 2
+    let control_port = 0xA10009 + u32(port) * 2
+    for setting in [
+      (0x40, 0x40),
+      (0x40, 0x00),
+      (0x00, 0x00),
+      (0x7F, 0x55),
+      (0x40, 0xC0)
+    ] {
+      let (c, d) = setting
+      a.move_b_imm_abs(u8(c), control_port)
+      a.move_b_imm_abs(u8(d), data_port)
+      a.w(0x4E71)
+      a.move_b_abs_abs(data_port, at)
+      a.move_b_abs_abs(control_port, at + 1)
+      at += 2
+    }
+  }
+  a.move_b_abs_abs(0xA10001, at)
+}
+
 // ── Scenes ───────────────────────────────────────────────────────────────────
 //
 // Each draws a still frame: a common layout (below), the data every scene shares uploaded
@@ -962,6 +994,13 @@ let move_b_imm_abs = (self: mut Asm, imm: u8, addr: u32) -> void => {
   self.w(0x13FC)
   self.w(u16(imm))
   self.l(addr)
+}
+
+/// move.b (xxx).l, (xxx).l
+let move_b_abs_abs = (self: mut Asm, from: u32, to: u32) -> void => {
+  self.w(0x13F9)
+  self.l(from)
+  self.l(to)
 }
 
 /// move.w (xxx).l, (xxx).l

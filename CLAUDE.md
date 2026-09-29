@@ -11,7 +11,11 @@ non-commercial is linked in. Lives in the Lyra workspace beside `lyra/`; the wor
 
 ```bash
 ../lyra/build.sh            # the compiler, with std/ beside it
-./build.sh                  # -> build/: cputest, legaltest, scenariotest, vdproms, vdpcheck
+./build.sh                  # -> build/: sheliak, cputest, legaltest, scenariotest, vdproms,
+                            #    vdpcheck, padtest
+build/sheliak ROM           # play: arrows, Z/X/C = A/B/C, Return = Start, F11, Escape;
+                            #    gamepads on ports 1 and 2
+SDL_VIDEODRIVER=dummy build/sheliak ROM --frames 600 --screenshot out.bmp   # headless
 tests/fetch.sh              # SingleStepTests 68000 suite -> build/deps/680x0 (~200 MB, once)
 tests/cpu.sh                # every 68000 test file (~1M tests, ~17 s)
 tests/cpu.sh MOVE.l DIVS    # just these
@@ -19,6 +23,7 @@ tests/legal.sh              # all 65,536 opcodes: legality against Musashi, ille
 tests/scenarios.sh          # interrupt, STOP and trace scenarios on a scripted bus
 tests/vdp.sh                # VDP test ROMs on Sheliak and BlastEm, compared (needs SDL2)
 tests/vdp.sh fill copy      # just these
+build/padtest               # the pads, buttons held, through the bus
 ```
 
 ## Accuracy Target
@@ -136,6 +141,9 @@ frame-at-a-time shortcuts from the start:
 Module paths resolve under `src/` (the entry file's directory), so entry points live there.
 
 ```
+src/sheliak.lyra     the emulator in an SDL window: frames paced to 59.92 Hz, the picture
+                     through the DAC's levels, keyboard and gamepads as pads 1 and 2
+src/padtest.lyra     the controller ports with buttons held, read through the bus
 src/cputest.lyra     68000 test runner: one SingleStepTests file on stdin
 src/legaltest.lyra   every opcode through the core, against a legality reference on stdin
 src/scenariotest.lyra  interrupts, STOP and trace, scenario by scenario, on a scripted bus
@@ -172,7 +180,10 @@ src/vdp/             the VDP (module vdp):
                      scroll, column scroll, the window and its edge bug), sprites and their
                      limits, priority, shadow/highlight
 src/genesis/         the machine (module genesis):
-  bus.lyra           the 68000's memory map: ROM, work RAM, the VDP ports, version, TMSS;
+  machine.lyra       power on, and run a frame
+  io.lyra            the I/O chip (3-button pads, TH-multiplexed) and the Z80's RAM and bus
+                     lines (no Z80 runs: its bus is granted at once)
+  bus.lyra           the 68000's memory map: ROM, work RAM, the VDP ports, I/O, Z80, TMSS;
                      the master clock, refresh, the interrupt pins and E-clock acknowledge;
                      the 68000 held by the VDP, and fed to it during a transfer
 src/vdproms.lyra     writes the VDP test ROMs (and each one's parking address)
@@ -222,6 +233,15 @@ included. Not yet: the corners — interlace (and the odd-frame bit), 128 KB VRA
 the sprite pipeline spread over the line before (Sheliak takes the sprites at one slot),
 and the display switched on or off mid-line (Sheliak stops fetching and draws the
 backdrop).
+
+**The front end runs a cartridge in a window** (`build/sheliak`), and `tests/vdp.sh` holds
+its picture to BlastEm's too: the texels it sends the window (`--ppm`), byte for byte against
+the screenshot, so its colour conversion is checked, not only the VDP's output. Raw ROM images, two
+3-button pads (the protocol matched against BlastEm with nothing held, `pads`; with buttons
+held, `build/padtest`), frames paced to the console's 59.92 Hz whatever the display's rate,
+~5.5 ms a frame on an M-series Mac. **Not yet: sound (the Z80, the YM2612, the PSG)** —
+a game that waits for its Z80 sound driver to answer will hang — cartridge SRAM and
+mappers, 6-button pads, `.smd` images, regions other than US NTSC.
 
 **Open**: the VDP's registers at power-on (the ROMs set every one; BlastEm starts register
 10 at FF, uncited), and the beam's position and the H interrupt counter with them (Sheliak

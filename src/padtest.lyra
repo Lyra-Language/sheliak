@@ -1,0 +1,59 @@
+// padtest — the controller ports with buttons held, read through the Genesis bus as a
+// game reads them. (tests/vdp.sh's `pads` ROM holds the protocol to BlastEm with nothing
+// held; BlastEm cannot be made to hold a button, so this is checked against the pad's
+// documented lines instead.)
+//
+//   build/padtest        prints each failure, then a verdict; exits 1 on any
+
+import m68k.{ Bus }
+import genesis.{
+  genesis_bus, PAD_UP, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_A, PAD_B, PAD_C,
+  PAD_START,
+}
+
+let main = () -> u8 => {
+  var failed = 0
+  // Held → (TH high, TH low) for port 1, the console driving TH (control 0x40).
+  let cases: [](u8, u8, u8) = [
+    (0, 0x7F, 0x33),
+    (PAD_UP, 0x7E, 0x32),
+    (PAD_DOWN | PAD_RIGHT, 0x75, 0x31),
+    (PAD_LEFT, 0x7B, 0x33),
+    (PAD_B, 0x6F, 0x33),
+    (PAD_C, 0x5F, 0x33),
+    (PAD_A, 0x7F, 0x23),
+    (PAD_START, 0x7F, 0x13),
+    (PAD_A | PAD_B | PAD_C | PAD_START, 0x4F, 0x03),
+  ]
+  for case in cases {
+    let (held, high, low) = case
+    var bus = genesis_bus([0; 512])
+    bus.pads[0] = held
+    bus.write_byte(0xA10009, 1, 0x40)
+    bus.write_byte(0xA10003, 1, 0x40)
+    let th_high = bus.read_byte(0xA10003, 1)
+    bus.write_byte(0xA10003, 1, 0x00)
+    let th_low = bus.read_byte(0xA10003, 1)
+    if th_high != high || th_low != low {
+      println("held ${held.to_hex()}: read ${th_high.to_hex()}/${th_low.to_hex()}, want ${high.to_hex()}/${low.to_hex()}")
+      failed += 1
+    }
+  }
+  // Port 2 answers for pad 2, not pad 1; a word read has the byte in both halves.
+  var bus = genesis_bus([0; 512])
+  bus.pads[0] = PAD_UP
+  bus.pads[1] = PAD_B
+  bus.write_byte(0xA1000B, 1, 0x40)
+  bus.write_byte(0xA10005, 1, 0x40)
+  let port2 = bus.read_word(0xA10004, 1)
+  if port2 != 0x6F6F {
+    println("port 2 word: ${port2.to_hex()}, want 6f6f")
+    failed += 1
+  }
+  if failed == 0 {
+    println("padtest: all passed")
+    return 0
+  }
+  println("padtest: ${failed} failed")
+  1
+}

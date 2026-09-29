@@ -234,10 +234,27 @@ let fetch_block = (vdp: mut Vdp, k: i64, which: i64) -> void => {
       vdp.vscroll_latch[1] = both
     }
   }
-  let vscroll = i64(vdp.vscroll_latch[which] & 0x3FF)
-  for p in 0..<16 {
-    let dot = plane_block_dot(vdp, y, vdp.line_hscroll[which], vscroll, which, k, p)
-    if which == 0 { vdp.strip_a[(k + 1) * 16 + p] = dot } else { vdp.strip_b[(k + 1) * 16 + p] = dot }
+  // The block's two cells: plane pixels 16k - (hscroll & ~15) onward, on the row the
+  // vertical scroll makes — a name-table entry and a pattern row each.
+  let columns = plane_cells(vdp.regs[16] & 3)
+  let rows = plane_cells((vdp.regs[16] >> 4) & 3)
+  let base = if which == 0 { plane_a_base(vdp) } else { plane_b_base(vdp) }
+  let py = (y + i64(vdp.vscroll_latch[which] & 0x3FF)) & (rows * 8 - 1)
+  for cell in 0..<2 {
+    let px = (16 * k - (vdp.line_hscroll[which] & ~15) + cell * 8) & (columns * 8 - 1)
+    let entry = vram_entry(vdp, base + ((py >> 3) * columns + (px >> 3)) * 2)
+    let row = if (entry & 0x1000) != 0 { 7 - (py & 7) } else { py & 7 }
+    let pattern_row = i64(entry & 0x07FF) * 32 + row * 4
+    let palette = u8(((entry >> 13) & 3) << 4)
+    let high = (entry & 0x8000) != 0
+    for c in 0..<8 {
+      let col = if (entry & 0x0800) != 0 { 7 - c } else { c }
+      let byte = vdp.vram[(pattern_row + (col >> 1)) & 0xFFFF]
+      let pixel = if (col & 1) == 0 { byte >> 4 } else { byte & 0x0F }
+      let dot = Dot { color: if pixel == 0 { 0 } else { palette | pixel }, high: high }
+      let at = (k + 1) * 16 + cell * 8 + c
+      if which == 0 { vdp.strip_a[at] = dot } else { vdp.strip_b[at] = dot }
+    }
   }
   if which == 1 || k < 0 { return }
   vdp.window_blocks[k] = window_block(vdp, k, y)
@@ -257,26 +274,6 @@ let plane_dot = pure (vdp: Vdp, x: i64, which: i64) -> Dot => {
   // The block after a left window: its first `fine` pixels wrap within itself.
   if k > 0 && vdp.window_blocks[k - 1] { return vdp.strip_a[(k + 1) * 16 + ((i - fine) & 15)] }
   vdp.strip_a[(k + 1) * 16 + i - fine]
-}
-
-/// Pixel `p` of fetch block `k` of plane `which` on line `y`: the plane's pixel at column
-/// 16k - (hscroll & ~15) + p, on the row the vertical scroll makes.
-let plane_block_dot = pure (
-  vdp: Vdp,
-  y: i64,
-  hscroll: i64,
-  vscroll: i64,
-  which: i64,
-  k: i64,
-  p: i64
-) -> Dot => {
-  let columns = plane_cells(vdp.regs[16] & 3)
-  let rows = plane_cells((vdp.regs[16] >> 4) & 3)
-  let base = if which == 0 { plane_a_base(vdp) } else { plane_b_base(vdp) }
-  let px = (16 * k - (hscroll & ~15) + p) & (columns * 8 - 1)
-  let py = (y + vscroll) & (rows * 8 - 1)
-  let entry = vram_entry(vdp, base + ((py >> 3) * columns + (px >> 3)) * 2)
-  tile_dot(vdp, entry, px & 7, py & 7)
 }
 
 /// The window's dot at screen (x, y): its own name table, never scrolled, 64 cells wide in

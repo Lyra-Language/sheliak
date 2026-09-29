@@ -88,7 +88,8 @@ EOF
 
 # BlastEm's configuration in the scratch home: its defaults, with the NTSC overscan set to
 # hide the border entirely (the values its own default.cfg suggests for that), so a
-# screenshot is exactly the 320x224 active display.
+# screenshot is exactly the 320x224 active display, and 3-button pads in both ports (its
+# default is 6-button), the pad Sheliak has.
 configure_blastem() {
   local dir="$WORK/home/.config/blastem"
   mkdir -p "$dir"
@@ -97,7 +98,11 @@ import sys
 source = open(sys.argv[1]).read()
 old = "\t\t\ttop 2\n\t\t\tbottom 1\n"
 assert source.count(old) >= 1, "default.cfg changed; revisit the overscan override"
-open(sys.argv[2], "w").write(source.replace(old, "\t\t\ttop 11\n\t\t\tbottom 8\n", 1))
+source = source.replace(old, "\t\t\ttop 11\n\t\t\tbottom 8\n", 1)
+pads = "\t\t1 gamepad6.1\n\t\t2 gamepad6.2\n"
+assert source.count(pads) >= 1, "default.cfg changed; revisit the pad override"
+source = source.replace(pads, "\t\t1 gamepad3.1\n\t\t2 gamepad3.2\n", 1)
+open(sys.argv[2], "w").write(source)
 EOF
 }
 
@@ -132,6 +137,13 @@ for name in "${names[@]}"; do
   if [ "$name" != register_bits ] && ! "$ROOT/tests/frame_compare.py" "$WORK/sheliak/$name/frame.bin" "$WORK/blastem/$name/frame.ppm" \
     >"$WORK/sheliak/$name/frame.txt"; then
     differs+=("frame")
+  fi
+  # The front end's picture: the texels it sends to the window, after 30 frames from power
+  # on (every ROM has parked by then and shows its settled frame), byte for byte against
+  # BlastEm's screenshot — the colour conversion is the front end's own.
+  if [ "$name" != register_bits ]; then
+    SDL_VIDEODRIVER=dummy "$ROOT/build/sheliak" "$rom" --frames 30 --ppm "$WORK/sheliak/$name/window.ppm" \
+      >/dev/null && cmp -s "$WORK/sheliak/$name/window.ppm" "$WORK/blastem/$name/frame.ppm" || differs+=("window")
   fi
   if [ ${#differs[@]} -eq 0 ]; then
     echo "$name: matches"
