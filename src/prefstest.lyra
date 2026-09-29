@@ -1,0 +1,48 @@
+// prefstest — the preferences file read and written (src/front/prefs.lyra): defaults, a
+// round trip, and lenient reading — an unknown key, a line that says nothing, a value out
+// of range each passed over with the default standing.
+//
+//   build/prefstest      prints each failure, then a verdict; exits 1 on any
+
+import front.{ Prefs, default_prefs, parse_prefs, format_prefs, LOOK_CRT, LOOK_SCANLINES }
+
+let main = () -> u8 => {
+  var failed = 0
+  failed += check_prefs("empty file", parse_prefs(""), default_prefs())
+  let chosen = Prefs {
+    scale: 5,
+    fullscreen: true,
+    six_button: false,
+    volume: 25,
+    muted: true,
+    look: LOOK_CRT,
+  }
+  failed += check_prefs("round trip", parse_prefs(format_prefs(chosen)), chosen)
+  let lenient = parse_prefs(
+    "scale = 9\nvolume = -3\npads = 4\nfullscreen = yes\ncolour = blue\njust words\n= 2\nmuted=true\n  scale   =   2  \ndisplay = vhs\ndisplay=scanlines\n"
+  )
+  failed += check_prefs(
+    "lenient",
+    lenient,
+    Prefs {
+      scale: 2,
+      fullscreen: false,
+      six_button: true,
+      volume: 100,
+      muted: true,
+      look: LOOK_SCANLINES,
+    }
+  )
+  if failed == 0 {
+    println("prefstest: all passed")
+    return 0
+  }
+  println("prefstest: ${failed} failed")
+  1
+}
+
+let check_prefs = (name: string, got: Prefs, want: Prefs) -> i64 => {
+  if got == want { return 0 }
+  println("${name}: got\n${format_prefs(got)}want\n${format_prefs(want)}")
+  1
+}

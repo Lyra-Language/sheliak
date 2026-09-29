@@ -1,8 +1,9 @@
 // sheliak — the emulator in a window: a cartridge ROM run on the Genesis model, its
 // picture shown and its sound played with SDL, the keyboard and gamepads as its pads.
 //
-//   build/sheliak ROM [PART …] [--pads 3]              play
+//   build/sheliak [ROM [PART …]] [--pads 3]            play (no ROM: macOS asks for one)
 //   build/sheliak ROM --frames N [--screenshot FILE] [--ppm FILE] [--wav FILE] [--save]
+//                     [--display pixels|scanlines|crt]
 //                                                      run N frames and quit, saving the
 //                                                      last: as SDL drew the window (BMP),
 //                                                      and as the texels sent to it (PPM,
@@ -14,9 +15,16 @@
 // The pads are 6-button, as most players' are; `--pads 3` makes them the original 3-button
 // pad, which a few early games need (they misread a 6-button one).
 //
+// On macOS a menu bar opens another ROM (⌘O), pauses (⌘P) and resets (⌘R), and sets the
+// pads (3- or 6-button), the window's scale (⌘1–⌘5), full screen (⌃⌘F) and the sound
+// (mute ⇧⌘M, volume), and how the picture looks: sharp pixels, or through a shader on the
+// GPU, scanlines or a CRT (`front/display.lyra`). Those settings are kept between runs
+// (`front/prefs.lyra`); a headless run ignores them, so a comparison never depends on how
+// someone last played — it takes `--pads` and `--display` instead, in a hidden window.
+//
 // Keys (pad 1): arrows; Z, X, C for A, B, C and A, S, D above them for X, Y, Z (the
 // pad's two rows); Return for Start, Q for Mode. Escape quits; F toggles full screen (not
-// F11, which macOS keeps for showing the desktop). A gamepad is a pad too — the first on
+// F11, which macOS keeps for showing the desktop). A key held with ⌘ or ⌃ is the menus'. A gamepad is a pad too — the first on
 // port 1, the second on port 2: d-pad or left stick; the West, South and East face buttons
 // for A, B and C (the Genesis's bottom row, left to right), the left shoulder, North and
 // the right shoulder for X, Y and Z; Start and Back for Start and Mode.
@@ -28,9 +36,10 @@
 // may be in a zip, 7z or RAR 5 archive, whose ROM — or split image's parts — is played.
 //
 // A cartridge with save RAM keeps it in a `.srm` file beside the ROM (the ROM's name, its
-// extension replaced — both of them for `game.smd.zip`, `.7z` or `.rar`): loaded at start, written every ten
-// seconds while the game has changed it, and on quitting — BlastEm's `save.sram` format, a
-// byte per byte of RAM. Headless runs read and write it only when given `--save`.
+// extension replaced — both of them for `game.smd.zip`, `.7z` or `.rar`): loaded at
+// start, written every ten seconds while the game has changed it, and on quitting or opening
+// another ROM — BlastEm's `save.sram` format, a byte per byte of RAM. Headless runs read and
+// write it only when given `--save`.
 
 import std.io.{ read_bytes, write_bytes }
 import std.zip.{ is_zip }
@@ -39,8 +48,11 @@ import std.rar.{ is_rar }
 import std.path
 import bindings.sdl3.{
   init, quit, last_error, INIT_VIDEO, INIT_GAMEPAD,
-  Window, create_window, destroy_window, set_fullscreen, WINDOW_RESIZABLE,
-  Renderer, Rect, rgb, create_renderer, destroy_renderer, set_logical_presentation,
+  Window, create_window, destroy_window, set_fullscreen, set_window_size, set_window_title,
+  WINDOW_RESIZABLE, modifiers, MOD_LGUI, MOD_RGUI, MOD_LCTRL, MOD_RCTRL,
+  Renderer, Rect, rgb, create_renderer, create_named_renderer, destroy_renderer,
+  set_logical_presentation, Effect, create_msl_effect, set_effect_uniforms, use_effect,
+  destroy_effect, WINDOW_HIDDEN,
   PRESENT_INTEGER_SCALE, set_vsync, set_draw_color, clear, present, save_screenshot,
   Texture, create_streaming_texture, update_texture, destroy_texture, draw_texture,
   set_default_scale_mode, SCALE_NEAREST,
@@ -62,6 +74,15 @@ import genesis.{
   PAD_X, PAD_Y, PAD_Z, PAD_MODE,
 }
 import vdp.{ Frame, shown_frame }
+import front.{
+  Prefs, default_prefs, prefs_path, load_prefs, save_prefs, look_uniforms, DISPLAY_SHADER,
+  LOOK_PIXELS, LOOK_SCANLINES, LOOK_CRT,
+}
+import bindings.menubar.{
+  menu, item, separator, window_menu, install, poll_menu, set_checked, set_enabled,
+  choose_file, alert,
+  COMMAND, CONTROL,
+}
 
 /// An NTSC frame: 262 lines of 3420 master clocks at 53.693175 MHz, in nanoseconds.
 const FRAME_NS: i64 = 16688154
@@ -78,18 +99,15 @@ const AUDIO_QUEUE_LIMIT: i64 = 6000
 
 let main = () -> u8 => {
   let args = program_args()
-  if args.len() < 2 {
-    println("usage: sheliak ROM [PART …] [--pads 3] [--frames N] [--screenshot FILE] [--ppm FILE] [--wav FILE] [--save]")
-    return 2
-  }
-  var paths = [args[1]]
+  var paths: []string = []
   var frames_only: i64 = -1
   var screenshot = ""
   var ppm = ""
   var wav = ""
   var headless_save = false
-  var six_button = true
-  var i = 2
+  var pads_arg: Maybe<bool> = None
+  var look_arg: Maybe<string> = None
+  var i = 1
   for i < args.len() {
     if args[i] == "--frames" && i + 1 < args.len() {
       frames_only = parse_count(args[i + 1])
@@ -101,7 +119,10 @@ let main = () -> u8 => {
       ppm = args[i + 1]
       i += 2
     } else if args[i] == "--pads" && i + 1 < args.len() {
-      six_button = args[i + 1] != "3"
+      pads_arg = Some(args[i + 1] != "3")
+      i += 2
+    } else if args[i] == "--display" && i + 1 < args.len() {
+      look_arg = Some(args[i + 1])
       i += 2
     } else if args[i] == "--save" {
       headless_save = true
@@ -117,69 +138,103 @@ let main = () -> u8 => {
       return 2
     }
   }
-  let Some(files) = read_rom_files(paths) else { return 1 }
-  let rom = match rom_image(files) {
-    Ok(image) => image,
-    Err(why) => {
-      println("sheliak: ${args[1]} is ${why}")
-      return 1
-    },
+  if paths.len() == 0 && frames_only >= 0 {
+    println(USAGE)
+    return 2
+  }
+  if let Some(look) = look_arg {
+    if look != LOOK_PIXELS && look != LOOK_SCANLINES && look != LOOK_CRT {
+      println("sheliak: --display is pixels, scanlines or crt, not ${look}")
+      return 2
+    }
+  }
+  let prefs_file = if frames_only >= 0 { None } else { prefs_path() }
+  let prefs = match prefs_file {
+    Some(path) => load_prefs(path),
+    None => default_prefs(),
   }
   if !init(INIT_VIDEO | INIT_GAMEPAD) {
     println("sheliak: SDL_Init failed: ${last_error()}")
     return 1
   }
+  let scale = i32(prefs.scale)
   let Some(window) = create_window(
     "Sheliak",
-    SCREEN_W * 3,
-    SCREEN_H * 3,
-    WINDOW_RESIZABLE
+    SCREEN_W * scale,
+    SCREEN_H * scale,
+    if frames_only >= 0 { WINDOW_HIDDEN } else { WINDOW_RESIZABLE }
   ) else {
     println("sheliak: cannot open a window: ${last_error()}")
     quit()
     return 1
   }
-  let Some(renderer) = create_renderer(window) else {
+  // SDL's GPU renderer, where there is one, is the one a shader can run on.
+  let wants_gpu = frames_only < 0 || look_arg.unwrap_or(LOOK_PIXELS) != LOOK_PIXELS
+  let gpu = if wants_gpu { create_named_renderer(window, "gpu") } else { None }
+  let Some(renderer) = if gpu.is_some() { gpu } else { create_renderer(window) } else {
     println("sheliak: cannot make a renderer: ${last_error()}")
     destroy_window(window)
     quit()
     return 1
   }
+  let effect = if gpu.is_some() { create_msl_effect(renderer, DISPLAY_SHADER, 1) } else { None }
   set_logical_presentation(renderer, SCREEN_W, SCREEN_H, PRESENT_INTEGER_SCALE)
   set_default_scale_mode(renderer, SCALE_NEAREST)
   set_vsync(renderer, frames_only < 0)
-  var cpu = new_cpu()
-  var bus = genesis_bus(rom)
-  set_pads(bus, six_button)
-  power_on(cpu, bus)
-  let save_path = save_file_for(args[1])
-  let saving = frames_only < 0 || headless_save
-  if saving && bus.cart.save.len() > 0 {
-    if let Some(saved) = read_bytes(save_path) { load_save(bus.cart, saved) }
-  }
   let status = if frames_only >= 0 {
-    run_headless(cpu, bus, renderer, frames_only, screenshot, ppm, wav)
+    let display = Display { effect: effect, look: look_arg.unwrap_or(LOOK_PIXELS) }
+    if display.look != LOOK_PIXELS && effect.is_none() {
+      println("sheliak: no GPU shader here, so the picture is sharp pixels")
+    }
+    run_headless(paths, pads_arg.unwrap_or(true), renderer, display, frames_only, screenshot, ppm, wav, headless_save)
   } else {
-    play(cpu, bus, renderer, window, save_path)
+    run_window(paths, pads_arg, look_arg, prefs, prefs_file, renderer, window, effect)
   }
-  if saving { write_save(bus, save_path) }
+  if let Some(e) = effect { destroy_effect(e) }
   destroy_renderer(renderer)
   destroy_window(window)
   quit()
   status
 }
 
+const USAGE: string = "usage: sheliak ROM [PART …] [--pads 3] [--display pixels|scanlines|crt] [--frames N] [--screenshot FILE] [--ppm FILE] [--wav FILE] [--save]"
+
+/// How frames are drawn: through the display shader, where there is one, in a look.
+struct Display {
+  effect: Maybe<Effect>,
+  look: string,
+}
+
+/// A ROM image from its files as given (see [read_rom_files]), or why there is none.
+let load_rom = (paths: []string) -> Result<[]u8, string> => {
+  let files = read_rom_files(paths)?
+  match rom_image(files) {
+    Ok(image) => Ok(image),
+    Err(why) => Err("${paths[0]} is ${why}"),
+  }
+}
+
+/// A machine powered on with a cartridge in it, its save RAM loaded from `save_path` when
+/// `saving` and the cartridge has any.
+let power_up = (rom: []u8, six_button: bool, save_path: string, saving: bool) -> (Cpu, GenesisBus) => {
+  var cpu = new_cpu()
+  var bus = genesis_bus(rom)
+  set_pads(bus, six_button)
+  power_on(cpu, bus)
+  if saving && bus.cart.save.len() > 0 {
+    if let Some(saved) = read_bytes(save_path) { load_save(bus.cart, saved) }
+  }
+  (cpu, bus)
+}
+
 /// The files of a dump, read: those given — a zip, 7z or RAR archive's ROM, or split
-/// image's parts, in its place — and when only the first part of a split SMD image is, the parts after it,
-/// by the names they are guessed to have. `None`, having said why, if one cannot be read.
-let read_rom_files = (paths: []string) -> Maybe<[][]u8> => {
+/// image's parts, in its place — and when only the first part of a split SMD image is, the
+/// parts after it, by the names they are guessed to have. Or why one cannot be read.
+let read_rom_files = (paths: []string) -> Result<[][]u8, string> => {
   var files: [][]u8 = []
   var zipped = false
   for path in paths {
-    let Some(file) = read_bytes(path) else {
-      println("sheliak: cannot read ${path}")
-      return None
-    }
+    let Some(file) = read_bytes(path) else { return Err("${path} cannot be read") }
     if is_zip(file) || is_7z(file) || is_rar(file) {
       zipped = true
       let found = if is_zip(file) {
@@ -191,30 +246,25 @@ let read_rom_files = (paths: []string) -> Maybe<[][]u8> => {
       }
       match found {
         Ok(roms) => for rom in roms { files.push(rom) },
-        Err(why) => {
-          println("sheliak: ${path}: ${why}")
-          return None
-        },
+        Err(why) => return Err("${path}: ${why}"),
       }
     } else {
       files.push(file)
     }
   }
-  if paths.len() > 1 || zipped { return Some(files) }
+  if paths.len() > 1 || zipped { return Ok(files) }
   var path = paths[0]
   for files.len() < MAX_PARTS && is_split_part(files[files.len() - 1]) {
     let Some(next) = next_part_path(path) else {
-      println("sheliak: ${path} is one part of a split SMD image; give its parts in order")
-      return None
+      return Err("${path} is one part of a split SMD image; give its parts in order")
     }
     let Some(file) = read_bytes(next) else {
-      println("sheliak: ${path} is one part of a split SMD image, and its next part, ${next}, cannot be read; give its parts in order")
-      return None
+      return Err("${path} is one part of a split SMD image, and its next part, ${next}, cannot be read; give its parts in order")
     }
     files.push(file)
     path = next
   }
-  Some(files)
+  Ok(files)
 }
 
 /// Parts looked for by name, at most: a guess that goes astray stops here.
@@ -222,9 +272,35 @@ const MAX_PARTS: i64 = 16
 
 /// Run `frames` frames as fast as they go, show the last, and save it if asked.
 let run_headless = (
+  paths: []string,
+  six_button: bool,
+  renderer: Renderer,
+  display: Display,
+  frames: i64,
+  screenshot: string,
+  ppm: string,
+  wav: string,
+  saving: bool
+) -> u8 => {
+  let rom = match load_rom(paths) {
+    Ok(image) => image,
+    Err(why) => {
+      println("sheliak: ${why}")
+      return 1
+    },
+  }
+  let save_path = save_file_for(paths[0])
+  var (cpu, bus) = power_up(rom, six_button, save_path, saving)
+  let status = run_frames(cpu, bus, renderer, display, frames, screenshot, ppm, wav)
+  if saving { write_save(bus, save_path) }
+  status
+}
+
+let run_frames = (
   cpu: mut Cpu,
   bus: mut GenesisBus,
   renderer: Renderer,
+  display: Display,
   frames: i64,
   screenshot: string,
   ppm: string,
@@ -244,7 +320,7 @@ let run_headless = (
     return 1
   }
   var screen = new_screen()
-  show(renderer, screen, shown_frame(bus.vdp))
+  show(renderer, screen, shown_frame(bus.vdp), display)
   let saved = screenshot == "" || save_screenshot(renderer, screenshot)
   present(renderer)
   let dumped = ppm == "" || write_bytes(ppm, texels_ppm(screen))
@@ -272,23 +348,89 @@ let texels_ppm = pure (screen: Screen) -> []u8 => {
   bytes
 }
 
+/// Play in the window: the ROM given, or on macOS one chosen, with the menus the player
+/// steers by. Whatever cannot be played is said, in an alert where there are menus.
+let run_window = (
+  paths: []string,
+  pads_arg: Maybe<bool>,
+  look_arg: Maybe<string>,
+  prefs: Prefs,
+  prefs_file: Maybe<string>,
+  renderer: Renderer,
+  window: Window,
+  effect: Maybe<Effect>
+) -> u8 => {
+  let native = install_menus()
+  var rom_paths = paths
+  if rom_paths.len() == 0 {
+    if !native {
+      println(USAGE)
+      return 2
+    }
+    let Some(chosen) = choose_file("Open a ROM", []) else { return 0 }
+    rom_paths = [chosen]
+  }
+  let rom = match load_rom(rom_paths) {
+    Ok(image) => image,
+    Err(why) => {
+      println("sheliak: ${why}")
+      if native { alert("Sheliak cannot play that file", why) }
+      return 1
+    },
+  }
+  var session = Session {
+    rom_path: rom_paths[0],
+    save_path: save_file_for(rom_paths[0]),
+    prefs: prefs,
+    prefs_file: prefs_file,
+    six_button: pads_arg.unwrap_or(prefs.six_button),
+    paused: false,
+    fullscreen: false,
+    native: native,
+    display: Display { effect: effect, look: look_arg.unwrap_or(prefs.look) },
+  }
+  var (cpu, bus) = power_up(rom, session.six_button, session.save_path, true)
+  if prefs.fullscreen { toggle_fullscreen(session, window) }
+  show_state(session, window)
+  play(cpu, bus, session, renderer, window)
+  write_save(bus, session.save_path)
+  0
+}
+
+/// What the menus act on besides the machine: the ROM being played and its save file, the
+/// player's preferences, this run's pads (a `--pads` argument's, until the menu changes
+/// them), and whether it is paused or full screen.
+struct Session {
+  rom_path: string,
+  save_path: string,
+  prefs: Prefs,
+  prefs_file: Maybe<string>,
+  six_button: bool,
+  paused: bool,
+  fullscreen: bool,
+  native: bool,
+  /// How frames are drawn: the look is this run's (a `--display` argument's, until the menu
+  /// changes it).
+  display: Display,
+}
+
 /// Play until the window closes or Escape: frames run at the console's rate — however many
 /// are due since the last look, so a display faster or slower than 59.92 Hz neither speeds
-/// the game up nor slows it down — and the latest shown.
+/// the game up nor slows it down — and the latest shown. Paused, none run and none are
+/// owed.
 let play = (
   cpu: mut Cpu,
   bus: mut GenesisBus,
+  session: mut Session,
   renderer: Renderer,
-  window: Window,
-  save_path: string
-) -> u8 => {
+  window: Window
+) -> void => {
   var frames_since_save: i64 = 0
   var screen = new_screen()
   var mixer = new_mixer(AUDIO_RATE)
   // No audio device (or none SDL can open) is no sound, not no emulator.
   let stream = if init(INIT_AUDIO) { open_audio(i32(AUDIO_RATE), 2) } else { None }
   var pads: []Gamepad = []
-  var fullscreen = false
   var last = i64(ticks_ns())
   var owed: i64 = 0
   var running = true
@@ -298,11 +440,10 @@ let play = (
       match event {
         Quit => { running = false },
         KeyDown(key) => {
-          if key == KEY_ESCAPE { running = false }
-          if key == KEY_F {
-            fullscreen = !fullscreen
-            set_fullscreen(window, fullscreen)
-          }
+          // ⌘ and ⌃ keys are the menus', which have them too.
+          let menu_key = (modifiers() & (MOD_LGUI | MOD_RGUI | MOD_LCTRL | MOD_RCTRL)) != 0
+          if !menu_key && key == KEY_ESCAPE { running = false }
+          if !menu_key && key == KEY_F { toggle_fullscreen(session, window) }
         },
         GamepadAdded(id) => {
           if let Some(pad) = open_gamepad(id) { pads.push(pad) }
@@ -311,34 +452,187 @@ let play = (
         _ => {},
       }
     }
+    for {
+      let Some(tag) = poll_menu() else { break }
+      if tag == MENU_OPEN {
+        if let Some((new_cpu, new_bus)) = open_rom(bus, session) {
+          cpu = new_cpu
+          bus = new_bus
+          frames_since_save = 0
+        }
+      } else if tag == MENU_RESET {
+        power_on(cpu, bus)
+      } else {
+        on_menu(bus, session, window, tag)
+      }
+      show_state(session, window)
+    }
     bus.pads[0] = keyboard_buttons() | (if pads.len() > 0 { gamepad_buttons(pads[0]) } else { 0 })
     bus.pads[1] = if pads.len() > 1 { gamepad_buttons(pads[1]) } else { 0 }
     let now = i64(ticks_ns())
     owed += now - last
     last = now
-    // After a stall (a window drag, a breakpoint) the lost time is forgiven, not raced.
-    if owed > 4 * FRAME_NS { owed = FRAME_NS }
-    for owed >= FRAME_NS {
-      run_frame(cpu, bus)
-      owed -= FRAME_NS
-      frames_since_save += 1
+    // After a stall (a window drag, a breakpoint, a pause) the lost time is forgiven, not
+    // raced.
+    if owed > 4 * FRAME_NS || session.paused { owed = FRAME_NS }
+    if !session.paused {
+      for owed >= FRAME_NS {
+        run_frame(cpu, bus)
+        owed -= FRAME_NS
+        frames_since_save += 1
+      }
     }
     if frames_since_save >= 600 {
-      write_save(bus, save_path)
+      write_save(bus, session.save_path)
       frames_since_save = 0
     }
     let samples = mix_audio(bus, mixer)
+    let volume = if session.prefs.muted { 0 } else { session.prefs.volume }
     if let Some(s) = stream {
-      if queued_frames(s) < AUDIO_QUEUE_LIMIT { put_audio(s, samples) }
+      if !session.paused && volume > 0 && queued_frames(s) < AUDIO_QUEUE_LIMIT {
+        let gain = f32(volume) / 100.0
+        put_audio(s, if volume == 100 { samples } else { samples.map((v) => v * gain) })
+      }
     }
-    show(renderer, screen, shown_frame(bus.vdp))
+    show(renderer, screen, shown_frame(bus.vdp), session.display)
     present(renderer)
   }
   for pad in pads { close_gamepad(pad) }
   if let Some(s) = stream { close_audio(s) }
   release_screen(screen)
-  0
 }
+
+// ── The menus ────────────────────────────────────────────────────────────────
+
+/// The menu items' tags.
+const MENU_OPEN: i32 = 1
+const MENU_PAUSE: i32 = 2
+const MENU_RESET: i32 = 3
+const MENU_PADS_6: i32 = 4
+const MENU_PADS_3: i32 = 5
+const MENU_FULL_SCREEN: i32 = 6
+const MENU_MUTE: i32 = 7
+/// 11 to 15: the window at 1× to 5×.
+const MENU_SCALE: i32 = 10
+/// 21 to 24: the volume at 25% to 100%.
+const MENU_VOLUME: i32 = 20
+/// 31 to 33: sharp pixels, scanlines, a CRT.
+const MENU_LOOK: i32 = 30
+const LOOKS: [3]string = #[LOOK_PIXELS, LOOK_SCANLINES, LOOK_CRT]
+
+/// The menu bar, on macOS; whether there is one.
+let install_menus = () -> bool => {
+  menu("File")
+  item("Open ROM…", "o", COMMAND, MENU_OPEN)
+  menu("Emulation")
+  item("Pause", "p", COMMAND, MENU_PAUSE)
+  item("Reset", "r", COMMAND, MENU_RESET)
+  separator()
+  item("6-Button Pads", "", 0, MENU_PADS_6)
+  item("3-Button Pads", "", 0, MENU_PADS_3)
+  menu("Video")
+  for n in 1..<=5 { item("${n}×", "${n}", COMMAND, MENU_SCALE + i32(n)) }
+  separator()
+  item("Sharp Pixels", "", 0, MENU_LOOK + 1)
+  item("Scanlines", "", 0, MENU_LOOK + 2)
+  item("CRT", "", 0, MENU_LOOK + 3)
+  separator()
+  item("Full Screen", "f", COMMAND | CONTROL, MENU_FULL_SCREEN)
+  menu("Sound")
+  item("Mute", "M", COMMAND, MENU_MUTE)
+  separator()
+  for k in 1..<=4 { item("${25 * k}%", "", 0, MENU_VOLUME + i32(k)) }
+  window_menu()
+  install("Sheliak")
+}
+
+/// A menu item's choice, beyond the three that replace or restart the machine.
+let on_menu = (bus: mut GenesisBus, session: mut Session, window: Window, tag: i32) -> void => {
+  if tag == MENU_PAUSE {
+    session.paused = !session.paused
+  } else if tag == MENU_PADS_6 || tag == MENU_PADS_3 {
+    session.six_button = tag == MENU_PADS_6
+    set_pads(bus, session.six_button)
+    session.prefs.six_button = session.six_button
+    keep_prefs(session)
+  } else if tag == MENU_FULL_SCREEN {
+    toggle_fullscreen(session, window)
+  } else if tag == MENU_MUTE {
+    session.prefs.muted = !session.prefs.muted
+    keep_prefs(session)
+  } else if tag > MENU_SCALE && tag <= MENU_SCALE + 5 {
+    session.prefs.scale = i64(tag - MENU_SCALE)
+    let scale = i32(session.prefs.scale)
+    set_window_size(window, SCREEN_W * scale, SCREEN_H * scale)
+    keep_prefs(session)
+  } else if tag > MENU_LOOK && tag <= MENU_LOOK + 3 {
+    session.display.look = LOOKS[i64(tag - MENU_LOOK - 1)]
+    session.prefs.look = session.display.look
+    keep_prefs(session)
+  } else if tag > MENU_VOLUME && tag <= MENU_VOLUME + 4 {
+    session.prefs.volume = 25 * i64(tag - MENU_VOLUME)
+    session.prefs.muted = false
+    keep_prefs(session)
+  }
+}
+
+/// Another ROM, chosen in the Open panel and powered up in place of this one, whose save
+/// RAM is written first — or nothing, if the panel is cancelled or the file will not play
+/// (which an alert says).
+let open_rom = (bus: mut GenesisBus, session: mut Session) -> Maybe<(Cpu, GenesisBus)> => {
+  let Some(path) = choose_file("Open a ROM", []) else { return None }
+  let rom = match load_rom([path]) {
+    Ok(image) => image,
+    Err(why) => {
+      alert("Sheliak cannot play that file", why)
+      return None
+    },
+  }
+  write_save(bus, session.save_path)
+  session.rom_path = path
+  session.save_path = save_file_for(path)
+  session.paused = false
+  Some(power_up(rom, session.six_button, session.save_path, true))
+}
+
+let toggle_fullscreen = (session: mut Session, window: Window) -> void => {
+  session.fullscreen = !session.fullscreen
+  set_fullscreen(window, session.fullscreen)
+  session.prefs.fullscreen = session.fullscreen
+  keep_prefs(session)
+  show_state(session, window)
+}
+
+/// The preferences saved, where there is somewhere to save them.
+let keep_prefs = (session: ref Session) -> void => {
+  if let Some(path) = session.prefs_file {
+    if !save_prefs(path, session.prefs) { println("sheliak: cannot write ${path}") }
+  }
+}
+
+/// The menus' checkmarks and the window's title, as the session now is.
+let show_state = (session: ref Session, window: Window) -> void => {
+  let name = session.rom_path.base()
+  let title = if session.paused { "${name} — Paused" } else { name }
+  set_window_title(window, title)
+  if !session.native { return }
+  set_checked(MENU_PAUSE, session.paused)
+  set_checked(MENU_PADS_6, session.six_button)
+  set_checked(MENU_PADS_3, !session.six_button)
+  for n in 1..<=5 { set_checked(MENU_SCALE + i32(n), session.prefs.scale == n) }
+  set_checked(MENU_FULL_SCREEN, session.fullscreen)
+  set_checked(MENU_MUTE, session.prefs.muted)
+  for k in 1..<=4 { set_checked(MENU_VOLUME + i32(k), !session.prefs.muted && session.prefs.volume == 25 * k) }
+  let shaded = session.display.effect.is_some()
+  for k in 1..<=3 {
+    set_checked(MENU_LOOK + i32(k), shown_look(session.display) == LOOKS[k - 1])
+    if k > 1 { set_enabled(MENU_LOOK + i32(k), shaded) }
+  }
+}
+
+/// The look frames are drawn in: sharp pixels without a shader to draw any other.
+let shown_look = pure (display: ref Display) -> string =>
+  if display.effect.is_some() { display.look } else { LOOK_PIXELS }
 
 // ── Saves ────────────────────────────────────────────────────────────────────
 
@@ -426,9 +720,9 @@ let release_screen = (screen: Screen) -> void => {
   if let Some(texture) = screen.texture { destroy_texture(texture) }
 }
 
-/// Draw `frame` over the whole logical screen, a new texture made first if its size
-/// changed.
-let show = (renderer: Renderer, screen: mut Screen, frame: Frame) -> void => {
+/// Draw `frame` over the whole logical screen — through the display shader, in its look,
+/// unless the look is sharp pixels — a new texture made first if its size changed.
+let show = (renderer: Renderer, screen: mut Screen, frame: Frame, display: ref Display) -> void => {
   if frame.width != screen.width || frame.height != screen.height {
     if let Some(old) = screen.texture { destroy_texture(old) }
     screen.texture = create_streaming_texture(renderer, frame.width, frame.height)
@@ -443,7 +737,15 @@ let show = (renderer: Renderer, screen: mut Screen, frame: Frame) -> void => {
   update_texture(texture, screen.texels)
   let whole = Rect { x: 0.0, y: 0.0, w: f32(frame.width), h: f32(frame.height) }
   let screen_rect = Rect { x: 0.0, y: 0.0, w: f32(SCREEN_W), h: f32(SCREEN_H) }
+  let look = shown_look(display)
+  if let Some(effect) = display.effect {
+    if look != LOOK_PIXELS {
+      set_effect_uniforms(effect, 0, look_uniforms(look, frame.width, frame.height))
+      use_effect(renderer, Some(effect))
+    }
+  }
   draw_texture(renderer, texture, whole, screen_rect)
+  if look != LOOK_PIXELS { use_effect(renderer, None) }
 }
 
 /// The DAC's 15 measured levels: a component c (0–7) is level 2c at normal intensity, c in

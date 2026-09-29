@@ -17,12 +17,14 @@ product name.
 ```bash
 ../lyra/build.sh            # the compiler, with std/ beside it
 ./build.sh                  # -> build/: sheliak, cputest, legaltest, scenariotest, vdproms,
-                            #    vdpcheck, padtest, romtest
+                            #    vdpcheck, padtest, romtest, prefstest
 build/sheliak ROM           # play: arrows, Z/X/C = A/B/C, A/S/D = X/Y/Z, Return = Start,
                             #    Q = Mode, F = full screen, Escape; gamepads on ports 1 and 2;
-                            #    --pads 3 for 3-button pads
+                            #    --pads 3 for 3-button pads; no ROM: macOS asks for one; the
+                            #    menu bar sets the rest, kept in the preferences
 SDL_VIDEODRIVER=dummy build/sheliak ROM --frames 600 --screenshot out.bmp   # headless
-                            #    (--wav FILE: the sound; --save: use the .srm too)
+                            #    (--wav FILE: the sound; --save: use the .srm too;
+                            #    --display crt, without the dummy driver: the shader's frame)
 tests/fetch.sh              # SingleStepTests 68000 suite -> build/deps/680x0 (~200 MB, once)
 tests/cpu.sh                # every 68000 test file (~1M tests, ~17 s)
 tests/cpu.sh MOVE.l DIVS    # just these
@@ -39,6 +41,7 @@ tests/vdp.sh                # VDP test ROMs on Sheliak and BlastEm, compared (ne
 tests/vdp.sh fill copy      # just these
 build/padtest               # the pads, buttons held, through the bus
 build/romtest               # ROM files read: raw, SMD, split SMD, MGD, zipped; part names
+build/prefstest             # the preferences file read (leniently) and written
 ```
 
 ## Accuracy Target
@@ -61,6 +64,16 @@ frame-at-a-time shortcuts from the start:
 - **Out of scope unless decided otherwise**: Sega CD, 32X; the SVP (Virtua Racing) is late.
 
 ## Rules
+
+- **A headless run ignores the preferences**: its pads and look are `--pads` and
+  `--display`, never how someone last played, so a comparison cannot depend on it. It runs
+  in a hidden window; under `SDL_VIDEODRIVER=dummy` there is no GPU renderer and the look
+  is always sharp pixels (`--ppm` is the texels before any look either way).
+- **The display shader is Metal, fed as SDL's GPU renderer feeds it** (`front/display.lyra`,
+  `bindings/sdl3/effect.lyra`): `main0`, colour and texture coordinate at `user(locn0/1)`,
+  texture and sampler 0, `Params` at `buffer(0)` in `look_uniforms`' order. Checked by
+  rendering in a hidden window (`--display crt --screenshot`) and looking; nothing compares
+  it, since a look is a matter of taste, not accuracy.
 
 - **A chip is a module; a console is a composition** (`../vega/CLAUDE.md`'s rule): the Z80
   and SN76489 written here are the Master System's and Game Gear's too.
@@ -208,7 +221,12 @@ Module paths resolve under `src/` (the entry file's directory), so entry points 
 
 ```
 src/sheliak.lyra     the emulator in an SDL window: frames paced to 59.92 Hz, the picture
-                     through the DAC's levels, keyboard and gamepads as pads 1 and 2
+                     through the DAC's levels, keyboard and gamepads as pads 1 and 2; the
+                     macOS menu bar (open, pause, reset, pads, scale, look, sound)
+src/front/           the front end's pieces (module front):
+  prefs.lyra         the preferences, kept between runs as `key = value` lines
+  display.lyra       the looks — sharp pixels, scanlines, a CRT — and their Metal shader
+src/prefstest.lyra   the preferences file read and written
 src/padtest.lyra     the controller ports with buttons held, read through the bus
 src/romtest.lyra     ROM files as dumped (raw, SMD, split SMD, MGD) read back as images;
                      the names a split image's next part is looked for by; a zip's ROM
@@ -344,11 +362,15 @@ sound and all, takes ~4.7 ms. **Not yet**: the YM2612's test registers; a mix ch
 against a real console.
 
 **The front end runs a cartridge in a window** (`build/sheliak`), and `tests/vdp.sh` holds
-its picture to BlastEm's too: the texels it sends the window (`--ppm`), byte for byte against
-the screenshot, so its colour conversion is checked, not only the VDP's output. Raw, SMD, split
-SMD and MGD ROM images, bare or in zip, 7z or RAR 5 archives, two 6-button pads (3 with `--pads 3`; the protocol matched against BlastEm
-with nothing held, `pads` and `pads6`; with buttons held, `build/padtest`), frames paced to
-the console's 59.92 Hz whatever the display's rate, ~4.7 ms a frame with sound on an M-series Mac. **Cartridges**: the ROM mirrored at its
+its picture to BlastEm's too: the texels it sends the window (`--ppm`), byte for byte
+against the screenshot, so its colour conversion is checked, not only the VDP's output.
+Raw, SMD, split SMD and MGD ROM images, bare or in zip, 7z or RAR 5 archives, two 6-button
+pads (3 with `--pads 3`; the protocol matched against BlastEm with nothing held, `pads` and
+`pads6`; with buttons held, `build/padtest`), frames paced to the console's 59.92 Hz
+whatever the display's rate, ~4.7 ms a frame with sound on an M-series Mac. On macOS, a
+**menu bar** opens a ROM (a native Open panel), pauses and resets, and sets the pads, the
+window's scale, full screen, the sound and the **look** — sharp pixels, or scanlines or a
+CRT through a Metal shader on SDL's GPU renderer — all kept between runs. **Cartridges**: the ROM mirrored at its
 size, save RAM (odd, even or both buses; past the ROM or through the Sega mapper, with
 write-protect), the SSF2 bank mapper, and save files beside the ROM. **Not yet**: serial
 EEPROM saves (the cartridges that carry one are known only by a database), lock-on and

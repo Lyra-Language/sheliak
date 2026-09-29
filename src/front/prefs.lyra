@@ -1,0 +1,101 @@
+module front
+//! The player's preferences, kept between runs: the window's scale, full screen, the kind of
+//! pad, the sound's volume and whether it is muted, and how the picture looks.
+//!
+//! **A text file of `key = value` lines**, read leniently: a key it does not know, a line it
+//! cannot read and a value out of range are passed over, and the default stands. A file
+//! from a later Sheliak, or one edited by hand, is never a reason not to start. Written
+//! whole after every change.
+//!
+//! **Where**: `~/Library/Application Support/Sheliak/preferences` where that folder exists
+//! (macOS), `~/.config/sheliak/preferences` otherwise.
+
+import std.env.{ lookup }
+import std.io.{ read_file, write_file, read_dir, create_dir_all }
+
+pub struct Prefs {
+  /// The window, as a multiple of the 320×224 screen: 1 to 5.
+  scale: i64,
+  fullscreen: bool,
+  six_button: bool,
+  /// 0 to 100.
+  volume: i64,
+  muted: bool,
+  /// One of `display.lyra`'s looks.
+  look: string,
+}
+
+pub let default_prefs = pure () -> Prefs => Prefs {
+  scale: 3,
+  fullscreen: false,
+  six_button: true,
+  volume: 100,
+  muted: false,
+  look: LOOK_PIXELS,
+}
+
+/// Preferences from a file's text, each line that says something valid taking effect.
+pub let parse_prefs = pure (text: string) -> Prefs => {
+  var prefs = default_prefs()
+  for line in text.lines() {
+    let parts = line.split("=")
+    if parts.len() != 2 { continue }
+    let key = parts[0].trim()
+    let value = parts[1].trim()
+    if key == "scale" {
+      if let Some(n) = value.parse_i64() {
+        if n >= 1 && n <= 5 { prefs.scale = n }
+      }
+    } else if key == "volume" {
+      if let Some(n) = value.parse_i64() {
+        if n >= 0 && n <= 100 { prefs.volume = n }
+      }
+    } else if key == "pads" {
+      if value == "3" { prefs.six_button = false }
+      if value == "6" { prefs.six_button = true }
+    } else if key == "fullscreen" {
+      if let Some(b) = flag(value) { prefs.fullscreen = b }
+    } else if key == "muted" {
+      if let Some(b) = flag(value) { prefs.muted = b }
+    } else if key == "display" {
+      if value == LOOK_PIXELS || value == LOOK_SCANLINES || value == LOOK_CRT { prefs.look = value }
+    }
+  }
+  prefs
+}
+
+/// Preferences as a file's text.
+pub let format_prefs = pure (prefs: ref Prefs) -> string => {
+  let pads = if prefs.six_button { 6 } else { 3 }
+  "scale = ${prefs.scale}\nfullscreen = ${prefs.fullscreen}\npads = ${pads}\nvolume = ${prefs.volume}\nmuted = ${prefs.muted}\ndisplay = ${prefs.look}\n"
+}
+
+/// Where the preferences live, or `None` without a home directory to put them in.
+pub let prefs_path = () -> Maybe<string> => {
+  let Some(home) = lookup("HOME") else { return None }
+  let support = "${home}/Library/Application Support"
+  if read_dir(support).is_some() { return Some("${support}/Sheliak/preferences") }
+  Some("${home}/.config/sheliak/preferences")
+}
+
+/// The preferences saved at `path`, or the defaults if there are none.
+pub let load_prefs = (path: string) -> Prefs => match read_file(path) {
+  Some(text) => parse_prefs(text),
+  None => default_prefs(),
+}
+
+/// The preferences written to `path`, its folder made if need be; whether that worked.
+pub let save_prefs = (path: string, prefs: ref Prefs) -> bool => {
+  var slash: i64 = -1
+  for i, c in path {
+    if c == '/' { slash = i }
+  }
+  if slash > 0 && !create_dir_all(path.slice(0, slash)) { return false }
+  write_file(path, format_prefs(prefs))
+}
+
+let flag = pure (value: string) -> Maybe<bool> => {
+  if value == "true" { return Some(true) }
+  if value == "false" { return Some(false) }
+  None
+}

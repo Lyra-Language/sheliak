@@ -1,0 +1,78 @@
+module front
+//! How the picture is shown: sharp pixels, as the console drew them, or through a shader on
+//! the GPU that recalls a television — scanlines alone, or a CRT's scanlines, aperture
+//! grille, curvature and vignette.
+//!
+//! **One shader, a look's numbers as its uniforms** ([look_uniforms]). It is Metal Shading
+//! Language, run by SDL's GPU renderer (`bindings.sdl3`'s effects); where there is none of
+//! either, only sharp pixels are offered.
+//!
+//! **Scanlines follow the console's lines, not the display's**: each frame line is
+//! brightest at its centre and darkest where it meets the next, so they stay one per line
+//! at any scale. The grille is the display's own pixels, red, green and blue in turn.
+
+/// The looks, as the preferences file names them.
+pub const LOOK_PIXELS: string = "pixels"
+pub const LOOK_SCANLINES: string = "scanlines"
+pub const LOOK_CRT: string = "crt"
+
+/// A look's shader uniforms for a frame `width` × `height`: the frame's size, then the
+/// strength of the scanlines, the grille, the curvature and the vignette, and the
+/// brightness that makes up for the light they take — the shader's `Params`, in order.
+pub let look_uniforms = pure (look: string, width: i64, height: i64) -> []f32 => {
+  let size: []f32 = [f32(width), f32(height)]
+  let rest: []f32 = if look == LOOK_CRT {
+    [0.55, 0.3, 0.035, 0.35, 1.3, 0.0]
+  } else {
+    [0.5, 0.0, 0.0, 0.0, 1.2, 0.0]
+  }
+  [...size, ...rest]
+}
+
+/// The shader, for SDL's GPU renderer on Metal (see `bindings/sdl3/effect.lyra` for what
+/// SDL hands it).
+pub const DISPLAY_SHADER: string = `#include <metal_stdlib>
+using namespace metal;
+
+struct Params {
+  float2 source;
+  float scanlines;
+  float grille;
+  float curvature;
+  float vignette;
+  float brightness;
+  float unused;
+};
+
+struct In {
+  float4 position [[position]];
+  float4 color [[user(locn0)]];
+  float2 uv [[user(locn1)]];
+};
+
+fragment float4 main0(In in [[stage_in]], constant Params& p [[buffer(0)]],
+                      texture2d<float> frame [[texture(0)]], sampler pixels [[sampler(0)]]) {
+  // Curvature: the picture drawn from further out the further from the centre.
+  float2 centred = in.uv * 2.0 - 1.0;
+  centred *= 1.0 + p.curvature * dot(centred, centred);
+  float2 uv = centred * 0.5 + 0.5;
+  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+    return float4(0.0, 0.0, 0.0, 1.0);
+  }
+  float4 texel = frame.sample(pixels, uv) * in.color;
+  float3 rgb = texel.rgb;
+  // Each frame line brightest at its centre, falling to 1 - scanlines at the gap.
+  float line = fract(uv.y * p.source.y) - 0.5;
+  rgb *= 1.0 - p.scanlines * (1.0 - cos(line * 2.0 * M_PI_F)) * 0.5;
+  // An aperture grille: the display's columns favour red, green and blue in turn.
+  int column = int(in.position.x) % 3;
+  float3 stripe = column == 0 ? float3(1.0, 0.7, 0.7)
+                : column == 1 ? float3(0.7, 1.0, 0.7)
+                              : float3(0.7, 0.7, 1.0);
+  rgb *= mix(float3(1.0), stripe, p.grille);
+  // Darker towards the corners.
+  float2 edge = uv * (1.0 - uv);
+  rgb *= mix(1.0, saturate(edge.x * edge.y * 24.0), p.vignette);
+  return float4(saturate(rgb * p.brightness), texel.a);
+}
+`
