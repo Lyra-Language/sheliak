@@ -1,0 +1,203 @@
+module genesis
+//! The cartridge: its ROM, its save RAM, and the Sega mapper some carry — what the 68000
+//! sees at 000000–3FFFFF and at the mapper's registers, A130F1–A130FF.
+//!
+//! **Told apart by the header**, as BlastEm tells them (its romdb.c's heuristics; the
+//! comparison is `tests/vdp.sh`'s cartridge ROMs):
+//!
+//! - **The ROM** ends where the header's ROM end (1A4) says — or the file's size, if that is
+//!   longer — and is mirrored through 4 MB at its size rounded up to a power of two.
+//! - **Save RAM** is declared by "RA" at 1B0, its bus at 1B2 (bits 4–3: 11 the odd bytes,
+//!   10 the even, 00 both) and its first and last addresses at 1B4 and 1B8. On one bus it
+//!   holds a byte per two addresses, the other half reading FF. Past the ROM's end it is
+//!   mapped for good; over the ROM (a ROM of more than 2 MB) it is the Sega mapper's to
+//!   switch in, at 200000–3FFFFF: register A130F1's bit 0 maps it for reading, and writes
+//!   reach it only with bit 1 (protect) clear.
+//! - **The SSF2 mapper**: a file of more than 4 MB whose header says 4 MB or less. Region
+//!   0 (000000–07FFFF) is fixed; A130F3, F5 … FF choose the 512 KB bank each of regions 1–7
+//!   shows, from power-on showing their own. A130F1's bit 0 there maps save RAM over regions
+//!   4–7 instead.
+//!
+//! **Not here**: the serial EEPROMs some cartridges carry (no header declares them — BlastEm
+//! finds them in a database), the lock-on and unlicensed mappers. The Z80's bank window
+//! reads the ROM as it lies, not through the mapper.
+
+/// Save RAM's buses.
+pub const SAVE_NONE: u8 = 0
+pub const SAVE_ODD: u8 = 1
+pub const SAVE_EVEN: u8 = 2
+pub const SAVE_BOTH: u8 = 3
+
+/// The mappers.
+const PLAIN: u8 = 0
+const SEGA_SRAM: u8 = 1
+const SSF2: u8 = 2
+
+pub struct Cartridge {
+  rom: []u8,
+  /// The ROM mirrors at `rom_mask + 1`, and is mapped below `rom_limit`.
+  rom_mask: i64,
+  rom_limit: i64,
+  /// The SSF2 mapper's banks wrap at the ROM's size rounded up to a power of two.
+  bank_mask: i64,
+  mapper: u8,
+  /// The mapper's registers: 0 the save RAM control, 1–7 the regions' banks.
+  banks: [8]u8,
+  /// Save RAM: its bus, where it starts and its address mask, its bytes (one per address
+  /// on one bus, two per word on both), and whether it has been written since last saved.
+  save_bus: u8,
+  save_start: i64,
+  save_mask: i64,
+  save: []u8,
+  save_dirty: bool,
+}
+
+/// A cartridge from a ROM image, its header read.
+pub let new_cartridge = pure (rom: []u8) -> Cartridge => {
+  let size = rom.len()
+  var rom_end = header_long(rom, 0x1A4) + 1
+  let header_end = rom_end
+  if size > rom_end {
+    rom_end = size
+  } else if rom_end > power_of_two(size) {
+    rom_end = power_of_two(size)
+  }
+  var cart = Cartridge {
+    rom: rom,
+    rom_mask: if rom_end < 0x400000 { power_of_two(rom_end) - 1 } else { 0xFFFFFF },
+    rom_limit: 0x400000,
+    bank_mask: power_of_two(size) - 1,
+    mapper: PLAIN,
+    banks: #[0, 1, 2, 3, 4, 5, 6, 7],
+    save_bus: SAVE_NONE,
+    save_start: 0,
+    save_mask: 0,
+    save: [],
+    save_dirty: false,
+  }
+  let has_save = size >= 0x1BC && rom[0x1B0] == 0x52 && rom[0x1B1] == 0x41
+  if has_save {
+    let declared = declared_save(rom)
+    cart.save_bus = declared.bus
+    cart.save_start = declared.start
+    cart.save_mask = declared.mask
+    cart.save = declared.bytes
+  }
+  if size > 0x400000 && header_end <= 0x400000 {
+    cart.mapper = SSF2
+    return cart
+  }
+  if !has_save { return cart }
+  if cart.save_start >= 0x800000 {
+    cart.save_bus = SAVE_NONE
+    return cart
+  }
+  if cart.save_start >= rom_end {
+    let top = if rom_end < 0x400000 { power_of_two(rom_end) - 1 } else { 0xFFFFFF }
+    cart.rom_limit = if top > cart.save_start { cart.save_start } else { top + 1 }
+  } else {
+    cart.mapper = SEGA_SRAM
+  }
+  cart
+}
+
+/// Save RAM as a header declares it.
+struct SaveRam {
+  bus: u8,
+  start: i64,
+  mask: i64,
+  bytes: []u8,
+}
+
+/// The save RAM the header declares: its bus, range and (zeroed) bytes — none for a range
+/// beyond the 68000's cartridge space.
+let declared_save = pure (rom: []u8) -> SaveRam => {
+  let flags = rom[0x1B2] & 0x18
+  let bus = if flags == 0x18 { SAVE_ODD } else if flags == 0x10 { SAVE_EVEN } else { SAVE_BOTH }
+  let start = header_long(rom, 0x1B4) & 0xFFFFFE
+  let mask = (header_long(rom, 0x1B8) | 1) - start
+  let size = if bus == SAVE_BOTH { mask + 1 } else { (mask + 1) / 2 }
+  let bytes: []u8 = if start < 0x800000 && size > 0 && size <= 0x100000 { [0; size] } else { [] }
+  SaveRam { bus: bus, start: start, mask: mask, bytes: bytes }
+}
+
+/// A byte of 000000–3FFFFF as the 68000 reads it.
+pub let cart_read = pure (cart: ref Cartridge, a: i64) -> u8 => {
+  if cart.save.len() > 0 && save_mapped(cart, a) { return save_read(cart, a) }
+  if a >= cart.rom_limit { return 0xFF }
+  var at = a & cart.rom_mask
+  if cart.mapper == SSF2 && (a >> 19) != 0 {
+    // A region's bank, within the ROM's size rounded up to a power of two.
+    at = ((i64(cart.banks[a >> 19]) << 19) & cart.bank_mask) | (a & 0x7FFFF)
+  }
+  if at < cart.rom.len() { cart.rom[at] } else { 0 }
+}
+
+/// A byte the 68000 writes to 000000–3FFFFF: only save RAM takes it.
+pub let cart_write = (cart: mut Cartridge, a: i64, value: u8) -> void => {
+  if cart.save.len() == 0 || !save_mapped(cart, a) { return }
+  if cart.mapper != PLAIN && (cart.banks[0] & 3) != 1 { return }
+  let offset = (a - cart.save_start) & cart.save_mask
+  let at = match cart.save_bus {
+    1 => if (offset & 1) == 1 { offset >> 1 } else { -1 },
+    2 => if (offset & 1) == 0 { offset >> 1 } else { -1 },
+    _ => offset,
+  }
+  if at >= 0 && at < cart.save.len() {
+    cart.save[at] = value
+    cart.save_dirty = true
+  }
+}
+
+/// A byte written to the mapper's registers, A130F0–A130FF: on the odd addresses, the
+/// register (address & 0E) / 2.
+pub let cart_register = (cart: mut Cartridge, a: i64, value: u8) -> void => {
+  if cart.mapper == PLAIN || (a & 1) == 0 { return }
+  let r = (a & 0x0E) >> 1
+  if r == 0 || cart.mapper == SSF2 { cart.banks[r] = value }
+}
+
+/// Whether save RAM, rather than ROM, answers at `a`: past the ROM for good, or where the
+/// mapper has switched it in.
+let save_mapped = pure (cart: ref Cartridge, a: i64) -> bool => {
+  match cart.mapper {
+    0 => a >= cart.save_start && a <= cart.save_start + cart.save_mask,
+    1 => a >= 0x200000 && (cart.banks[0] & 1) != 0,
+    _ => a >= 0x200000 && (cart.banks[0] & 1) != 0,
+  }
+}
+
+/// A byte of save RAM: on one bus, the other half of each word reads FF.
+let save_read = pure (cart: ref Cartridge, a: i64) -> u8 => {
+  let offset = (a - cart.save_start) & cart.save_mask
+  let at = match cart.save_bus {
+    1 => if (offset & 1) == 1 { offset >> 1 } else { -1 },
+    2 => if (offset & 1) == 0 { offset >> 1 } else { -1 },
+    _ => offset,
+  }
+  if at >= 0 && at < cart.save.len() { cart.save[at] } else { 0xFF }
+}
+
+/// Save RAM's bytes, as a save file holds them (BlastEm's `save.sram` too): one per byte of
+/// RAM, in address order.
+pub let save_bytes = pure (cart: ref Cartridge) -> []u8 => cart.save
+
+/// Save RAM restored from a save file; a file of another size is not this cartridge's and
+/// is ignored.
+pub let load_save = (cart: mut Cartridge, bytes: []u8) -> bool => {
+  if bytes.len() != cart.save.len() || bytes.len() == 0 { return false }
+  cart.save = bytes
+  cart.save_dirty = false
+  true
+}
+
+let header_long = pure (rom: []u8, at: i64) -> i64 => {
+  if at + 3 >= rom.len() { return 0 }
+  (i64(rom[at]) << 24) | (i64(rom[at + 1]) << 16) | (i64(rom[at + 2]) << 8) | i64(rom[at + 3])
+}
+
+let power_of_two = pure (n: i64) -> i64 => {
+  var p: i64 = 1
+  for p < n { p = p * 2 }
+  p
+}

@@ -7,7 +7,8 @@ module genesis
 //! RAM at E00000–FFFFFF (64 KB, mirrored), the VDP at C00000–C0001F, the I/O chip with two
 //! 3-button pads (`io.lyra`), the Z80 and its side of the machine (`sound.lyra`), and the
 //! TMSS register taking its write. No wait states, no sound chips, no cartridge hardware
-//! (SRAM, mappers) yet.
+//! (EEPROM, lock-on) yet — the cartridge's ROM, save RAM and Sega mapper are
+//! `cartridge.lyra`'s.
 //!
 //! **Time is the master clock**, ≈53.69 MHz, kept here: a 68000 cycle is 7 of it, and an
 //! access its four cycles. The VDP's beam is caught up to it whenever the 68000 is about to
@@ -42,8 +43,8 @@ import vdp.{
 
 /// The machine's memory map, as the 68000 reaches it.
 pub struct GenesisBus {
-  /// The cartridge, as loaded; reads past its end answer zero.
-  rom: []u8,
+  /// The cartridge: its ROM, save RAM and mapper (`cartridge.lyra`).
+  cart: Cartridge,
   /// 64 KB of work RAM.
   ram: []u8,
   vdp: Vdp,
@@ -76,7 +77,7 @@ const VERSION: u8 = 0xA0
 
 /// A machine with `rom` in the cartridge slot and everything else at power-on.
 pub let genesis_bus = pure (rom: []u8) -> GenesisBus => GenesisBus {
-  rom: rom,
+  cart: new_cartridge(rom),
   ram: [0; 65536],
   vdp: new_vdp(),
   clock: 0,
@@ -121,6 +122,9 @@ impl Bus for GenesisBus {
       let at = i64(a & 0xFFFE)
       self.ram[at] = u8(value >> 8)
       self.ram[at + 1] = u8(value & 0xFF)
+    } else if a < 0x400000 {
+      cart_write(self.cart, i64(a & 0x3FFFFE), u8(value >> 8))
+      cart_write(self.cart, i64(a & 0x3FFFFE) + 1, u8(value & 0xFF))
     } else if a >= 0xC00000 && a < 0xC00010 {
       self.write_vdp(a, value)
     } else if a >= 0xC00010 && a < 0xC00018 {
@@ -139,6 +143,8 @@ impl Bus for GenesisBus {
     self.tick(4)
     if a >= 0xE00000 {
       self.ram[i64(a & 0xFFFF)] = value
+    } else if a < 0x400000 {
+      cart_write(self.cart, i64(a), value)
     } else if a >= 0xC00000 && a < 0xC00010 {
       // A byte written to a VDP port is that byte in both halves of a word.
       self.write_vdp(a & 0xFFFFFE, word)
@@ -210,8 +216,7 @@ let run_z80 = (self: mut GenesisBus) -> void => {
 let peek_word = pure (self: ref GenesisBus, a: u32) -> u16 => {
   if a < 0x400000 {
     let at = i64(a & 0x3FFFFE)
-    if at + 1 < self.rom.len() { return (u16(self.rom[at]) << 8) | u16(self.rom[at + 1]) }
-    return 0
+    return (u16(cart_read(self.cart, at)) << 8) | u16(cart_read(self.cart, at + 1))
   }
   if a >= 0xE00000 {
     let at = i64(a & 0xFFFE)
@@ -237,6 +242,8 @@ let write_other = (self: mut GenesisBus, a: u32, value: u8) -> void => {
     write_z80_space(self, a, value)
   } else if a >= 0xA10000 && a < 0xA10020 {
     write_io(self, a, value)
+  } else if a >= 0xA130F0 && a < 0xA13100 {
+    cart_register(self.cart, i64(a), value)
   } else if a == 0xA11100 {
     let requested = (value & 1) != 0
     // The Z80 resumes a T-state after its bus is given back (BlastEm's figure).

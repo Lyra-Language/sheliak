@@ -121,6 +121,8 @@ for name in "${names[@]}"; do
   rom="$WORK/roms/$name.bin"
   park="$(cat "$WORK/roms/$name.park")"
   rm -rf "$WORK/blastem/$name" "$WORK/sheliak/$name"
+  # BlastEm keeps save RAM between runs, in its home; each run starts with none.
+  rm -rf "$WORK/home/.local/share/blastem"
   run_blastem "$rom" "$park" "$WORK/blastem/$name" || { failed=$((failed + 1)); continue; }
   "$ROOT/build/vdpcheck" "$rom" "$park" "$WORK/sheliak/$name" || { failed=$((failed + 1)); continue; }
   differs=()

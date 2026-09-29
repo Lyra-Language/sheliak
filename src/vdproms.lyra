@@ -35,7 +35,14 @@ let main = () -> u8 => {
     return 1
   }
   for name in TESTS {
-    var a = Asm { code: [], blobs: [], vectors: [] }
+    var a = Asm {
+      code: [],
+      blobs: [],
+      vectors: [],
+      size: ROM_SIZE,
+      header_end: ROM_SIZE - 1,
+      patches: []
+    }
     tmss(a)
     // Every register set first, as a game's start-up does, so what the VDP holds at power-on
     // — which differs between emulators, and is not well documented for the hardware — plays
@@ -104,6 +111,10 @@ const TESTS: []string = [
   "z80_run",
   "sound_fm",
   "sound_psg",
+  "rom_mirror",
+  "cart_sram_odd",
+  "cart_sram_mapper",
+  "cart_ssf2",
 ]
 
 /// The code of the test `name`. (A `match` rather than a table of functions: each takes the
@@ -151,7 +162,11 @@ let body = (name: string, a: mut Asm) -> void => match name {
   "pads" => pads(a),
   "z80_run" => z80_run(a),
   "sound_fm" => sound_fm(a),
-  _ => sound_psg(a),
+  "sound_psg" => sound_psg(a),
+  "rom_mirror" => rom_mirror(a),
+  "cart_sram_odd" => cart_sram_odd(a),
+  "cart_sram_mapper" => cart_sram_mapper(a),
+  _ => cart_ssf2(a),
 }
 
 /// The H slack each timing test is compared with, in slots (tests/vdp.sh reads it from the
@@ -701,6 +716,72 @@ let sound_psg = (a: mut Asm) -> void => {
   for byte in [0x9F, 0xBF, 0xDF, 0xFF, 0x8E, 0x0F, 0x90] { a.move_b_imm_abs(u8(byte), 0xC00011) }
 }
 
+// ── The cartridge ────────────────────────────────────────────────────────────
+//
+// ROM mirroring, save RAM and the Sega mapper, read back into work RAM. tests/vdp.sh
+// clears BlastEm's saves before each run, so both start with save RAM zeroed.
+
+/// A 192 KB ROM read where it mirrors, at its size rounded up (256 KB) and near 4 MB.
+let rom_mirror = (a: mut Asm) -> void => {
+  a.move_w_abs_abs(0x040100, RAM + 0x10)
+  a.move_w_abs_abs(0x3C0100, RAM + 0x12)
+  a.move_w_abs_abs(0x000100, RAM + 0x14)
+}
+
+/// Save RAM on the odd bytes, 200001–203FFF, past the ROM's end and so mapped for good:
+/// bytes and a word written (the even halves going nowhere), then read back — the even
+/// halves reading FF.
+let cart_sram_odd = (a: mut Asm) -> void => {
+  a.declare_save(0xF8, 0x200001, 0x203FFF)
+  a.move_b_imm_abs(0x11, 0x200001)
+  a.move_b_imm_abs(0x22, 0x200003)
+  a.move_b_imm_abs(0x33, 0x200000)
+  a.move_w_imm_abs(0xABCD, 0x200010)
+  a.move_b_abs_abs(0x200001, RAM + 0x10)
+  a.move_b_abs_abs(0x200003, RAM + 0x11)
+  a.move_b_abs_abs(0x200000, RAM + 0x12)
+  a.move_w_abs_abs(0x200010, RAM + 0x14)
+  a.move_w_abs_abs(0x200002, RAM + 0x16)
+}
+
+/// A 2.5 MB ROM whose save RAM (odd bytes at 200001) overlaps it: the Sega mapper's
+/// A130F1 switches 200000–3FFFFF between ROM ("ROM!" there) and save RAM — writable at 1,
+/// protected at 3.
+let cart_sram_mapper = (a: mut Asm) -> void => {
+  a.size = 0x280000
+  a.header_end = 0x27FFFF
+  a.declare_save(0xF8, 0x200001, 0x203FFF)
+  a.patch(0x200000, [0x52, 0x4F, 0x4D, 0x21])
+  a.move_w_abs_abs(0x200000, RAM + 0x10)
+  a.move_b_imm_abs(0x5A, 0x200001)
+  a.move_b_imm_abs(1, 0xA130F1)
+  a.move_b_imm_abs(0x77, 0x200001)
+  a.move_b_abs_abs(0x200001, RAM + 0x12)
+  a.move_w_abs_abs(0x200000, RAM + 0x14)
+  a.move_b_imm_abs(3, 0xA130F1)
+  a.move_b_imm_abs(0x88, 0x200001)
+  a.move_b_abs_abs(0x200001, RAM + 0x16)
+  a.move_b_imm_abs(0, 0xA130F1)
+  a.move_w_abs_abs(0x200000, RAM + 0x18)
+}
+
+/// A 5 MB ROM with a marker (BA, bank) at each 512 KB bank: regions 1–7 read as they come
+/// up, then regions 1, 4 and 7 given banks 8, 2 and 9 (A130F3, F9, FF) and read again.
+let cart_ssf2 = (a: mut Asm) -> void => {
+  a.size = 0x500000
+  a.header_end = 0x3FFFFF
+  for bank in 1..<10 { a.patch(bank * 0x80000, [0xBA, u8(bank)]) }
+  for region in 1..<8 {
+    a.move_w_abs_abs(u32(region) * 0x80000, RAM + 0x10 + u32(region) * 2)
+  }
+  a.move_b_imm_abs(8, 0xA130F3)
+  a.move_b_imm_abs(2, 0xA130F9)
+  a.move_b_imm_abs(9, 0xA130FF)
+  for region in 1..<8 {
+    a.move_w_abs_abs(u32(region) * 0x80000, RAM + 0x20 + u32(region) * 2)
+  }
+}
+
 // ── Scenes ───────────────────────────────────────────────────────────────────
 //
 // Each draws a still frame: a common layout (below), the data every scene shares uploaded
@@ -985,7 +1066,7 @@ let words_to_bytes = pure (words: []u16) -> []u8 => {
 
 /// The ROM image: vectors, header, the code at CODE, the DMA tables, zero padding.
 let rom = (a: Asm) -> []u8 => {
-  var image: []u8 = [0; ROM_SIZE]
+  var image: []u8 = [0; a.size]
   put_long(image, 0, 0x00FFFE00)
   put_long(image, 4, CODE)
   for v in 2..<64 { put_long(image, v * 4, ERROR_LOOP) }
@@ -993,7 +1074,7 @@ let rom = (a: Asm) -> []u8 => {
   let header = "SEGA MEGA DRIVE "
   for i, c in header { image[0x100 + i] = u8(i64(c)) }
   put_long(image, 0x1A0, 0)
-  put_long(image, 0x1A4, u32(ROM_SIZE - 1))
+  put_long(image, 0x1A4, u32(a.header_end))
   put_long(image, 0x1A8, 0xFF0000)
   put_long(image, 0x1AC, 0xFFFFFF)
   for i, c in "JUE" { image[0x1F0 + i] = u8(i64(c)) }
@@ -1004,6 +1085,9 @@ let rom = (a: Asm) -> []u8 => {
     put_word(image, i64(BOUNDARY_TABLE) + 2 * i, u16(0x7700 + i))
   }
   for i, b in a.blobs { image[i64(DATA) + i] = b }
+  for p in a.patches {
+    for i, b in p.bytes { image[p.at + i] = b }
+  }
   image
 }
 
@@ -1036,6 +1120,16 @@ struct Asm {
   blobs: []u8,
   /// Exception vectors pointed into the code, the rest at the error loop.
   vectors: []Vector,
+  /// The ROM's size, and the end its header gives (1A4) — which a mapper test sets apart.
+  size: i64,
+  header_end: i64,
+  /// Bytes placed anywhere in the ROM, last: a header field, a marker in a far bank.
+  patches: []Patch,
+}
+
+struct Patch {
+  at: i64,
+  bytes: []u8,
 }
 
 struct Vector {
@@ -1367,3 +1461,17 @@ let wait_ym = (self: mut Asm) -> void => {
   self.l(0xA04000)
   self.w(0x66F6)
 }
+
+/// Bytes to place in the ROM at `at`.
+let patch = (self: mut Asm, at: i64, bytes: []u8) -> void =>
+  self.patches.push(Patch { at: at, bytes: bytes })
+
+/// Save RAM declared in the header: "RA", the bus flags (F8 the odd bytes), its range.
+let declare_save = (self: mut Asm, flags: u8, start: u32, end: u32) -> void => {
+  self.patch(0x1B0, [0x52, 0x41, flags, 0x20])
+  self.patch(0x1B4, long_bytes(start))
+  self.patch(0x1B8, long_bytes(end))
+}
+
+/// A long's four bytes, most significant first.
+let long_bytes = pure (v: u32) -> []u8 => [i in 0..<4 | u8((v >> u32(24 - 8 * i)) & 0xFF)]

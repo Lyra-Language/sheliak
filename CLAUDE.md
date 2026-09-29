@@ -16,6 +16,7 @@ non-commercial is linked in. Lives in the Lyra workspace beside `lyra/`; the wor
 build/sheliak ROM           # play: arrows, Z/X/C = A/B/C, Return = Start, F11, Escape;
                             #    gamepads on ports 1 and 2
 SDL_VIDEODRIVER=dummy build/sheliak ROM --frames 600 --screenshot out.bmp   # headless
+                            #    (--wav FILE: the sound; --save: use the .srm too)
 tests/fetch.sh              # SingleStepTests 68000 suite -> build/deps/680x0 (~200 MB, once)
 tests/cpu.sh                # every 68000 test file (~1M tests, ~17 s)
 tests/cpu.sh MOVE.l DIVS    # just these
@@ -168,6 +169,12 @@ frame-at-a-time shortcuts from the start:
   pinned BlastEm tree: its state compared tick by tick. Where SMS Power's hardware tests
   and BlastEm part (a data byte to a latched volume or noise register), Sheliak follows the
   hardware and the scripts avoid the case.
+- **The cartridge is recognised by its header, as BlastEm recognises it** (romdb.c's
+  heuristics): save RAM by "RA" at 1B0, mapped for good past the ROM or through the Sega
+  mapper's A130F1 over a ROM of more than 2 MB; the SSF2 mapper by a file of more than 4 MB
+  whose header says no more than 4 MB. `tests/vdp.sh`'s cartridge ROMs hold both, and ROM
+  mirroring, to BlastEm — clearing BlastEm's saves (kept in its scratch home) before each
+  run. A save file is a byte per byte of save RAM, BlastEm's `save.sram` format.
 - **The mix is not checked against hardware**: the resampling, the PSG/FM balance, the
   Model 1 low-pass (3,390 Hz, BlastEm's default) and the DC block are `genesis/audio.lyra`'s
   choices; `tests/sound.sh` checks only that notes come out at their pitch.
@@ -230,6 +237,8 @@ src/vdp/             the VDP (module vdp):
                      limits, priority, shadow/highlight
 src/genesis/         the machine (module genesis):
   machine.lyra       power on, and run a frame
+  cartridge.lyra     the ROM (mirrored), save RAM, the Sega SRAM and SSF2 mappers, the
+                     header they are recognised by
   sound.lyra         the Z80's side: its RAM, the bank window onto the cartridge, its clock
                      and /INT (from the VDP); the YM2612 and PSG, clocked, their samples
   audio.lyra         the analog stage: both chips resampled by area, mixed, filtered
@@ -312,8 +321,12 @@ its picture to BlastEm's too: the texels it sends the window (`--ppm`), byte for
 the screenshot, so its colour conversion is checked, not only the VDP's output. Raw ROM images, two
 3-button pads (the protocol matched against BlastEm with nothing held, `pads`; with buttons
 held, `build/padtest`), frames paced to the console's 59.92 Hz whatever the display's rate,
-~4.7 ms a frame with sound on an M-series Mac. **Not yet**: cartridge SRAM and mappers,
-6-button pads, `.smd` images, regions other than US NTSC.
+~4.7 ms a frame with sound on an M-series Mac. **Cartridges**: the ROM mirrored at its
+size, save RAM (odd, even or both buses; past the ROM or through the Sega mapper, with
+write-protect), the SSF2 bank mapper, and save files beside the ROM. **Not yet**: serial
+EEPROM saves (the cartridges that carry one are known only by a database), lock-on and
+unlicensed mappers, the Z80's bank window through the mapper, 6-button pads, `.smd`
+images, regions other than US NTSC.
 
 **Open**: the VDP's registers at power-on (the ROMs set every one; BlastEm starts register
 10 at FF, uncited), and the beam's position and the H interrupt counter with them (Sheliak

@@ -2,7 +2,7 @@
 // picture shown and its sound played with SDL, the keyboard and gamepads as its pads.
 //
 //   build/sheliak ROM                                  play
-//   build/sheliak ROM --frames N [--screenshot FILE] [--ppm FILE] [--wav FILE]
+//   build/sheliak ROM --frames N [--screenshot FILE] [--ppm FILE] [--wav FILE] [--save]
 //                                                      run N frames and quit, saving the
 //                                                      last: as SDL drew the window (BMP),
 //                                                      and as the texels sent to it (PPM,
@@ -17,7 +17,10 @@
 // bottom row, left to right), Start for Start.
 //
 // The ROM is a raw image (`.bin`, `.gen`, `.md`); the interleaved `.smd` format is not
-// read yet.
+// read yet. A cartridge with save RAM keeps it in a `.srm` file beside the ROM (the ROM's
+// name, its extension replaced): loaded at start, written every ten seconds while the game
+// has changed it, and on quitting — BlastEm's `save.sram` format, a byte per byte of RAM.
+// Headless runs read and write it only when given `--save`.
 
 import std.io.{ read_bytes, write_bytes }
 import bindings.sdl3.{
@@ -39,6 +42,7 @@ import bindings.sdl3.{
 import m68k.{ Cpu }
 import genesis.{
   GenesisBus, genesis_bus, new_cpu, power_on, run_frame, new_mixer, mix_audio,
+  save_bytes, load_save,
   PAD_UP, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_A, PAD_B, PAD_C, PAD_START,
 }
 import vdp.{ Frame, shown_frame }
@@ -59,7 +63,7 @@ const AUDIO_QUEUE_LIMIT: i64 = 6000
 let main = () -> u8 => {
   let args = program_args()
   if args.len() < 2 {
-    println("usage: sheliak ROM [--frames N] [--screenshot FILE] [--ppm FILE] [--wav FILE]")
+    println("usage: sheliak ROM [--frames N] [--screenshot FILE] [--ppm FILE] [--wav FILE] [--save]")
     return 2
   }
   let Some(rom) = read_bytes(args[1]) else {
@@ -70,6 +74,7 @@ let main = () -> u8 => {
   var screenshot = ""
   var ppm = ""
   var wav = ""
+  var headless_save = false
   var i = 2
   for i < args.len() {
     if args[i] == "--frames" && i + 1 < args.len() {
@@ -81,6 +86,9 @@ let main = () -> u8 => {
     } else if args[i] == "--ppm" && i + 1 < args.len() {
       ppm = args[i + 1]
       i += 2
+    } else if args[i] == "--save" {
+      headless_save = true
+      i += 1
     } else if args[i] == "--wav" && i + 1 < args.len() {
       wav = args[i + 1]
       i += 2
@@ -115,11 +123,17 @@ let main = () -> u8 => {
   var cpu = new_cpu()
   var bus = genesis_bus(rom)
   power_on(cpu, bus)
+  let save_path = save_file_for(args[1])
+  let saving = frames_only < 0 || headless_save
+  if saving && bus.cart.save.len() > 0 {
+    if let Some(saved) = read_bytes(save_path) { load_save(bus.cart, saved) }
+  }
   let status = if frames_only >= 0 {
     run_headless(cpu, bus, renderer, frames_only, screenshot, ppm, wav)
   } else {
-    play(cpu, bus, renderer, window)
+    play(cpu, bus, renderer, window, save_path)
   }
+  if saving { write_save(bus, save_path) }
   destroy_renderer(renderer)
   destroy_window(window)
   quit()
@@ -185,8 +199,10 @@ let play = (
   cpu: mut Cpu,
   bus: mut GenesisBus,
   renderer: Renderer,
-  window: Window
+  window: Window,
+  save_path: string
 ) -> u8 => {
+  var frames_since_save: i64 = 0
   var screen = new_screen()
   var mixer = new_mixer(AUDIO_RATE)
   // No audio device (or none SDL can open) is no sound, not no emulator.
@@ -225,6 +241,11 @@ let play = (
     for owed >= FRAME_NS {
       run_frame(cpu, bus)
       owed -= FRAME_NS
+      frames_since_save += 1
+    }
+    if frames_since_save >= 600 {
+      write_save(bus, save_path)
+      frames_since_save = 0
     }
     let samples = mix_audio(bus, mixer)
     if let Some(s) = stream {
@@ -237,6 +258,32 @@ let play = (
   if let Some(s) = stream { close_audio(s) }
   release_screen(screen)
   0
+}
+
+// ── Saves ────────────────────────────────────────────────────────────────────
+
+/// The cartridge's save RAM to its file, if the game has changed it since it was last
+/// written.
+let write_save = (bus: mut GenesisBus, path: string) -> void => {
+  if !bus.cart.save_dirty { return }
+  if write_bytes(path, save_bytes(bus.cart)) {
+    bus.cart.save_dirty = false
+  } else {
+    println("sheliak: cannot write ${path}")
+  }
+}
+
+/// The save file beside a ROM: its name with the extension replaced by `.srm`.
+let save_file_for = pure (rom_path: string) -> string => {
+  var dot = -1
+  var i: i64 = 0
+  for c in rom_path {
+    if c == '.' { dot = i }
+    if c == '/' { dot = -1 }
+    i += 1
+  }
+  let stem = if dot > 0 { rom_path.slice(0, dot) } else { rom_path }
+  stem ++ ".srm"
 }
 
 /// Stereo samples, -1 to 1, as a 16-bit PCM WAV file at the audio rate.
