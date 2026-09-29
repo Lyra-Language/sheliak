@@ -4,7 +4,7 @@
 #
 #   ./build.sh              # build/: the emulator (sheliak), the 68000 test runners
 #                           # (cputest, legaltest, scenariotest), the VDP harness
-#                           # (vdproms, vdpcheck), the pad test (padtest) and the Z80's
+#                           # (vdproms, vdpcheck), the pad and ROM file tests (padtest, romtest) and the Z80's
 #                           # (z80test, z80scenarios)
 #
 # Uses the sibling compiler, ../lyra/build/lyrac (run ../lyra/build.sh first), whose
@@ -26,6 +26,7 @@ mkdir -p "$ROOT/build"
 "$LYRAC" build -o "$ROOT/build/vdproms" "$ROOT/src/vdproms.lyra"
 "$LYRAC" build -o "$ROOT/build/vdpcheck" "$ROOT/src/vdpcheck.lyra"
 "$LYRAC" build -o "$ROOT/build/padtest" "$ROOT/src/padtest.lyra"
+"$LYRAC" build -o "$ROOT/build/romtest" "$ROOT/src/romtest.lyra"
 "$LYRAC" build -o "$ROOT/build/z80test" "$ROOT/src/z80test.lyra"
 "$LYRAC" build -o "$ROOT/build/z80scenarios" "$ROOT/src/z80scenarios.lyra"
 "$LYRAC" build -o "$ROOT/build/psgtest" "$ROOT/src/psgtest.lyra"

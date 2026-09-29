@@ -21,11 +21,12 @@
 // for A, B and C (the Genesis's bottom row, left to right), the left shoulder, North and
 // the right shoulder for X, Y and Z; Start and Back for Start and Mode.
 //
-// The ROM is a raw image (`.bin`, `.gen`, `.md`); the interleaved `.smd` format is not
-// read yet. A cartridge with save RAM keeps it in a `.srm` file beside the ROM (the ROM's
-// name, its extension replaced): loaded at start, written every ten seconds while the game
-// has changed it, and on quitting — BlastEm's `save.sram` format, a byte per byte of RAM.
-// Headless runs read and write it only when given `--save`.
+// The ROM is a raw image or an SMD one (the copier's interleaved format), whatever the
+// file's name (`.bin`, `.gen`, `.md`, `.smd`). A cartridge with save RAM keeps it in a
+// `.srm` file beside the ROM (the ROM's name, its extension replaced): loaded at start,
+// written every ten seconds while the game has changed it, and on quitting — BlastEm's
+// `save.sram` format, a byte per byte of RAM. Headless runs read and write it only when
+// given `--save`.
 
 import std.io.{ read_bytes, write_bytes }
 import bindings.sdl3.{
@@ -48,7 +49,7 @@ import bindings.sdl3.{
 import m68k.{ Cpu }
 import genesis.{
   GenesisBus, genesis_bus, new_cpu, power_on, run_frame, new_mixer, mix_audio,
-  save_bytes, load_save, set_pads,
+  rom_image, save_bytes, load_save, set_pads,
   PAD_UP, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_A, PAD_B, PAD_C, PAD_START,
   PAD_X, PAD_Y, PAD_Z, PAD_MODE,
 }
@@ -73,9 +74,16 @@ let main = () -> u8 => {
     println("usage: sheliak ROM [--pads 3] [--frames N] [--screenshot FILE] [--ppm FILE] [--wav FILE] [--save]")
     return 2
   }
-  let Some(rom) = read_bytes(args[1]) else {
+  let Some(file) = read_bytes(args[1]) else {
     println("sheliak: cannot read ${args[1]}")
     return 1
+  }
+  let rom = match rom_image(file) {
+    Ok(image) => image,
+    Err(why) => {
+      println("sheliak: ${args[1]} is ${why}")
+      return 1
+    },
   }
   var frames_only: i64 = -1
   var screenshot = ""

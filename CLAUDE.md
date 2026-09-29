@@ -17,7 +17,7 @@ product name.
 ```bash
 ../lyra/build.sh            # the compiler, with std/ beside it
 ./build.sh                  # -> build/: sheliak, cputest, legaltest, scenariotest, vdproms,
-                            #    vdpcheck, padtest
+                            #    vdpcheck, padtest, romtest
 build/sheliak ROM           # play: arrows, Z/X/C = A/B/C, A/S/D = X/Y/Z, Return = Start,
                             #    Q = Mode, F = full screen, Escape; gamepads on ports 1 and 2;
                             #    --pads 3 for 3-button pads
@@ -38,6 +38,7 @@ tests/scenarios.sh          # interrupt, STOP and trace scenarios on a scripted 
 tests/vdp.sh                # VDP test ROMs on Sheliak and BlastEm, compared (needs SDL2)
 tests/vdp.sh fill copy      # just these
 build/padtest               # the pads, buttons held, through the bus
+build/romtest               # ROM files read: raw, SMD, a split SMD refused
 ```
 
 ## Accuracy Target
@@ -181,6 +182,10 @@ frame-at-a-time shortcuts from the start:
   whose header says no more than 4 MB. `tests/vdp.sh`'s cartridge ROMs hold both, and ROM
   mirroring, to BlastEm — clearing BlastEm's saves (kept in its scratch home) before each
   run. A save file is a byte per byte of save RAM, BlastEm's `save.sram` format.
+- **A ROM file is read by its contents, never its name**: an SMD image by the copier's
+  header as BlastEm recognises it (system.c's `is_smd_format`), anything else raw.
+  `build/romtest` holds the reading to an SMD writer of its own, and BlastEm reads such a
+  file as the raw image it was made from.
 - **The mix is not checked against hardware**: the resampling, the PSG/FM balance, the
   Model 1 low-pass (3,390 Hz, BlastEm's default) and the DC block are `genesis/audio.lyra`'s
   choices; `tests/sound.sh` checks only that notes come out at their pitch.
@@ -193,6 +198,7 @@ Module paths resolve under `src/` (the entry file's directory), so entry points 
 src/sheliak.lyra     the emulator in an SDL window: frames paced to 59.92 Hz, the picture
                      through the DAC's levels, keyboard and gamepads as pads 1 and 2
 src/padtest.lyra     the controller ports with buttons held, read through the bus
+src/romtest.lyra     ROM files as dumped (raw, SMD) read back as their images
 src/psgtest.lyra     the PSG on a script, its state printed per tick
 src/ymtest.lyra      the YM2612 on a script, its output printed per sample
 src/cputest.lyra     68000 test runner: one SingleStepTests file on stdin
@@ -243,8 +249,8 @@ src/vdp/             the VDP (module vdp):
                      limits, priority, shadow/highlight
 src/genesis/         the machine (module genesis):
   machine.lyra       power on, and run a frame
-  cartridge.lyra     the ROM (mirrored), save RAM, the Sega SRAM and SSF2 mappers, the
-                     header they are recognised by
+  cartridge.lyra     the ROM file read (raw or SMD); the ROM (mirrored), save RAM, the Sega
+                     SRAM and SSF2 mappers, the header they are recognised by
   sound.lyra         the Z80's side: its RAM, the bank window onto the cartridge, its clock
                      and /INT (from the VDP); the YM2612 and PSG, clocked, their samples
   audio.lyra         the analog stage: both chips resampled by area, mixed, filtered
@@ -325,14 +331,14 @@ against a real console.
 
 **The front end runs a cartridge in a window** (`build/sheliak`), and `tests/vdp.sh` holds
 its picture to BlastEm's too: the texels it sends the window (`--ppm`), byte for byte against
-the screenshot, so its colour conversion is checked, not only the VDP's output. Raw ROM images, two
-6-button pads (3 with `--pads 3`; the protocol matched against BlastEm with nothing held,
-`pads` and `pads6`; with buttons held, `build/padtest`), frames paced to the console's 59.92 Hz whatever the display's rate,
-~4.7 ms a frame with sound on an M-series Mac. **Cartridges**: the ROM mirrored at its
+the screenshot, so its colour conversion is checked, not only the VDP's output. Raw and
+SMD ROM images, two 6-button pads (3 with `--pads 3`; the protocol matched against BlastEm
+with nothing held, `pads` and `pads6`; with buttons held, `build/padtest`), frames paced to
+the console's 59.92 Hz whatever the display's rate, ~4.7 ms a frame with sound on an M-series Mac. **Cartridges**: the ROM mirrored at its
 size, save RAM (odd, even or both buses; past the ROM or through the Sega mapper, with
 write-protect), the SSF2 bank mapper, and save files beside the ROM. **Not yet**: serial
 EEPROM saves (the cartridges that carry one are known only by a database), lock-on and
-unlicensed mappers, the Z80's bank window through the mapper, `.smd`
+unlicensed mappers, the Z80's bank window through the mapper, split SMD
 images, regions other than US NTSC.
 
 **Open**: the VDP's registers at power-on (the ROMs set every one; BlastEm starts register

@@ -1,0 +1,86 @@
+// romtest — ROM files as dumped, read back as the ROM images inside them: raw, and SMD
+// (made here from a known image by the copier's layout, written out independently of
+// `rom_image`'s reading of it).
+//
+//   build/romtest        prints each failure, then a verdict; exits 1 on any
+
+import genesis.{ rom_image }
+
+let main = () -> u8 => {
+  var failed = 0
+  // Two whole blocks and a short one, so the last block's own half is exercised.
+  let image = test_image(2 * 0x4000 + 7232)
+  failed += expect_image("raw image", image, image)
+  failed += expect_image("SMD image", smd_file(image, 0), image)
+  failed += expect_image("SMD image of whole blocks", smd_file(test_image(0x8000), 0), test_image(0x8000))
+  failed += expect_refused("split SMD image", smd_file(image, 1))
+  // The magic bytes with 3–7 not zero is not the copier's header: the file is raw.
+  var not_smd = smd_file(image, 0)
+  not_smd[5] = 1
+  failed += expect_image("near-SMD header", not_smd, not_smd)
+  if failed == 0 {
+    println("romtest: all passed")
+    return 0
+  }
+  println("romtest: ${failed} failed")
+  1
+}
+
+/// `size` bytes no two neighbours of which are alike, "SEGA" where a header says it.
+let test_image = pure (size: i64) -> []u8 => {
+  var bytes: []u8 = [0; size]
+  for i in 0..<size { bytes[i] = u8((i * 7 + (i >> 8) * 13) & 0xFF) }
+  bytes[0x100] = 0x53
+  bytes[0x101] = 0x45
+  bytes[0x102] = 0x47
+  bytes[0x103] = 0x41
+  bytes
+}
+
+/// `image` as the SMD copier writes it: the 512-byte header (`split` in byte 2), then each
+/// 16 KB block's odd-address bytes followed by its even-address ones.
+let smd_file = pure (image: []u8, split: u8) -> []u8 => {
+  var file: []u8 = [0; 512]
+  file[0] = u8((image.len() + 0x3FFF) / 0x4000)
+  file[1] = 0x03
+  file[2] = split
+  file[8] = 0xAA
+  file[9] = 0xBB
+  file[10] = 0x06
+  var start = 0
+  for start < image.len() {
+    let end = if start + 0x4000 < image.len() { start + 0x4000 } else { image.len() }
+    var a = start + 1
+    for a < end {
+      file.push(image[a])
+      a += 2
+    }
+    a = start
+    for a < end {
+      file.push(image[a])
+      a += 2
+    }
+    start = end
+  }
+  file
+}
+
+let expect_image = (name: string, file: []u8, want: []u8) -> i64 => match rom_image(file) {
+  Ok(got) => {
+    if got == want { return 0 }
+    println("${name}: ${got.len()} bytes read back, differing from the ${want.len()} wanted")
+    1
+  },
+  Err(why) => {
+    println("${name}: refused as ${why}")
+    1
+  },
+}
+
+let expect_refused = (name: string, file: []u8) -> i64 => match rom_image(file) {
+  Ok(_) => {
+    println("${name}: read, not refused")
+    1
+  },
+  Err(_) => 0,
+}

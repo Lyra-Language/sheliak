@@ -18,6 +18,13 @@ module genesis
 //!   shows, from power-on showing their own. A130F1's bit 0 there maps save RAM over regions
 //!   4–7 instead.
 //!
+//! **A ROM file is a raw image or an SMD one** ([rom_image]), told apart by the SMD copier's
+//! header, as BlastEm tells them: 512 bytes whose bytes 1, 8 and 9 are 03 AA BB and 3–7 are
+//! zero. Then the ROM follows in 16 KB blocks, each the odd addresses' bytes and then the
+//! even addresses' (a short last block split at its own half). A split image — byte 2 set,
+//! one part of several — is refused. The file's name is not consulted: `.bin`, `.gen` and
+//! `.md` files that are SMD images inside are common.
+//!
 //! **Not here**: the serial EEPROMs some cartridges carry (no header declares them — BlastEm
 //! finds them in a database), the lock-on and unlicensed mappers. The Z80's bank window
 //! reads the ROM as it lies, not through the mapper.
@@ -50,6 +57,41 @@ pub struct Cartridge {
   save_mask: i64,
   save: []u8,
   save_dirty: bool,
+}
+
+/// The ROM image in a file as dumped: an SMD image's blocks put back in address order, a
+/// raw image as it is. An error for a split SMD image.
+pub let rom_image = pure (file: []u8) -> Result<[]u8, string> => {
+  if !is_smd(file) { return Ok(file) }
+  if file[2] != 0 { return Err("a split SMD image (one part of several), which is not read") }
+  let size = file.len() - SMD_HEADER
+  var rom: []u8 = [0; size]
+  var block = 0
+  for block < size {
+    let length = if size - block < SMD_BLOCK { size - block } else { SMD_BLOCK }
+    let half = length / 2
+    let from = SMD_HEADER + block
+    for i in 0..<half {
+      rom[block + 2 * i] = file[from + half + i]
+      rom[block + 2 * i + 1] = file[from + i]
+    }
+    block += SMD_BLOCK
+  }
+  Ok(rom)
+}
+
+const SMD_HEADER: i64 = 512
+const SMD_BLOCK: i64 = 0x4000
+
+/// Whether a file begins with the SMD copier's header.
+let is_smd = pure (file: []u8) -> bool => {
+  if file.len() <= SMD_HEADER || file[1] != 0x03 || file[8] != 0xAA || file[9] != 0xBB {
+    return false
+  }
+  for i in 3..<8 {
+    if file[i] != 0 { return false }
+  }
+  true
 }
 
 /// A cartridge from a ROM image, its header read.
