@@ -9,8 +9,11 @@ module genesis
 //!
 //! **Time is the master clock**, ≈53.69 MHz, kept here: a 68000 cycle is 7 of it, and an
 //! access its four cycles. The VDP's beam is caught up to it whenever the 68000 is about to
-//! see the VDP — a port access, the interrupt pins it samples at every fetch — so what the
-//! 68000 sees is where the beam stands then.
+//! see the VDP — a port access (as its bus cycle ends), the interrupt pins it samples at
+//! every fetch — so what the 68000 sees is where the beam stands then. **The VDP can hold
+//! the 68000**: a write to a full FIFO, a read not yet fetched, and a 68000 → VDP transfer,
+//! for which the bus feeds the VDP from its own memory, slot by slot, the 68000 off it; the
+//! clock then moves on to where the VDP lets go, in whole 68000 cycles.
 //!
 //! **DRAM refresh** takes 2 cycles in every 128 of the 68000's (BlastEm's figure, which it
 //! applies approximately, at its synchronisation points; here at every access and idle).
@@ -23,9 +26,11 @@ import vdp.{
   write_data,
   read_data,
   read_status,
-  dma_active,
+  dma_68k_running,
+  dma_68k_done,
   dma_source,
-  dma_write,
+  step_slot,
+  round_up,
   run_beam,
   hv_counter,
   vdp_interrupt_level,
@@ -76,8 +81,8 @@ pub let run_vdp_to = (self: mut GenesisBus, to: i64) -> void => run_beam(self.vd
 impl Bus for GenesisBus {
   read_word = (self, addr, fc) => {
     let a = addr & 0xFFFFFF
-    let word = if a >= 0xC00000 && a < 0xC00020 { self.read_vdp(a) } else { self.peek_word(a) }
     self.tick(4)
+    let word = if a >= 0xC00000 && a < 0xC00020 { self.read_vdp(a) } else { self.peek_word(a) }
     self.open_bus = word
     word
   }
@@ -85,13 +90,14 @@ impl Bus for GenesisBus {
     let a = addr & 0xFFFFFF
     // A byte of a VDP port is a word access to it: the port acts once, and the byte
     // is the half the address names.
-    let word = if a >= 0xC00000 && a < 0xC00020 { self.read_vdp(a & 0xFFFFFE) } else { self.peek_word(a & 0xFFFFFE) }
     self.tick(4)
+    let word = if a >= 0xC00000 && a < 0xC00020 { self.read_vdp(a & 0xFFFFFE) } else { self.peek_word(a & 0xFFFFFE) }
     self.open_bus = word
     if (a & 1) == 0 { u8(word >> 8) } else { u8(word & 0xFF) }
   }
   write_word = (self, addr, fc, value) => {
     let a = addr & 0xFFFFFF
+    self.tick(4)
     if a >= 0xE00000 {
       let at = i64(a & 0xFFFE)
       self.ram[at] = u8(value >> 8)
@@ -99,13 +105,13 @@ impl Bus for GenesisBus {
     } else if a >= 0xC00000 && a < 0xC00020 {
       self.write_vdp(a, value)
     }
-    self.tick(4)
     self.open_bus = value
   }
   write_byte = (self, addr, fc, value) => {
     let a = addr & 0xFFFFFF
     // A byte written is on both halves of the data bus.
     let word = (u16(value) << 8) | u16(value)
+    self.tick(4)
     if a >= 0xE00000 {
       self.ram[i64(a & 0xFFFF)] = value
     } else if a >= 0xC00000 && a < 0xC00010 {
@@ -113,7 +119,6 @@ impl Bus for GenesisBus {
       // PSG, is not a VDP port and is ignored until the PSG is built.)
       self.write_vdp(a & 0xFFFFFE, word)
     }
-    self.tick(4)
     self.open_bus = word
   }
   test_and_set_byte = (self, addr, fc) => {
@@ -173,27 +178,38 @@ let peek_word = pure (self: GenesisBus, a: u32) -> u16 => {
 /// (C00004–07), HV counter (C00008–0F).
 let read_vdp = (self: mut GenesisBus, a: u32) -> u16 => {
   run_beam(self.vdp, self.clock)
-  match (a >> 2) & 7 {
-    0 => read_data(self.vdp),
+  let word = match (a >> 2) & 7 {
+    0 => read_data(self.vdp, self.clock),
     1 => read_status(self.vdp, self.open_bus),
     _ => hv_counter(self.vdp),
   }
+  self.held_by_vdp()
+  word
 }
 
-/// A word written to the VDP's ports. A control write may start a 68000 → VDP transfer,
-/// which the bus feeds from its own memory, word by word, here — instantly, until the VDP
-/// has the access slots that pace it and the 68000 is frozen for it.
+/// A word written to the VDP's ports, the beam caught up first. A control write may start a
+/// 68000 → VDP transfer, which the bus feeds from its own memory, a word for each slot that
+/// takes one, until it ends.
 let write_vdp = (self: mut GenesisBus, a: u32, value: u16) -> void => {
   run_beam(self.vdp, self.clock)
   match (a >> 2) & 7 {
-    0 => write_data(self.vdp, value),
+    0 => write_data(self.vdp, value, self.clock),
     1 => {
-      write_control(self.vdp, value)
-      for dma_active(self.vdp) {
-        let word = self.peek_word(dma_source(self.vdp) & 0xFFFFFE)
-        dma_write(self.vdp, word)
+      if write_control(self.vdp, value, self.clock) {
+        for dma_68k_running(self.vdp) {
+          self.vdp.dma_word = self.peek_word(dma_source(self.vdp) & 0xFFFFFE)
+          step_slot(self.vdp)
+        }
+        dma_68k_done(self.vdp)
       }
     },
     _ => {},
   }
+  self.held_by_vdp()
+}
+
+/// The 68000 goes on where the VDP let it, in whole cycles.
+let held_by_vdp = (self: mut GenesisBus) -> void => {
+  let until = self.vdp.resume_at
+  if until > self.clock { self.clock += round_up(until - self.clock, CPU_CLOCKS) }
 }

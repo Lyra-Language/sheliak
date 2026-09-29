@@ -104,10 +104,9 @@ frame-at-a-time shortcuts from the start:
   68000 instructions, so the harness needs no assembler. Each sets every register first (as
   a game's start-up does, so neither emulator's power-on values matter), waits for each DMA
   to finish before touching the VDP again (as a program must), and parks in `bra.s *`.
-- **The VDP's memories are compared settled**: BlastEm runs two frames past the parking
-  loop, so its FIFO drains and any DMA completes, while Sheliak's VDP does every access at
-  once (until the access-slot slice); `vdpcheck` runs the same frames and dumps the last
-  frame the beam drew.
+- **The VDP's memories are compared settled**: both emulators run two frames past the
+  parking loop, so the FIFO drains and any DMA completes, and the last frame drawn is
+  compared; how long anything took is for the timing ROMs to record, in work RAM.
 - **Timing is compared by what a program sees** (the timing ROMs in `src/vdproms.lyra`):
   the V counter at an interrupt or a blanking edge must match exactly; the H counter within
   a slack the ROM names (`.hslack`, `tests/ram_compare.py`) — 8 slots for an interrupt's
@@ -116,7 +115,10 @@ frame-at-a-time shortcuts from the start:
   off by less than a loop goes unseen: the harness is proven on larger mutations only.
   Each ROM measures from a V-blank edge or an interrupt taken in STOP, never from power-on,
   and drains anything pending first — the emulators' power-on beam and H interrupt counter
-  (BlastEm FF, Sheliak 0) are not the hardware's, nor each other's.
+  (BlastEm FF, Sheliak 0) are not the hardware's, nor each other's. A handler sets all it
+  depends on (a DMA's source too), since a drain may run it once more beforehand. **The
+  FIFO's two-slot latency is below the slack** and unchecked; the slot maps, a VRAM word's
+  two slots and DMA's pace are (each mutation fails the access-slot ROMs).
 - **Where BlastEm's 68000 and Sheliak's differ, the ROM sidesteps it**: BlastEm takes an
   interrupt one instruction after the mask is lowered, Sheliak (Clock Signal's model) at
   once; `wait_for_interrupts` unmasks across a `nop`. Its status register's top six bits
@@ -155,7 +157,9 @@ src/m68k/            the 68000 (module m68k):
   unary.lyra         NEGX, CLR, NEG, NOT, TST (CLR reads before it writes), TAS
   movem.lyra         MOVEM (with the extra read), MOVEP
 src/vdp/             the VDP (module vdp):
-  vdp.lyra           memories, registers, the control and data ports, status, DMA
+  vdp.lyra           memories, registers, the control and data ports, status, DMA's start
+  slots.lyra         the access slots: which slots are the 68000's, the FIFO, reads fetched
+                     ahead, fill, copy and 68000 → VDP transfers a slot at a time
   beam.lyra          the beam on the master clock: access slots, lines, V-blank and
                      H-blank, the HV counter and its latch, the H and V interrupts; draws
                      each line as the beam reaches it
@@ -164,7 +168,8 @@ src/vdp/             the VDP (module vdp):
                      shadow/highlight
 src/genesis/         the machine (module genesis):
   bus.lyra           the 68000's memory map: ROM, work RAM, the VDP ports, version, TMSS;
-                     the master clock, refresh, the interrupt pins and E-clock acknowledge
+                     the master clock, refresh, the interrupt pins and E-clock acknowledge;
+                     the 68000 held by the VDP, and fed to it during a transfer
 src/vdproms.lyra     writes the VDP test ROMs (and each one's parking address)
 src/vdpcheck.lyra    runs one test ROM on Sheliak and dumps the VDP for comparison
 tests/fetch.sh       download the pinned suite
@@ -197,17 +202,18 @@ once the VDP raises real interrupts.
 instruction's ordinary path right first.
 
 **The VDP has its programming interface, renders, and runs on the master clock**
-(`tests/vdp.sh`, 28 ROMs matching BlastEm): VRAM, CRAM, VSRAM, the registers, the command
+(`tests/vdp.sh`, 36 ROMs matching BlastEm): VRAM, CRAM, VSRAM, the registers, the command
 words, the data port, DMA; mode 5 frames pixel for pixel — planes A and B at every size and
 scroll mode, the window (left, right, below), sprites (sizes, flips, links, both limits,
 masking), priority, shadow/highlight, 32- and 40-cell widths, the blanked left column; and
 the beam — access slots and lines (NTSC), the V-blank and H-blank flags, the HV counter and
 its latch, the H and V interrupts through the 68000's pins, the E-clock acknowledge, DRAM
-refresh, each line drawn as the beam reaches it. **Accesses and DMA still take effect at
-once**, and a line is drawn whole at H 0. Not yet, in order: **the access slots' pacing**
-(the FIFO's waiting, DMA's pace and the 68000's freeze, mid-line changes), then the corners
-— interlace (and the odd-frame bit), 128 KB VRAM mode, the 8-bit VRAM read, mode 4, the
-SAT cache, PAL.
+refresh, each line drawn as the beam reaches it; and **the access slots** — the FIFO and
+its waiting, reads fetched ahead, fill and copy a byte a slot, 68000 → VDP transfers paced
+by the slots with the 68000 held. A line is still drawn whole at H 0. Not yet, in order:
+**mid-line changes** (the line drawn slot by slot, as its fetches happen), then the
+corners — interlace (and the odd-frame bit), 128 KB VRAM mode, the 8-bit VRAM read, mode 4,
+the SAT cache, PAL.
 
 **Open**: the VDP's registers at power-on (the ROMs set every one; BlastEm starts register
 10 at FF, uncited), and the beam's position and the H interrupt counter with them (Sheliak

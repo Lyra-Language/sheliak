@@ -113,8 +113,8 @@ let slot_clocks = pure (vdp: Vdp) -> i64 => {
   16
 }
 
-/// The next slot begins: H moves on (past the gap in its count), a line may begin, and
-/// what happens at this slot happens.
+/// The next slot begins: H moves on (past the gap in its count), a line may begin, what
+/// happens at this slot happens, and the slot does its work for the 68000 (`slots.lyra`).
 let next_slot = (vdp: mut Vdp) -> void => {
   let wide = h40(vdp)
   vdp.hslot = if wide && vdp.hslot == 182 {
@@ -135,6 +135,7 @@ let next_slot = (vdp: mut Vdp) -> void => {
     if vdp.vcounter == active_lines { vdp.vint_pending = true }
     if vdp.phase == Active && vdp.vcounter < active_lines { draw_line(vdp) }
   }
+  access_slot(vdp)
 }
 
 /// A line begins: the V counter moves on (jumping the lines the count skips), and the H

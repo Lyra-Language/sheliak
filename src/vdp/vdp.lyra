@@ -1,9 +1,10 @@
 module vdp
 //! The Genesis video display processor (Yamaha YM7101): its memories, registers and ports,
-//! and DMA: the **programming interface**, what the 68000 sees through the control and data
-//! ports, with every access taking effect at once — the access slots that pace it and the
-//! FIFO's waiting are the slice to come (CLAUDE.md). The beam, and with it the status bits,
-//! the HV counter and the interrupts, is `beam.lyra`; drawing a line, `render.lyra`.
+//! and DMA — the **programming interface**, what the 68000 sees through the control and data
+//! ports. What the ports ask for is done in the VDP's **access slots** (`slots.lyra`): a
+//! write waits in the FIFO for one, a read is fetched ahead in one, a DMA moves a byte or a
+//! word in each. The beam that brings the slots round, and with it the status bits, the HV
+//! counter and the interrupts, is `beam.lyra`; drawing a line, `render.lyra`.
 //!
 //! **Checked against BlastEm** (`tests/vdp.sh`): test ROMs program the VDP, both emulators
 //! run them to a parking loop, and the memories, registers, address and code registers are
@@ -21,10 +22,11 @@ module vdp
 //! **What the oracle settled** where genvdp.txt did not: a register write has a first half's
 //! effect on the address and code registers (so it leaves CD1–0 at `10`, no memory);
 //! register 7 keeps 6 bits and every other all 8; a data-port read with a write code returns
-//! the last value read and does not advance; CRAM and VSRAM reads take their unused bits from
-//! the write FIFO's oldest entry; a fill advances the source registers too; a copy reads and
-//! writes with address bit 0 flipped and ends one increment further than its length; CD5 is
-//! cleared when a DMA ends or cannot start.
+//! the last value read; CRAM and VSRAM reads take their unused bits from the write FIFO's
+//! oldest entry; a fill advances the source registers too; a copy reads and writes with
+//! address bit 0 flipped; CD5 is cleared when a DMA ends or cannot start. (A copy seemed to
+//! end one increment further than its length: that is the read the VDP fetches ahead once
+//! the copy leaves a read code behind — `slots.lyra`.)
 
 /// VRAM, CRAM and VSRAM sizes.
 pub const VRAM_SIZE: i64 = 65536
@@ -48,18 +50,29 @@ pub struct Vdp {
   /// The first half of a command word has been written, and the next control-port word is
   /// its second half.
   pending: bool,
-  /// A VRAM fill has been set up, and the next data-port write starts it.
-  fill_armed: bool,
-  /// A 68000 → VDP transfer is in progress: the bus feeds it words ([dma_source]).
-  dma_68k: bool,
-  /// The last four words written through the data port (and by a 68000 → VDP transfer), the
-  /// write FIFO's contents; [fifo_next] is the oldest, the next to be replaced. Only its
-  /// contents are modelled so far — a CRAM or VSRAM read takes its unused bits from them —
-  /// not the waiting.
-  fifo: [4]u16,
-  fifo_next: i64,
-  /// The last value a data-port read returned, which a read under a write code returns again.
+  // The access slots (slots.lyra).
+  /// The write FIFO, a ring of four: [fifo_write] is where the next word goes — and, being
+  /// the oldest entry, what a CRAM or VSRAM read takes its unused bits from — and
+  /// [fifo_read] the next a slot takes, -1 when none waits.
+  fifo: [4]FifoEntry,
+  fifo_write: i64,
+  fifo_read: i64,
+  /// A DMA is moving data (CD5 alone says one has been asked for: a fill waits for its value).
+  dma_run: bool,
+  /// The word a 68000 → VDP transfer takes next, which the bus supplies from [dma_source]
+  /// before each slot while it runs (the 68000 is off the bus, so nothing else reads it).
+  dma_word: u16,
+  /// What a read fetched ahead, or a copy read: the value a data-port read returns.
   prefetch: u16,
+  /// [prefetch] holds a fetched word the port has not yet returned (or a copy's byte).
+  fetched: bool,
+  /// A VRAM read has fetched its word's high byte, and fetches the low one next.
+  read_half: bool,
+  /// The master clock before which no slot fetches ahead for a read.
+  read_latency: i64,
+  /// The master clock at which the 68000 may go on after its last port access: past a
+  /// wait for FIFO room, for a read, or for a 68000 → VDP transfer (the bus's to apply).
+  resume_at: i64,
   // The beam (beam.lyra).
   /// The master clock at which the current slot began.
   clock: i64,
@@ -83,7 +96,8 @@ pub struct Vdp {
   frames: i64,
 }
 
-/// A VDP at power-on: memories and registers zero, the beam at the top of an active frame.
+/// A VDP at power-on: memories and registers zero, the FIFO empty, the beam at the top of an
+/// active frame.
 pub let new_vdp = pure () -> Vdp => Vdp {
   vram: [0; VRAM_SIZE],
   cram: [0; CRAM_WORDS],
@@ -92,11 +106,16 @@ pub let new_vdp = pure () -> Vdp => Vdp {
   address: 0,
   code: 0,
   pending: false,
-  fill_armed: false,
-  dma_68k: false,
-  fifo: #[0, 0, 0, 0],
-  fifo_next: 0,
+  fifo: #[empty_entry; 4],
+  fifo_write: 0,
+  fifo_read: -1,
+  dma_run: false,
+  dma_word: 0,
   prefetch: 0,
+  fetched: false,
+  read_half: false,
+  read_latency: 0,
+  resume_at: 0,
   clock: 0,
   hslot: 0,
   vcounter: 0,
@@ -112,18 +131,31 @@ pub let new_vdp = pure () -> Vdp => Vdp {
 }
 
 // ── The ports ────────────────────────────────────────────────────────────────
+//
+// Each takes `now`, the master clock of the 68000's access, with the beam already run to
+// it, and leaves in [resume_at] the master clock the 68000 may go on from (which the bus
+// rounds up to a whole 68000 cycle).
 
 /// A word written to the control port. A byte write is the byte in both halves (the bus's
-/// to duplicate).
-pub let write_control = (vdp: mut Vdp, value: u16) -> void => {
+/// to duplicate). Answers whether a 68000 → VDP transfer has started, which the bus then
+/// feeds, the 68000 off the bus, until it ends ([dma_68k_running]).
+pub let write_control = (vdp: mut Vdp, value: u16, now: i64) -> bool => {
+  vdp.resume_at = now
   if vdp.pending {
     vdp.pending = false
     vdp.address = (vdp.address & 0x3FFF) | (u32(value & 7) << 14)
     vdp.code = (vdp.code & 3) | u8((value >> 2) & 0x3C)
+    vdp.fetched = false
+    vdp.read_half = false
+    if (vdp.code & 1) == 0 { vdp.read_latency = now + 3 * slot_unit(vdp) }
     if (vdp.code & 0x20) != 0 {
-      if dma_enabled(vdp) { start_dma(vdp) } else { vdp.code = vdp.code & 0x1F }
+      if !dma_enabled(vdp) {
+        vdp.code = vdp.code & 0x1F
+        return false
+      }
+      return start_dma(vdp)
     }
-    return
+    return false
   }
   // The first half, or a register write, which has the first half's effect on the address
   // and code registers too — so a register write leaves CD1–0 at `10`, which is no memory
@@ -134,9 +166,10 @@ pub let write_control = (vdp: mut Vdp, value: u16) -> void => {
     let reg = i64((value >> 8) & 0x1F)
     if reg == 0 && (value & 0x02) != 0 && (vdp.regs[0] & 0x02) == 0 { latch_hv(vdp) }
     if reg < 24 { vdp.regs[reg] = u8(value & 0xFF) & REGISTER_BITS[reg] }
-    return
+    return false
   }
   vdp.pending = true
+  false
 }
 
 /// The bits each register keeps: all eight, but register 7's top two.
@@ -145,56 +178,76 @@ const REGISTER_BITS: [24]u8 = #[
   0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
 ]
 
-/// A word written to the data port: into the memory the code register names (nowhere, for a
-/// read code), the address advancing by register 15 — and then an armed VRAM fill.
-pub let write_data = (vdp: mut Vdp, value: u16) -> void => {
-  vdp.pending = false
-  enqueue(vdp, value)
-  store(vdp, value)
+/// A word written to the data port: into the FIFO, for a slot to store in the memory the
+/// code register names (nowhere, for a read code), the address advancing by register 15.
+/// A full FIFO holds the 68000 until a slot takes a word. Under a fill's command, the word
+/// is the fill's value, and the fill starts once it has been stored.
+pub let write_data = (vdp: mut Vdp, value: u16, now: i64) -> void => {
+  end_command(vdp)
+  if (vdp.code & 0x20) != 0 && fill_mode(vdp) { vdp.dma_run = false }
+  let waited = fifo_full(vdp)
+  for fifo_full(vdp) { step_slot(vdp) }
+  let from = if waited { vdp.clock + slot_clocks(vdp) } else { seen_at(vdp, now) }
+  enqueue(vdp, from, value)
   advance(vdp)
-  if vdp.fill_armed {
-    vdp.fill_armed = false
-    fill(vdp, value)
-  }
+  vdp.resume_at = if waited { vdp.clock + slot_clocks(vdp) } else { now }
 }
 
-/// A word into the write FIFO's history, replacing the oldest.
-let enqueue = (vdp: mut Vdp, value: u16) -> void => {
-  vdp.fifo[vdp.fifo_next] = value
-  vdp.fifo_next = (vdp.fifo_next + 1) & 3
-}
-
-/// A word read from the data port, from the memory the code register names, the address
-/// advancing by register 15. Under a write code the port returns its last value again and
-/// the address stays. A CRAM or VSRAM word's unused bits are the FIFO's oldest entry's; a
-/// VSRAM address past its 40 words reads word 0.
-pub let read_data = (vdp: mut Vdp) -> u16 => {
-  vdp.pending = false
-  if (vdp.code & 1) != 0 { return vdp.prefetch }
-  let oldest = vdp.fifo[vdp.fifo_next]
-  let value = match vdp.code & 0x0F {
-    0x0 => vram_word(vdp, vdp.address),
-    0x4 => {
-      let slot = i64((vdp.address >> 1) & 0x3F)
-      let word = if slot < VSRAM_WORDS { vdp.vsram[slot] } else { vdp.vsram[0] }
-      (word & 0x07FF) | (oldest & 0xF800)
-    },
-    0x8 => (vdp.cram[i64((vdp.address >> 1) & 0x3F)] & 0x0EEE) | (oldest & 0xF111),
-    _ => vdp.prefetch,
+/// A word read from the data port: the one a slot fetched ahead, from the memory the code
+/// register names — the 68000 held until it has been. Under a write code (or a code naming
+/// nothing readable) the port returns its last value again. A read lets the next one be
+/// fetched after the read latency: three slots, or two when the 68000 waited for this one
+/// and resumes within 2 master clocks of the VDP.
+pub let read_data = (vdp: mut Vdp, now: i64) -> u16 => {
+  end_command(vdp)
+  vdp.resume_at = now
+  if (vdp.code & 1) != 0 || !readable(vdp.code) { return vdp.prefetch }
+  let waited = !vdp.fetched
+  for !vdp.fetched { step_slot(vdp) }
+  vdp.fetched = false
+  let unit = slot_unit(vdp)
+  if waited {
+    let vdp_now = vdp.clock + slot_clocks(vdp)
+    vdp.resume_at = vdp_now
+    let resumes = now + round_up(vdp_now - now, 7)
+    vdp.read_latency = vdp_now + (if resumes - vdp_now < 2 { 2 } else { 3 }) * unit
+  } else {
+    vdp.read_latency = now + 2 * unit
   }
-  vdp.prefetch = value
-  advance(vdp)
-  value
+  vdp.prefetch
 }
 
 /// The status register, read from the control port; reading it also ends a half-written
 /// command. Bits 15–10 are not the VDP's: they are whatever the 68000's bus last carried
-/// (`open_bus`, the bus's to know). FIFO empty (bit 9) always, as nothing waits in it yet;
-/// the beam's bits ([beam_status]); DMA busy never, as a DMA completes at once.
+/// (`open_bus`, the bus's to know). FIFO empty (9) and full (8); DMA (1) while CD5 is set;
+/// the beam's bits ([beam_status]).
 pub let read_status = (vdp: mut Vdp, open_bus: u16) -> u16 => {
   vdp.pending = false
-  (open_bus & 0xFC00) | 0x0200 | beam_status(vdp)
+  var status = (open_bus & 0xFC00) | beam_status(vdp)
+  if vdp.fifo_read < 0 { status = status | 0x0200 }
+  if fifo_full(vdp) { status = status | 0x0100 }
+  if (vdp.code & 0x20) != 0 { status = status | 0x0002 }
+  status
 }
+
+/// A data-port access ends a half-written command, and whatever was fetched ahead for the
+/// old address is dropped.
+let end_command = (vdp: mut Vdp) -> void => {
+  if !vdp.pending { return }
+  vdp.pending = false
+  vdp.fetched = false
+  vdp.read_half = false
+}
+
+/// Codes a slot fetches ahead for: VRAM (0), VSRAM (4), CRAM (8). (The 8-bit VRAM read, C,
+/// is not yet built.)
+let readable = pure (code: u8) -> bool => {
+  let c = code & 0x0F
+  c == 0x0 || c == 0x4 || c == 0x8
+}
+
+/// `n` rounded up to a multiple of `m`.
+pub let round_up = pure (n: i64, m: i64) -> i64 => ((n + m - 1) / m) * m
 
 // ── DMA ──────────────────────────────────────────────────────────────────────
 
@@ -202,116 +255,59 @@ pub let read_status = (vdp: mut Vdp, open_bus: u16) -> u16 => {
 /// than an ordinary command while it is clear.
 let dma_enabled = pure (vdp: Vdp) -> bool => (vdp.regs[1] & 0x10) != 0
 
-/// The DMA a command with CD5 starts, by register 23's bits 7–6: a 68000 → VDP transfer
-/// (bit 7 clear), which the bus then feeds; a VRAM fill (`10`), which waits for the data
-/// write that supplies its value; a VRAM copy (`11`), which runs now.
-let start_dma = (vdp: mut Vdp) -> void => {
-  match vdp.regs[23] >> 6 {
-    2 => { vdp.fill_armed = true },
-    3 => copy(vdp),
-    _ => { vdp.dma_68k = true },
+/// Register 23's bits 7–6: a VRAM fill (`10`), a VRAM copy (`11`); bit 7 clear is a
+/// 68000 → VDP transfer.
+let fill_mode = pure (vdp: Vdp) -> bool => (vdp.regs[23] & 0xC0) == 0x80
+let copy_mode = pure (vdp: Vdp) -> bool => (vdp.regs[23] & 0xC0) == 0xC0
+let transfer_mode = pure (vdp: Vdp) -> bool => (vdp.regs[23] & 0x80) == 0
+
+/// The DMA a command with CD5 starts: a fill waits for the data write that supplies its
+/// value; a copy runs from the next slot; a 68000 → VDP transfer takes the bus — three
+/// slots on (BlastEm's figure, from logic-analyser captures), it runs, and the bus feeds it
+/// ([dma_68k_running]). Answers whether that last has begun.
+let start_dma = (vdp: mut Vdp) -> bool => {
+  if fill_mode(vdp) { return false }
+  if copy_mode(vdp) {
+    vdp.dma_run = true
+    return false
   }
+  for _ in 0..<3 { step_slot(vdp) }
+  vdp.dma_run = true
+  true
 }
 
-/// Whether a 68000 → VDP transfer is waiting for its next word.
-pub let dma_active = pure (vdp: Vdp) -> bool => vdp.dma_68k
+/// Whether a 68000 → VDP transfer is running — while it is, the bus sets [dma_word] from
+/// [dma_source] and steps the VDP a slot at a time, the 68000 held.
+pub let dma_68k_running = pure (vdp: Vdp) -> bool => vdp.dma_run && transfer_mode(vdp)
 
 /// The 68000 address the transfer's next word comes from: registers 21–23 hold it in words.
 pub let dma_source = pure (vdp: Vdp) -> u32 =>
   (u32(vdp.regs[23] & 0x7F) << 17) | (u32(vdp.regs[22]) << 9) | (u32(vdp.regs[21]) << 1)
 
-/// The transfer's next word, from [dma_source]: stored as a data-port write would store it,
-/// the source advancing by a word — within its 128 KB window, registers 21–22 only — and the
-/// length counting down; the transfer ends when it reaches zero.
-pub let dma_write = (vdp: mut Vdp, word: u16) -> void => {
-  enqueue(vdp, word)
-  store(vdp, word)
-  advance(vdp)
-  step_source(vdp)
-  if count_down(vdp) {
-    vdp.dma_68k = false
-    vdp.code = vdp.code & 0x1F
-  }
-}
+/// The transfer has ended: the 68000 goes on from the slot after the last one it ran in.
+pub let dma_68k_done = (vdp: mut Vdp) -> void => { vdp.resume_at = vdp.clock + slot_clocks(vdp) }
 
-/// VRAM fill, after the triggering word was stored as an ordinary data write: its high byte
-/// fills the length in registers 19–20 — each byte at the address with bit 0 flipped, the
-/// address advancing by register 15 and the source registers by one, as a copy's do.
-let fill = (vdp: mut Vdp, value: u16) -> void => {
-  let high = u8(value >> 8)
-  for {
-    vdp.vram[i64((vdp.address & 0xFFFF) ~ 1)] = high
-    advance(vdp)
-    step_source(vdp)
-    if count_down(vdp) {
-      vdp.code = vdp.code & 0x1F
-      return
-    }
-  }
-}
-
-/// VRAM copy: a byte at a time from the source in registers 21–22 (a byte address here)
-/// to the address register, both with address bit 0 flipped, for the length in 19–20. The
-/// address advances by register 15 per byte and once more at the end, and the copy leaves
-/// the code register's DMA bits (CD5, CD4) clear.
-let copy = (vdp: mut Vdp) -> void => {
-  for {
-    let source = (u16(vdp.regs[22]) << 8) | u16(vdp.regs[21])
-    vdp.vram[i64((vdp.address & 0xFFFF) ~ 1)] = vdp.vram[i64(source ~ 1)]
-    step_source(vdp)
-    advance(vdp)
-    if count_down(vdp) {
-      advance(vdp)
-      vdp.code = vdp.code & 0x0F
-      return
-    }
-  }
-}
-
-/// Registers 21–22, the source, advanced by one.
-let step_source = (vdp: mut Vdp) -> void => {
+/// A DMA has moved a unit: the source advances by one (within its 128 KB window — registers
+/// 21–22 only, for a transfer, whose source counts words), the address by register 15, and
+/// the length counts down; at zero the DMA ends, and CD5 and CD4 with it. A length of zero
+/// counts 65,536.
+let advance_dma = (vdp: mut Vdp) -> void => {
   let next = ((u16(vdp.regs[22]) << 8) | u16(vdp.regs[21])).wrapping_add(1)
   vdp.regs[21] = u8(next & 0xFF)
   vdp.regs[22] = u8(next >> 8)
-}
-
-/// Count the length in registers 19–20 down by one, answering whether it reached zero. A
-/// length of zero counts 65,536.
-let count_down = (vdp: mut Vdp) -> bool => {
+  advance(vdp)
   let length = ((u16(vdp.regs[20]) << 8) | u16(vdp.regs[19])).wrapping_sub(1)
   vdp.regs[19] = u8(length & 0xFF)
   vdp.regs[20] = u8(length >> 8)
-  length == 0
+  if length == 0 {
+    vdp.dma_run = false
+    vdp.code = vdp.code & 0x0F
+  }
 }
 
 // ── Memory ───────────────────────────────────────────────────────────────────
 
-/// A word into the memory the code register names: VRAM (bytes swapped at an odd address),
-/// CRAM (9 bits kept), VSRAM (beyond its 40 words, nowhere). A read code stores nothing.
-let store = (vdp: mut Vdp, value: u16) -> void => {
-  match vdp.code & 0x0F {
-    0x1 => {
-      let even = i64(vdp.address & 0xFFFE)
-      let word = if (vdp.address & 1) != 0 { (value << 8) | (value >> 8) } else { value }
-      vdp.vram[even] = u8(word >> 8)
-      vdp.vram[even + 1] = u8(word & 0xFF)
-    },
-    0x3 => { vdp.cram[i64((vdp.address >> 1) & 0x3F)] = value & 0x0EEE },
-    0x5 => {
-      let slot = i64((vdp.address >> 1) & 0x3F)
-      if slot < VSRAM_WORDS { vdp.vsram[slot] = value & 0x07FF }
-    },
-    _ => {},
-  }
-}
-
 /// The address register advanced by register 15, the auto-increment, within its 17 bits.
 let advance = (vdp: mut Vdp) -> void => {
   vdp.address = (vdp.address + u32(vdp.regs[15])) & 0x1FFFF
-}
-
-/// The VRAM word at an address's even half.
-let vram_word = pure (vdp: Vdp, address: u32) -> u16 => {
-  let even = i64(address & 0xFFFE)
-  (u16(vdp.vram[even]) << 8) | u16(vdp.vram[even + 1])
 }

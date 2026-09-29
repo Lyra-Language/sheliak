@@ -44,9 +44,9 @@ fetch_blastem() {
 
 # Run ROM on BlastEm to PARK, then two frames more — the program is parked, so nothing new is
 # written, and whatever the VDP still had in hand (its FIFO, a DMA running in the access
-# slots) completes — saving the settled state into OUT, and the next frame. Sheliak's
-# accesses and DMA take effect at once, so the settled state is what the two can agree on
-# until they do not; vdpcheck runs the same three frames past PARK.
+# slots) completes — saving the settled state into OUT, and the next frame. vdpcheck runs
+# Sheliak the same three frames past PARK; how long things took is the timing ROMs' to
+# record, in work RAM.
 run_blastem() {
   local rom="$1" park="$2" out="$3"
   mkdir -p "$out"

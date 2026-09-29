@@ -89,6 +89,14 @@ const TESTS: []string = [
   "vint",
   "hint",
   "hv_latch",
+  "fifo_active",
+  "fifo_blank",
+  "dma_vram_active",
+  "dma_vram_blank",
+  "dma_cram_active",
+  "fill_active",
+  "copy_active",
+  "read_active",
 ]
 
 /// The code of the test `name`. (A `match` rather than a table of functions: each takes the
@@ -121,7 +129,15 @@ let body = (name: string, a: mut Asm) -> void => match name {
   "hblank_edges" => hblank_edges(a),
   "vint" => vint(a),
   "hint" => hint(a),
-  _ => hv_latch(a),
+  "hv_latch" => hv_latch(a),
+  "fifo_active" => fifo_active(a),
+  "fifo_blank" => fifo_blank(a),
+  "dma_vram_active" => dma_vram_active(a),
+  "dma_vram_blank" => dma_vram_blank(a),
+  "dma_cram_active" => dma_cram_active(a),
+  "fill_active" => fill_active(a),
+  "copy_active" => copy_active(a),
+  _ => read_active(a),
 }
 
 /// The H slack each timing test is compared with, in slots (tests/vdp.sh reads it from the
@@ -133,8 +149,9 @@ let body = (name: string, a: mut Asm) -> void => match name {
 /// - **16 for an edge a loop polls for** — a loop of 16 slots, which sees the edge anywhere
 ///   in one of them.
 let hslack = pure (name: string) -> i64 => match name {
-  "vint" | "hint" => 8,
-  "vblank_edges" | "hblank_edges" | "hv_latch" => 16,
+  "vint" | "hint" | "fifo_active" | "fifo_blank" | "dma_vram_active" | "dma_vram_blank" |
+    "dma_cram_active" | "read_active" => 8,
+  "vblank_edges" | "hblank_edges" | "hv_latch" | "fill_active" | "copy_active" => 16,
   _ => -1,
 }
 
@@ -404,6 +421,99 @@ let hv_latch = (a: mut Asm) -> void => {
   a.w(0x9240)
   a.w(0x30C1)
   a.split_d0()
+}
+
+// ── Access slots ─────────────────────────────────────────────────────────────
+//
+// How long the VDP holds the 68000, or how long a DMA runs, where the access slots are
+// few (the display drawing: 18 a line in 40-cell mode) and where they are many (V-blank).
+// Each runs its work once, in a handler — an H interrupt on line 30 for the active display,
+// the V interrupt for V-blank — and records the HV counter as it finishes: the lines it
+// took must match exactly, H within the slack. The scratch VRAM at B000 is beyond every
+// table these ROMs use. A handler sets everything it depends on, the DMA source included:
+// draining a pending interrupt may run it once more beforehand (in Sheliak, whose H
+// interrupt counter starts at 0), and a second run must end the same.
+
+/// Twelve VRAM words written back to back on an active line: four fill the FIFO, and each
+/// after waits for a word's two slots.
+let fifo_active = (a: mut Asm) -> void => {
+  let over = a.begin_handler(28)
+  a.burst(12)
+  a.end_handler(over)
+  a.run_on_hint()
+}
+
+/// The same twelve in V-blank, where nearly every slot is the FIFO's.
+let fifo_blank = (a: mut Asm) -> void => {
+  let over = a.begin_handler(30)
+  a.burst(12)
+  a.end_handler(over)
+  a.run_on_vint()
+}
+
+/// A 68000 → VRAM transfer of 64 words on active lines: a word per two slots.
+let dma_vram_active = (a: mut Asm) -> void => {
+  let over = a.begin_handler(28)
+  a.dma_68k(TABLE, 64, 1, 0xB000)
+  a.end_handler(over)
+  a.run_on_hint()
+}
+
+/// 400 words in V-blank.
+let dma_vram_blank = (a: mut Asm) -> void => {
+  let over = a.begin_handler(30)
+  a.dma_68k(TABLE, 400, 1, 0xB000)
+  a.end_handler(over)
+  a.run_on_vint()
+}
+
+/// A 68000 → CRAM transfer of 64 words on active lines: a word a slot.
+let dma_cram_active = (a: mut Asm) -> void => {
+  let over = a.begin_handler(28)
+  a.dma_68k(TABLE, 64, 3, 0)
+  a.end_handler(over)
+  a.run_on_hint()
+}
+
+/// A 512-byte VRAM fill on active lines, a byte a slot; waited for by polling.
+let fill_active = (a: mut Asm) -> void => {
+  let over = a.begin_handler(28)
+  a.reg(15, 1)
+  a.dma_length(512)
+  a.dma_source_bytes(0)
+  a.reg(23, 0x80)
+  a.command(0x21, 0xB000)
+  a.data(0x5A00)
+  a.wait_dma()
+  a.reg(15, 2)
+  a.end_handler(over)
+  a.run_on_hint()
+}
+
+/// A 128-byte VRAM copy on active lines, two slots a byte; waited for by polling.
+let copy_active = (a: mut Asm) -> void => {
+  let over = a.begin_handler(28)
+  a.reg(15, 1)
+  a.dma_length(128)
+  a.dma_source_bytes(0x0000)
+  a.reg(23, 0xC0)
+  a.command(0x30, 0xB000)
+  a.wait_dma()
+  a.reg(15, 2)
+  a.end_handler(over)
+  a.run_on_hint()
+}
+
+/// Six VRAM words read back to back on an active line: each fetched in two slots.
+///
+///     lea $C00000, a2 ; 6 × move.w (a2), d1
+let read_active = (a: mut Asm) -> void => {
+  let over = a.begin_handler(28)
+  a.command(0x0, 0xB000)
+  a.lea(VDP_DATA, 2)
+  for _ in 0..<6 { a.w(0x3212) }
+  a.end_handler(over)
+  a.run_on_hint()
 }
 
 // ── Scenes ───────────────────────────────────────────────────────────────────
@@ -982,4 +1092,42 @@ let wait_for_interrupts = (self: mut Asm, end: u32) -> void => {
   self.l(end)
   self.w(0x66F4)
   self.set_sr(0x2700)
+}
+
+/// A handler for exception `vector`, jumped over by the code before it; see [end_handler].
+let begin_handler = (self: mut Asm, vector: i64) -> i64 => {
+  let over = self.begin_skip()
+  self.vector(vector)
+  over
+}
+
+/// The handler ends by recording the HV counter, and returns.
+let end_handler = (self: mut Asm, over: i64) -> void => {
+  self.record_hv()
+  self.w(0x4E73)
+  self.end_skip(over)
+}
+
+/// The handler run once, on the H interrupt of line 30: display and DMA on, register 10
+/// = 30, the H interrupt enabled.
+let run_on_hint = (self: mut Asm) -> void => {
+  self.timing_setup(0x54)
+  self.reg(10, 30)
+  self.reg(0, 0x14)
+  self.wait_for_interrupts(RAM + 0x10 + 1)
+}
+
+/// The handler run once, on the V interrupt: display, DMA and the V interrupt on.
+let run_on_vint = (self: mut Asm) -> void => {
+  self.timing_setup(0x74)
+  self.wait_for_interrupts(RAM + 0x10 + 1)
+}
+
+/// `n` words to VRAM at B000 as fast as the 68000 writes them:
+///
+///     lea $C00000, a2 ; n × move.w d1, (a2)
+let burst = (self: mut Asm, n: i64) -> void => {
+  self.command(0x1, 0xB000)
+  self.lea(VDP_DATA, 2)
+  for _ in 0..<n { self.w(0x3481) }
 }
