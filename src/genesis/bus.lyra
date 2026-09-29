@@ -5,9 +5,9 @@ module genesis
 //!
 //! **What is here is what a game needs to run without sound**: ROM at 000000–3FFFFF, work
 //! RAM at E00000–FFFFFF (64 KB, mirrored), the VDP at C00000–C0001F, the I/O chip with two
-//! 3-button pads (`io.lyra`), the Z80's RAM and bus lines (no Z80 runs), and the TMSS
-//! register taking its write. No wait states, no sound, no cartridge hardware (SRAM,
-//! mappers) yet.
+//! 3-button pads (`io.lyra`), the Z80 and its side of the machine (`sound.lyra`), and the
+//! TMSS register taking its write. No wait states, no sound chips, no cartridge hardware
+//! (SRAM, mappers) yet.
 //!
 //! **Time is the master clock**, ≈53.69 MHz, kept here: a 68000 cycle is 7 of it, and an
 //! access its four cycles. The VDP's beam is caught up to it whenever the 68000 is about to
@@ -21,6 +21,7 @@ module genesis
 //! applies approximately, at its synchronisation points; here at every access and idle).
 
 import m68k.{ Bus }
+import z80.{ Z80Cpu, new_z80, reset_z80, step as z80_step }
 import vdp.{
   Vdp,
   new_vdp,
@@ -57,9 +58,9 @@ pub struct GenesisBus {
   /// two — the front end's to set, a `PAD_*` mask each.
   ports: [3]Port,
   pads: [2]u8,
-  /// The Z80's 8 KB of RAM, and its bus request line as the 68000 last set it.
-  z80_ram: []u8,
-  z80_bus_requested: bool,
+  /// The Z80, and what it is wired to — run on at every 68000 bus cycle ([run_z80]).
+  z80: Z80Cpu,
+  sound: Z80Side,
 }
 
 /// Master clocks per 68000 cycle.
@@ -83,8 +84,8 @@ pub let genesis_bus = pure (rom: []u8) -> GenesisBus => GenesisBus {
   open_bus: 0,
   ports: #[new_port(), new_port(), new_port()],
   pads: #[0, 0],
-  z80_ram: [0; 8192],
-  z80_bus_requested: false,
+  z80: new_z80(),
+  sound: new_z80_side(rom),
 }
 
 /// Run the machine's clock on to master clock `to`, the VDP with it — for a caller that has
@@ -166,7 +167,7 @@ impl Bus for GenesisBus {
   idle = (self, n) => self.tick(i64(n))
 }
 
-/// `n` 68000 cycles pass, and the refreshes due in them.
+/// `n` 68000 cycles pass, and the refreshes due in them; the Z80 runs on to the same time.
 let tick = (self: mut GenesisBus, n: i64) -> void => {
   self.clock += n * CPU_CLOCKS
   self.refresh += n * CPU_CLOCKS
@@ -174,6 +175,23 @@ let tick = (self: mut GenesisBus, n: i64) -> void => {
     self.refresh -= REFRESH_INTERVAL
     self.clock += REFRESH_DELAY
   }
+  self.run_z80()
+}
+
+/// Run the Z80 on to the master clock — instruction by instruction, so it may end a little
+/// past it — unless the 68000 holds its bus or its reset line, when its time passes idle.
+/// Its /INT follows the VDP, which is run on first.
+let run_z80 = (self: mut GenesisBus) -> void => {
+  if self.sound.clock >= self.clock { return }
+  if self.sound.in_reset || self.sound.bus_requested {
+    self.sound.clock += round_up(self.clock - self.sound.clock, Z80_CLOCKS)
+    return
+  }
+  run_beam(self.vdp, self.clock)
+  self.sound.int_from = self.vdp.z80_int_at
+  var cpu = self.z80
+  for self.sound.clock < self.clock { z80_step(cpu, self.sound) }
+  self.z80 = cpu
 }
 
 /// The word at an even address outside the VDP, with no bus cycle: ROM, work RAM, the Z80's
@@ -201,16 +219,22 @@ let peek_word = pure (self: GenesisBus, a: u32) -> u16 => {
 }
 
 /// A byte written outside RAM and the VDP: into the Z80's space, the I/O chip, or the Z80's
-/// bus request line (A11100, bit 0 of its even byte). The Z80 reset line (A11200) and the
-/// TMSS register (A14000) take their writes and change nothing, as no Z80 runs and this
-/// console has no TMSS.
+/// bus request and reset lines (A11100 and A11200, bit 0 of the even byte: 1 requests the
+/// bus; 0 holds the Z80 in reset, 1 lets it run). The TMSS register (A14000)
+/// takes its write and changes nothing, as this console has no TMSS.
 let write_other = (self: mut GenesisBus, a: u32, value: u8) -> void => {
   if a >= 0xA00000 && a < 0xA10000 {
     write_z80_space(self, a, value)
   } else if a >= 0xA10000 && a < 0xA10020 {
     write_io(self, a, value)
   } else if a == 0xA11100 {
-    self.z80_bus_requested = (value & 1) != 0
+    let requested = (value & 1) != 0
+    // The Z80 resumes a T-state after its bus is given back (BlastEm's figure).
+    if self.sound.bus_requested && !requested { self.sound.clock += Z80_CLOCKS }
+    self.sound.bus_requested = requested
+  } else if a == 0xA11200 {
+    self.sound.in_reset = (value & 1) == 0
+    if self.sound.in_reset { reset_z80(self.z80) }
   }
 }
 

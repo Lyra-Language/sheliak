@@ -85,6 +85,9 @@ pub struct Vdp {
   hint_counter: u8,
   /// The V and H interrupts have been raised and not yet acknowledged.
   vint_pending: bool,
+  /// The master clock the V interrupt was last raised at, which pulls the Z80's /INT low
+  /// for a while (the bus's to time).
+  z80_int_at: i64,
   hint_pending: bool,
   /// The HV counter as latched by register 0 bit 1.
   hv_latch: u16,
@@ -139,6 +142,7 @@ pub let new_vdp = pure () -> Vdp => Vdp {
   phase: Active,
   hint_counter: 0,
   vint_pending: false,
+  z80_int_at: -1000000,
   hint_pending: false,
   hv_latch: 0,
   vscroll_latch: #[0, 0],

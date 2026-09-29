@@ -20,6 +20,10 @@ tests/fetch.sh              # SingleStepTests 68000 suite -> build/deps/680x0 (~
 tests/cpu.sh                # every 68000 test file (~1M tests, ~17 s)
 tests/cpu.sh MOVE.l DIVS    # just these
 tests/legal.sh              # all 65,536 opcodes: legality against Musashi, illegal exceptions
+tests/fetch_z80.sh          # SingleStepTests Z80 suite -> build/deps/z80 (~1.3 GB, once)
+tests/z80.sh                # every Z80 test file (1,604 files, 1.6M tests, ~85 s)
+tests/z80.sh 00 "dd cb __ 06"   # just these
+build/z80scenarios          # the Z80's interrupts, HALT, EI, RETN
 tests/scenarios.sh          # interrupt, STOP and trace scenarios on a scripted bus
 tests/vdp.sh                # VDP test ROMs on Sheliak and BlastEm, compared (needs SDL2)
 tests/vdp.sh fill copy      # just these
@@ -72,8 +76,20 @@ frame-at-a-time shortcuts from the start:
 - **The suite runs every test in supervisor mode**, so the privilege violation is untested
   there: it follows Motorola's documentation and the frame TRAP's tests confirm, and is to
   be checked against real software.
-- **Test data is downloaded, never committed or shipped**: SingleStepTests declares no
-  licence; `tests/fetch.sh` pins it to a commit under `build/`. Musashi's opcode table
+- **Test data is downloaded, never committed or shipped**: SingleStepTests' 68000 suite
+  declares no licence; `tests/fetch.sh` pins it to a commit under `build/`. The Z80 suite
+  (MIT) is treated the same way by `tests/fetch_z80.sh`.
+- **The Z80 is checked T-state by T-state**, as the 68000 is by transaction: every register
+  (the undocumented WZ, Q, P, EI and R included), RAM, and each memory and I/O access with
+  the T-state it came at. Its interrupts, which the suite never raises, are scenarios on
+  Zilog's documented timings (`src/z80scenarios.lyra`).
+- **The Z80 runs on the 68000's bus** (`src/genesis/sound.lyra`): caught up at every 68000
+  bus cycle, a T-state every 15 master clocks. Its bus is granted only out of reset
+  (BlastEm's model; Sega's start-up sequence releases the reset first). Two BlastEm
+  approximations the `z80_run` ROM sidesteps: it ends the Z80's /INT pulse only when it
+  next synchronises (so a handler re-enabling interrupts within the ~171 T-state pulse is
+  taken again a number of times that depends on that), and it schedules the first frame's
+  interrupt from the VDP's power-on mode 4 (an extra one near line 192). Musashi's opcode table
   (MIT) is treated the same way by `tests/legal.sh`, though its licence would allow more.
 - **Legality is decided once, before decoding**: `is_legal` (`src/m68k/legal.lyra`) says
   whether the 68000 has an opcode, and `step` takes the illegal-instruction (or line A/F)
@@ -145,6 +161,8 @@ src/sheliak.lyra     the emulator in an SDL window: frames paced to 59.92 Hz, th
                      through the DAC's levels, keyboard and gamepads as pads 1 and 2
 src/padtest.lyra     the controller ports with buttons held, read through the bus
 src/cputest.lyra     68000 test runner: one SingleStepTests file on stdin
+src/z80test.lyra     Z80 test runner: one SingleStepTests file on stdin
+src/z80scenarios.lyra  the Z80's interrupts, scenario by scenario, on a scripted bus
 src/legaltest.lyra   every opcode through the core, against a legality reference on stdin
 src/scenariotest.lyra  interrupts, STOP and trace, scenario by scenario, on a scripted bus
 src/m68k/            the 68000 (module m68k):
@@ -168,6 +186,11 @@ src/m68k/            the 68000 (module m68k):
   registers.lyra     SWAP, EXT, EXG
   unary.lyra         NEGX, CLR, NEG, NOT, TST (CLR reads before it writes), TAS
   movem.lyra         MOVEM (with the extra read), MOVEP
+src/z80/             the Z80 (module z80):
+  cpu.lyra           Z80Cpu, the Z80Bus trait, step, interrupts (IM 0/1/2, NMI, HALT),
+                     registers and the unprefixed instructions, decoded by x/y/z/p/q
+  prefixed.lyra      CB, DD CB / FD CB, ED (block instructions and their repeat flags)
+  alu.lyra           arithmetic and the flags, bits 5 and 3 included
 src/vdp/             the VDP (module vdp):
   vdp.lyra           memories, registers, the control and data ports, status, DMA's start
   slots.lyra         the access slots: which slots are the 68000's, the FIFO, reads fetched
@@ -181,6 +204,8 @@ src/vdp/             the VDP (module vdp):
                      limits, priority, shadow/highlight
 src/genesis/         the machine (module genesis):
   machine.lyra       power on, and run a frame
+  sound.lyra         the Z80's side: its RAM, the bank window onto the cartridge, its clock
+                     and /INT (from the VDP); the sound chips idle
   io.lyra            the I/O chip (3-button pads, TH-multiplexed) and the Z80's RAM and bus
                      lines (no Z80 runs: its bus is granted at once)
   bus.lyra           the 68000's memory map: ROM, work RAM, the VDP ports, I/O, Z80, TMSS;
@@ -188,7 +213,9 @@ src/genesis/         the machine (module genesis):
                      the 68000 held by the VDP, and fed to it during a transfer
 src/vdproms.lyra     writes the VDP test ROMs (and each one's parking address)
 src/vdpcheck.lyra    runs one test ROM on Sheliak and dumps the VDP for comparison
-tests/fetch.sh       download the pinned suite
+tests/fetch.sh       download the pinned 68000 suite
+tests/fetch_z80.sh   download the pinned Z80 suite
+tests/z80.sh         run it, one line per opcode file
 tests/cpu.sh         run the suite, one line per instruction file
 tests/legal.sh       fetch Musashi's table, expand it (musashi_legal.py), run legaltest
 tests/scenarios.sh   run scenariotest
@@ -234,14 +261,20 @@ the sprite pipeline spread over the line before (Sheliak takes the sprites at on
 and the display switched on or off mid-line (Sheliak stops fetching and draws the
 backdrop).
 
+**The Z80 passes the whole SingleStepTests suite** — all 1,604 files, 1,604,000 tests, at
+T-state resolution, undocumented flags, WZ and the 2018 block-repeat flags included — and
+its interrupt scenarios; it runs in the Genesis (`z80_run` matches BlastEm: a program
+loaded by the 68000, the bank window, V-blank interrupts frame by frame). **Not yet**: its
+reach into the 68000's RAM and I/O through the window (FF, dropped), the 68000's stall when
+it does, the VDP and PSG at 7Fxx, and the sound chips themselves.
+
 **The front end runs a cartridge in a window** (`build/sheliak`), and `tests/vdp.sh` holds
 its picture to BlastEm's too: the texels it sends the window (`--ppm`), byte for byte against
 the screenshot, so its colour conversion is checked, not only the VDP's output. Raw ROM images, two
 3-button pads (the protocol matched against BlastEm with nothing held, `pads`; with buttons
 held, `build/padtest`), frames paced to the console's 59.92 Hz whatever the display's rate,
-~5.5 ms a frame on an M-series Mac. **Not yet: sound (the Z80, the YM2612, the PSG)** —
-a game that waits for its Z80 sound driver to answer will hang — cartridge SRAM and
-mappers, 6-button pads, `.smd` images, regions other than US NTSC.
+~5.5 ms a frame on an M-series Mac. **Not yet: sound (the YM2612, the PSG)**, cartridge
+SRAM and mappers, 6-button pads, `.smd` images, regions other than US NTSC.
 
 **Open**: the VDP's registers at power-on (the ROMs set every one; BlastEm starts register
 10 at FF, uncited), and the beam's position and the H interrupt counter with them (Sheliak

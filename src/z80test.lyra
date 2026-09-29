@@ -1,0 +1,217 @@
+// z80test — runs one SingleStepTests Z80 file against the z80 core.
+//
+//   build/z80test "dd 34" < "build/deps/z80/v1/dd 34.json"
+//   tests/z80.sh [NAME…]                      # every file, or the named ones
+//
+// Each test gives the CPU and RAM before one instruction and after it, and the bus at every
+// T-state. All of it is compared: every register (WZ, Q, P, EI and R among them), every RAM
+// byte the test lists, the length in T-states, and every memory and I/O access with the
+// T-state it happened at and, for a write, what it wrote — so a core that gets the right
+// answer by the wrong bus sequence fails here.
+//
+// Prints one summary line; lists the first few failures with what differed. Exits 1 on any
+// failure, 0 otherwise.
+
+import std.io.{ read_stdin }
+import std.json.{ parse_json, JsonValue }
+import z80.{ Z80Cpu, Z80Bus, new_z80, step }
+
+const SHOWN_FAILURES: i64 = 5
+
+let main = () -> u8 => {
+  let args = program_args()
+  let name = if args.len() > 1 { args[1] } else { "stdin" }
+  let parsed = parse_json(read_stdin())
+  if let Err(e) = parsed {
+    println("${name}: not JSON: ${e.message} at byte ${e.offset}")
+    return 1
+  }
+  var passed = 0
+  var failed = 0
+  for test in parsed.unwrap_or(JsonNull).elements() {
+    match run(test) {
+      Pass => { passed += 1 },
+      Fail(why) => {
+        failed += 1
+        if failed <= SHOWN_FAILURES { println("  ${text_of(test, "name")}: ${why}") }
+      },
+    }
+  }
+  println("${name}: ${passed} passed, ${failed} failed")
+  if failed > 0 { 1 } else { 0 }
+}
+
+/// What one test came to.
+data Verdict =
+  Pass
+  /// What differed, first difference only.
+  | Fail(string)
+
+/// Run one test: build the CPU, RAM and ports, step once, compare.
+let run = (test: JsonValue) -> Verdict => {
+  let initial = test.field("initial").unwrap_or(JsonNull)
+  let final = test.field("final").unwrap_or(JsonNull)
+  var cpu = load(initial)
+  var bus = TestBus { ram: [0; 65536], ports: [], next_port: 0, log: [], t: 0 }
+  for pair in initial.field("ram").unwrap_or(JsonNull).elements() {
+    bus.ram[number(pair, 0)] = u8(number(pair, 1))
+  }
+  for port in test.field("ports").unwrap_or(JsonNull).elements() {
+    if port.element(2).unwrap_or(JsonNull).as_text() == Some("r") {
+      bus.ports.push(u8(number(port, 1)))
+    }
+  }
+  step(cpu, bus)
+
+  let want = load(final)
+  let got_regs = registers(cpu)
+  let want_regs = registers(want)
+  for i, r in want_regs {
+    if got_regs[i] != r { return Fail("${got_regs[i]}, want ${r}") }
+  }
+  for pair in final.field("ram").unwrap_or(JsonNull).elements() {
+    let at = number(pair, 0)
+    if i64(bus.ram[at]) != number(pair, 1) {
+      return Fail("RAM[${u16(at).to_hex()}] is ${bus.ram[at]}, want ${number(pair, 1)}")
+    }
+  }
+  let cycles = test.field("cycles").unwrap_or(JsonNull).elements()
+  var want_log: []string = []
+  for i, cycle in cycles {
+    let pins = cycle.element(2).unwrap_or(JsonNull).as_text().unwrap_or("----")
+    let at = number(cycle, 0)
+    let data = cycle.element(1).unwrap_or(JsonNull).as_int().unwrap_or(-1)
+    if pins == "r-m-" { want_log.push("${i} read ${at}") }
+    if pins == "-wm-" { want_log.push("${i} write ${at} ${data}") }
+    if pins == "r--i" { want_log.push("${i} in ${at}") }
+    if pins == "-w-i" { want_log.push("${i} out ${at} ${data}") }
+  }
+  for i, entry in want_log {
+    if i >= bus.log.len() { return Fail("access ${i} missing, want ${entry}") }
+    if bus.log[i] != entry { return Fail("access ${i} is ${bus.log[i]}, want ${entry}") }
+  }
+  if bus.log.len() > want_log.len() {
+    return Fail("extra access ${want_log.len()}: ${bus.log[want_log.len()]}")
+  }
+  if bus.t != cycles.len() { return Fail("took ${bus.t} T-states, want ${cycles.len()}") }
+  Pass
+}
+
+/// A CPU from a test's `initial` or `final` state.
+let load = pure (state: JsonValue) -> Z80Cpu => {
+  let af_ = u16(member(state, "af_"))
+  Z80Cpu {
+    new_z80() |
+    a: u8(member(state, "a")),
+    f: u8(member(state, "f")),
+    b: u8(member(state, "b")),
+    c: u8(member(state, "c")),
+    d: u8(member(state, "d")),
+    e: u8(member(state, "e")),
+    h: u8(member(state, "h")),
+    l: u8(member(state, "l")),
+    af_: af_,
+    bc_: u16(member(state, "bc_")),
+    de_: u16(member(state, "de_")),
+    hl_: u16(member(state, "hl_")),
+    ix: u16(member(state, "ix")),
+    iy: u16(member(state, "iy")),
+    sp: u16(member(state, "sp")),
+    pc: u16(member(state, "pc")),
+    i: u8(member(state, "i")),
+    r: u8(member(state, "r")),
+    wz: u16(member(state, "wz")),
+    iff1: member(state, "iff1") != 0,
+    iff2: member(state, "iff2") != 0,
+    im: u8(member(state, "im")),
+    q: u8(member(state, "q")),
+    p: member(state, "p") != 0,
+    ei: member(state, "ei") != 0,
+  }
+}
+
+/// Every register, named, for comparison one by one.
+let registers = pure (cpu: Z80Cpu) -> []string => [
+  "A ${cpu.a}",
+  "F ${cpu.f}",
+  "B ${cpu.b}",
+  "C ${cpu.c}",
+  "D ${cpu.d}",
+  "E ${cpu.e}",
+  "H ${cpu.h}",
+  "L ${cpu.l}",
+  "AF' ${cpu.af_}",
+  "BC' ${cpu.bc_}",
+  "DE' ${cpu.de_}",
+  "HL' ${cpu.hl_}",
+  "IX ${cpu.ix}",
+  "IY ${cpu.iy}",
+  "SP ${cpu.sp}",
+  "PC ${cpu.pc}",
+  "I ${cpu.i}",
+  "R ${cpu.r}",
+  "WZ ${cpu.wz}",
+  "IFF1 ${cpu.iff1}",
+  "IFF2 ${cpu.iff2}",
+  "IM ${cpu.im}",
+  "Q ${cpu.q}",
+  "P ${cpu.p}",
+  "EI ${cpu.ei}",
+]
+
+// ── The test bus ─────────────────────────────────────────────────────────────
+
+/// 64 KB of RAM, the bytes the test's port reads answer, in order, and a log of every
+/// access, spelled as `run` spells the test's own.
+struct TestBus {
+  ram: []u8,
+  ports: []u8,
+  next_port: i64,
+  log: []string,
+  /// T-states so far.
+  t: i64,
+}
+
+impl Z80Bus for TestBus {
+  fetch = (self, address) => {
+    self.log.push("${self.t + 1} read ${address}")
+    self.t += 4
+    self.ram[i64(address)]
+  }
+  read = (self, address) => {
+    self.log.push("${self.t + 1} read ${address}")
+    self.t += 3
+    self.ram[i64(address)]
+  }
+  write = (self, address, value) => {
+    self.log.push("${self.t + 1} write ${address} ${value}")
+    self.ram[i64(address)] = value
+    self.t += 3
+  }
+  input = (self, port) => {
+    self.log.push("${self.t + 2} in ${port}")
+    self.t += 4
+    let v = if self.next_port < self.ports.len() { self.ports[self.next_port] } else { 0xFF }
+    self.next_port += 1
+    v
+  }
+  output = (self, port, value) => {
+    self.log.push("${self.t + 2} out ${port} ${value}")
+    self.t += 4
+  }
+  idle = (self, n) => { self.t += n }
+  // The suite has no interrupts: /INT stays high.
+  interrupt_line = pure (self) => false
+  acknowledge = pure (self) => 0xFF
+}
+
+// ── JSON ─────────────────────────────────────────────────────────────────────
+
+let member = pure (v: JsonValue, key: string) -> i64 =>
+  v.field(key).unwrap_or(JsonNull).as_int().unwrap_or(0)
+
+let number = pure (v: JsonValue, i: i64) -> i64 =>
+  v.element(i).unwrap_or(JsonNull).as_int().unwrap_or(0)
+
+let text_of = pure (v: JsonValue, key: string) -> string =>
+  v.field(key).unwrap_or(JsonNull).as_text().unwrap_or("?")

@@ -1,0 +1,287 @@
+module z80
+//! The prefixed groups: CB (rotates, shifts, bit operations), DD CB / FD CB (the same on
+//! (IX+d) and (IY+d)), and ED (the rest: 16-bit arithmetic with carry, block moves,
+//! compares and I/O, the interrupt modes, I and R).
+
+// ── CB ───────────────────────────────────────────────────────────────────────
+
+/// CB `op`: x=0 rotate/shift y, x=1 BIT y, x=2 RES y, x=3 SET y; z the register, or (HL).
+let execute_cb<b> where b: Z80Bus = (cpu: mut Z80Cpu, bus: mut b, op: u8) -> void => {
+  let x = op >> 6
+  let y = (op >> 3) & 7
+  let z = op & 7
+  if z != 6 {
+    let v = reg(cpu, z, 0)
+    match x {
+      0 => set_reg(cpu, z, 0, rotate(cpu, y, v)),
+      1 => bit(cpu, y, v, v),
+      2 => set_reg(cpu, z, 0, v & ~(u8(1) << y)),
+      _ => set_reg(cpu, z, 0, v | (u8(1) << y)),
+    }
+    return
+  }
+  let address = hl(cpu)
+  let v = bus.read(address)
+  bus.idle(1)
+  match x {
+    0 => bus.write(address, rotate(cpu, y, v)),
+    // BIT n,(HL) takes Y and X from WZ's high byte — the one place MEMPTR shows.
+    1 => bit(cpu, y, v, u8(cpu.wz >> 8)),
+    2 => bus.write(address, v & ~(u8(1) << y)),
+    _ => bus.write(address, v | (u8(1) << y)),
+  }
+}
+
+/// BIT n: Z (and P/V with it) if the bit is clear, S if it is bit 7 and set, H set, C
+/// kept; Y and X from `xy_from`.
+let bit = (cpu: mut Z80Cpu, n: u8, v: u8, xy_from: u8) -> void => {
+  let tested = v & (u8(1) << n)
+  var f = (cpu.f & FLAG_C) | FLAG_H | (xy_from & (FLAG_Y | FLAG_X))
+  if tested == 0 { f = f | FLAG_Z | FLAG_P }
+  if n == 7 && tested != 0 { f = f | FLAG_S }
+  set_flags(cpu, f)
+}
+
+/// DD CB d op / FD CB d op: the displacement, then the opcode — read, not fetched, so R does
+/// not count it — with 2 T-states, then the operation on (IX+d). The result of a rotate,
+/// RES or SET also goes to register z, unless z is 6 (the documented form).
+let execute_index_cb<b> where b: Z80Bus = (
+  cpu: mut Z80Cpu,
+  bus: mut b,
+  index: u8
+) -> void => {
+  let d = fetch_byte(cpu, bus)
+  let address = hl_of(cpu, index).wrapping_add(sign_extend(d))
+  cpu.wz = address
+  let op = fetch_byte(cpu, bus)
+  bus.idle(2)
+  let x = op >> 6
+  let y = (op >> 3) & 7
+  let z = op & 7
+  let v = bus.read(address)
+  bus.idle(1)
+  if x == 1 {
+    bit(cpu, y, v, u8(address >> 8))
+    return
+  }
+  let r = match x {
+    0 => rotate(cpu, y, v),
+    2 => v & ~(u8(1) << y),
+    _ => v | (u8(1) << y),
+  }
+  bus.write(address, r)
+  if z != 6 { set_reg(cpu, z, 0, r) }
+}
+
+// ── ED ───────────────────────────────────────────────────────────────────────
+
+/// ED `op`. Anything not listed is an 8-T-state no-op.
+let execute_ed<b> where b: Z80Bus = (cpu: mut Z80Cpu, bus: mut b, op: u8) -> void => {
+  let x = op >> 6
+  let y = (op >> 3) & 7
+  let z = op & 7
+  if x == 1 {
+    execute_ed_x1(cpu, bus, y, z)
+  } else if x == 2 && y >= 4 && z <= 3 {
+    block(cpu, bus, y, z)
+  }
+}
+
+let execute_ed_x1<b> where b: Z80Bus = (
+  cpu: mut Z80Cpu,
+  bus: mut b,
+  y: u8,
+  z: u8
+) -> void => {
+  let p = y >> 1
+  let q = y & 1
+  match z {
+    0 => {
+      // IN r,(C); y=6 is IN (C), flags only.
+      let port = bc(cpu)
+      let v = bus.input(port)
+      cpu.wz = port.wrapping_add(1)
+      set_flags(cpu, szp(v) | (cpu.f & FLAG_C))
+      if y != 6 { set_reg(cpu, y, 0, v) }
+    },
+    1 => {
+      // OUT (C),r; y=6 is OUT (C),0 on an NMOS chip.
+      let port = bc(cpu)
+      bus.output(port, if y == 6 { 0 } else { reg(cpu, y, 0) })
+      cpu.wz = port.wrapping_add(1)
+    },
+    2 => {
+      let target = hl(cpu)
+      cpu.wz = target.wrapping_add(1)
+      bus.idle(7)
+      let v = rp(cpu, p, 0)
+      set_hl(cpu, if q == 0 { sbc16(cpu, target, v) } else { adc16(cpu, target, v) })
+    },
+    3 => {
+      let address = fetch_word(cpu, bus)
+      if q == 0 {
+        let v = rp(cpu, p, 0)
+        bus.write(address, u8(v & 0xFF))
+        bus.write(address.wrapping_add(1), u8(v >> 8))
+      } else {
+        let low = bus.read(address)
+        let high = bus.read(address.wrapping_add(1))
+        set_rp(cpu, p, 0, (u16(high) << 8) | u16(low))
+      }
+      cpu.wz = address.wrapping_add(1)
+    },
+    4 => {
+      let v = cpu.a
+      cpu.a = 0
+      sub_a(cpu, v, false, true)
+    },
+    5 => {
+      // RETN and RETI: both restore IFF1 from IFF2.
+      cpu.iff1 = cpu.iff2
+      cpu.pc = pop(cpu, bus)
+      cpu.wz = cpu.pc
+    },
+    6 => { cpu.im = if (y & 3) == 0 || (y & 3) == 1 { 0 } else { (y & 3) - 1 } },
+    _ => match y {
+      0 => {
+        bus.idle(1)
+        cpu.i = cpu.a
+      },
+      1 => {
+        bus.idle(1)
+        cpu.r = cpu.a
+      },
+      2 | 3 => {
+        bus.idle(1)
+        cpu.a = if y == 2 { cpu.i } else { cpu.r }
+        var f = sz_xy(cpu.a) | (cpu.f & FLAG_C)
+        if cpu.iff2 { f = f | FLAG_P }
+        set_flags(cpu, f)
+        cpu.p = true
+      },
+      4 | 5 => {
+        // RRD and RLD: a nibble rotation through A and (HL).
+        let address = hl(cpu)
+        let v = bus.read(address)
+        bus.idle(4)
+        let result = if y == 4 {
+          ((cpu.a & 0x0F) << 4) | (v >> 4)
+        } else {
+          (v << 4) | (cpu.a & 0x0F)
+        }
+        cpu.a = if y == 4 { (cpu.a & 0xF0) | (v & 0x0F) } else { (cpu.a & 0xF0) | (v >> 4) }
+        bus.write(address, result)
+        cpu.wz = address.wrapping_add(1)
+        set_flags(cpu, szp(cpu.a) | (cpu.f & FLAG_C))
+      },
+      _ => {},
+    },
+  }
+}
+
+/// The block instructions: y 4 increments, 5 decrements, 6 and 7 repeat; z 0 LD, 1 CP,
+/// 2 IN, 3 OUT. A repeat not yet done backs PC up to run the instruction again, 5 T-states.
+let block<b> where b: Z80Bus = (cpu: mut Z80Cpu, bus: mut b, y: u8, z: u8) -> void => {
+  let up = (y & 1) == 0
+  let repeat = y >= 6
+  let delta: u16 = if up { 1 } else { 0xFFFF }
+  match z {
+    0 => {
+      let v = bus.read(hl(cpu))
+      bus.write(de(cpu), v)
+      bus.idle(2)
+      set_hl(cpu, hl(cpu).wrapping_add(delta))
+      set_de(cpu, de(cpu).wrapping_add(delta))
+      set_bc(cpu, bc(cpu).wrapping_sub(1))
+      let n = v.wrapping_add(cpu.a)
+      var f = (cpu.f & (FLAG_S | FLAG_Z | FLAG_C)) | (n & FLAG_X) | ((n << 4) & FLAG_Y)
+      if bc(cpu) != 0 { f = f | FLAG_P }
+      set_flags(cpu, f)
+      if repeat && bc(cpu) != 0 { repeat_block(cpu, bus) }
+    },
+    1 => {
+      let v = bus.read(hl(cpu))
+      bus.idle(5)
+      set_hl(cpu, hl(cpu).wrapping_add(delta))
+      set_bc(cpu, bc(cpu).wrapping_sub(1))
+      cpu.wz = cpu.wz.wrapping_add(delta)
+      let r = cpu.a.wrapping_sub(v)
+      let half = (cpu.a & 0x0F) < (v & 0x0F)
+      let n = if half { r.wrapping_sub(1) } else { r }
+      var f = (cpu.f & FLAG_C) | FLAG_N | (r & FLAG_S) | (n & FLAG_X) | ((n << 4) & FLAG_Y)
+      if r == 0 { f = f | FLAG_Z }
+      if half { f = f | FLAG_H }
+      if bc(cpu) != 0 { f = f | FLAG_P }
+      set_flags(cpu, f)
+      if repeat && bc(cpu) != 0 && r != 0 { repeat_block(cpu, bus) }
+    },
+    2 => {
+      bus.idle(1)
+      let port = bc(cpu)
+      let v = bus.input(port)
+      cpu.wz = port.wrapping_add(delta)
+      bus.write(hl(cpu), v)
+      set_hl(cpu, hl(cpu).wrapping_add(delta))
+      cpu.b = cpu.b.wrapping_sub(1)
+      let k = u32(v) + u32(if up { cpu.c.wrapping_add(1) } else { cpu.c.wrapping_sub(1) })
+      block_io_flags(cpu, v, k)
+      if repeat && cpu.b != 0 {
+        repeat_block(cpu, bus)
+        repeat_io_flags(cpu, v)
+      }
+    },
+    _ => {
+      bus.idle(1)
+      let v = bus.read(hl(cpu))
+      cpu.b = cpu.b.wrapping_sub(1)
+      let port = bc(cpu)
+      bus.output(port, v)
+      cpu.wz = port.wrapping_add(delta)
+      set_hl(cpu, hl(cpu).wrapping_add(delta))
+      let k = u32(v) + u32(cpu.l)
+      block_io_flags(cpu, v, k)
+      if repeat && cpu.b != 0 {
+        repeat_block(cpu, bus)
+        repeat_io_flags(cpu, v)
+      }
+    },
+  }
+}
+
+/// INI, IND, OUTI, OUTD's flags: S, Z, Y, X from B; N from the byte's bit 7; H and C set
+/// when `k` (the byte plus C±1, or plus L) carries past 255; P/V the parity of (k & 7) ~ B.
+let block_io_flags = (cpu: mut Z80Cpu, v: u8, k: u32) -> void => {
+  var f = sz_xy(cpu.b) | parity(u8(k & 7) ~ cpu.b)
+  if (v & 0x80) != 0 { f = f | FLAG_N }
+  if k > 255 { f = f | FLAG_H | FLAG_C }
+  set_flags(cpu, f)
+}
+
+/// A repeating block instruction goes round again: PC back to its ED, 5 T-states — in
+/// which Y and X are taken from PC's bits 13 and 11 (the 2018 finding the suite encodes).
+let repeat_block<b> where b: Z80Bus = (cpu: mut Z80Cpu, bus: mut b) -> void => {
+  bus.idle(5)
+  cpu.pc = cpu.pc.wrapping_sub(2)
+  cpu.wz = cpu.pc.wrapping_add(1)
+  let high = u8(cpu.pc >> 8)
+  set_flags(cpu, (cpu.f & ~(FLAG_Y | FLAG_X)) | (high & (FLAG_Y | FLAG_X)))
+}
+
+/// INIR, INDR, OTIR, OTDR going round again also adjust H and P/V: with the carry set, by
+/// the byte's bit 7 and B stepped the way the next pass will step it; without, by B.
+let repeat_io_flags = (cpu: mut Z80Cpu, v: u8) -> void => {
+  var f = cpu.f
+  if (f & FLAG_C) != 0 {
+    let next = if (v & 0x80) != 0 { cpu.b.wrapping_sub(1) } else { cpu.b.wrapping_add(1) }
+    let half = if (v & 0x80) != 0 { (cpu.b & 0x0F) == 0x00 } else { (cpu.b & 0x0F) == 0x0F }
+    f = (f & ~FLAG_H) | (if half { FLAG_H } else { 0 })
+    f = f ~ (parity(next & 7) ~ FLAG_P)
+  } else {
+    f = f ~ (parity(cpu.b & 7) ~ FLAG_P)
+  }
+  set_flags(cpu, f)
+}
+
+/// A displacement byte as a 16-bit two's complement offset.
+let sign_extend = pure (d: u8) -> u16 =>
+  if (d & 0x80) != 0 { 0xFF00 | u16(d) } else { u16(d) }

@@ -129,7 +129,10 @@ let next_slot = (vdp: mut Vdp) -> void => {
     vdp.hslot == (if wide { 167 } else { 135 }) {
     vdp.phase = Blank
   }
-  if vdp.hslot == 0 && vdp.vcounter == blank_line { vdp.vint_pending = true }
+  if vdp.hslot == 0 && vdp.vcounter == blank_line {
+    vdp.vint_pending = true
+    vdp.z80_int_at = vdp.clock
+  }
   render_slot(vdp)
   access_slot(vdp)
 }

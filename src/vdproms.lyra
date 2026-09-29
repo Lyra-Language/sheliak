@@ -101,6 +101,7 @@ const TESTS: []string = [
   "mid_vscroll",
   "mid_cram_h32",
   "pads",
+  "z80_run",
 ]
 
 /// The code of the test `name`. (A `match` rather than a table of functions: each takes the
@@ -145,7 +146,8 @@ let body = (name: string, a: mut Asm) -> void => match name {
   "mid_cram" => mid_cram(a),
   "mid_vscroll" => mid_vscroll(a),
   "mid_cram_h32" => mid_cram_h32(a),
-  _ => pads(a),
+  "pads" => pads(a),
+  _ => z80_run(a),
 }
 
 /// The H slack each timing test is compared with, in slots (tests/vdp.sh reads it from the
@@ -609,6 +611,61 @@ let pads = (a: mut Asm) -> void => {
     }
   }
   a.move_b_abs_abs(0xA10001, at)
+}
+
+// ── The Z80 ──────────────────────────────────────────────────────────────────
+
+/// A Z80 program loaded and run, and what it did read back: the byte it read from the
+/// cartridge through the bank window, and the V-blank interrupts (IM 1) it counts while
+/// halted — zeroed after the first frame, then read after each of four more (the 68000
+/// taking the bus for each look). The first frame is not counted: BlastEm schedules the
+/// Z80's first interrupt from the VDP's power-on state (mode 4, whose V-blank starts at
+/// line 192), so its Z80 gets one more there than the VDP's actual V-blank gives.
+///
+///     0000  di ; ld sp,2000h ; im 1
+///           ld hl,6000h ; ld a,1 ; ld (hl),a ; ld (hl),a ; xor a ; ld b,7
+///           loop: ld (hl),a ; djnz loop           — bank 3: bits 1, 1, then seven 0s
+///           ld a,(0FFF5h) ; ld (1000h),a          — cartridge 1FFF5: BOUNDARY_TABLE, 02
+///           ei ; wait: halt ; jr wait
+///     0038  ld hl,1001h ; inc (hl)               — IM 1: count,
+///           ld b,20 ; delay: djnz delay ; ei ; ret
+///
+/// The handler outlasts /INT (~260 T-states against ~171), so each V-blank is counted once:
+/// a handler that re-enables interrupts while /INT is still low is taken again, and how
+/// often BlastEm cannot say — it ends the pulse only when it next synchronises the Z80.
+let z80_run = (a: mut Asm) -> void => {
+  let program: []u8 = [
+    0xF3, 0x31, 0x00, 0x20, 0xED, 0x56,
+    0x21, 0x00, 0x60, 0x3E, 0x01, 0x77, 0x77, 0xAF, 0x06, 0x07, 0x77, 0x10, 0xFD,
+    0x3A, 0xF5, 0xFF, 0x32, 0x00, 0x10,
+    0xFB, 0x76, 0x18, 0xFD,
+  ]
+  let handler: []u8 = [0x21, 0x01, 0x10, 0x34, 0x06, 0x14, 0x10, 0xFE, 0xFB, 0xC9]
+  // Sega's sequence: ask for the bus and release the reset, wait for the grant, load, then
+  // reset the Z80, give the bus back and release the reset, so it starts at 0000.
+  a.reg(1, 0x44)
+  a.move_w_imm_abs(0x0100, 0xA11100)
+  a.move_w_imm_abs(0x0100, 0xA11200)
+  a.wait_z80_bus()
+  for i, byte in program { a.move_b_imm_abs(byte, 0xA00000 + u32(i)) }
+  for i, byte in handler { a.move_b_imm_abs(byte, 0xA00038 + u32(i)) }
+  a.move_b_imm_abs(0, 0xA01000)
+  a.move_b_imm_abs(0, 0xA01001)
+  a.move_w_imm_abs(0x0000, 0xA11200)
+  a.move_w_imm_abs(0x0000, 0xA11100)
+  a.move_w_imm_abs(0x0100, 0xA11200)
+  a.sync_to_display()
+  a.take_z80_bus()
+  a.move_b_imm_abs(0, 0xA01001)
+  a.move_w_imm_abs(0x0000, 0xA11100)
+  for k in 0..<4 {
+    a.sync_to_display()
+    a.take_z80_bus()
+    a.move_b_abs_abs(0xA01001, RAM + 0x11 + u32(k))
+    a.move_w_imm_abs(0x0000, 0xA11100)
+  }
+  a.take_z80_bus()
+  a.move_b_abs_abs(0xA01000, RAM + 0x10)
 }
 
 // ── Scenes ───────────────────────────────────────────────────────────────────
@@ -1241,4 +1298,20 @@ let run_every_frame = (self: mut Asm) -> void => {
   self.reg(0, 0x14)
   display_on(self)
   self.set_sr(0x2000)
+}
+
+/// Ask for the Z80's bus and wait until it is granted.
+let take_z80_bus = (self: mut Asm) -> void => {
+  self.move_w_imm_abs(0x0100, 0xA11100)
+  self.wait_z80_bus()
+}
+
+/// Wait for the Z80's bus to be granted: bit 0 of A11100 reads 0.
+///
+///     loop: btst #0, $A11100 ; bne.s loop
+let wait_z80_bus = (self: mut Asm) -> void => {
+  self.w(0x0839)
+  self.w(0x0000)
+  self.l(0xA11100)
+  self.w(0x66F6)
 }

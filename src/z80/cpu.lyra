@@ -1,0 +1,691 @@
+module z80
+//! The Zilog Z80, machine cycle by machine cycle — the Genesis's sound processor, and the
+//! Master System's and Game Gear's CPU.
+//!
+//! **What is modelled is what the pins show**, as for the 68000: every instruction is a
+//! sequence of opcode fetches, memory and I/O reads and writes, and internal T-states on a
+//! [Z80Bus], in the chip's order and timing, and the core is checked against the
+//! SingleStepTests Z80 suite, which records the bus at every T-state (`tests/z80.sh`).
+//! **Time lives in the bus**: the CPU keeps no clock.
+//!
+//! **The undocumented state is modelled, because the suite checks it**: flag bits 5 and 3
+//! (Y, X), the internal WZ register (MEMPTR, which leaks into BIT n,(HL)'s flags), Q (which
+//! of the last instruction's flags SCF and CCF see), and R, the refresh counter.
+//!
+//! Decoding follows the opcode's fields — x (bits 7–6), y (5–3), z (2–0), and y's p (5–4)
+//! and q (3) — the scheme of Cristian Dinu's "Decoding Z80 Opcodes".
+
+/// The Z80's registers and internal state.
+pub struct Z80Cpu {
+  a: u8,
+  f: u8,
+  b: u8,
+  c: u8,
+  d: u8,
+  e: u8,
+  h: u8,
+  l: u8,
+  /// The shadow set, which EX AF,AF' and EXX swap in.
+  af_: u16,
+  bc_: u16,
+  de_: u16,
+  hl_: u16,
+  ix: u16,
+  iy: u16,
+  sp: u16,
+  pc: u16,
+  /// The interrupt vector base (IM 2) and the refresh counter, whose low 7 bits count
+  /// opcode fetches.
+  i: u8,
+  r: u8,
+  /// MEMPTR: an address register the chip keeps between instructions, undocumented.
+  wz: u16,
+  iff1: bool,
+  iff2: bool,
+  /// Interrupt mode, 0–2.
+  im: u8,
+  /// The flags the last instruction wrote, or 0 if it wrote none — what SCF and CCF take
+  /// Y and X from.
+  q: u8,
+  /// The last instruction was LD A,I or LD A,R (whose P/V an interrupt accepted after it
+  /// would see cleared on an NMOS chip).
+  p: bool,
+  /// The last instruction was EI: no maskable interrupt is taken before the next one.
+  ei: bool,
+  /// HALT is in effect: fetches go on, but nothing runs until an interrupt.
+  halted: bool,
+  /// This instruction has written the flags ([set_flags]); [q] follows from it.
+  flags_written: bool,
+  /// An NMI edge not yet taken.
+  nmi_pending: bool,
+}
+
+/// What the Z80 is wired to. Each method is one machine cycle, or, for `idle`, T-states
+/// with nothing on the bus:
+///
+/// - `fetch` is an opcode fetch (M1), 4 T-states, the opcode read at the second; the
+///   refresh the chip does in its last two is not a bus access here.
+/// - `read` and `write` are memory, 3 T-states, the access at the second.
+/// - `input` and `output` are I/O, 4 T-states, the access at the third; the port is the
+///   full 16-bit address the chip puts out.
+/// - `interrupt_line` is /INT now; it takes no time. `acknowledge` is the interrupt
+///   acknowledge cycle, 6 T-states, answering the byte the device puts on the bus.
+pub trait Z80Bus {
+  fetch: (mut Self, u16) -> u8
+  read: (mut Self, u16) -> u8
+  write: (mut Self, u16, u8) -> void
+  input: (mut Self, u16) -> u8
+  output: (mut Self, u16, u8) -> void
+  idle: (mut Self, i64) -> void
+  interrupt_line: (mut Self) -> bool
+  acknowledge: (mut Self) -> u8
+}
+
+/// A Z80 at power-on: AF and SP all ones, everything else zero, interrupts off, mode 0.
+pub let new_z80 = pure () -> Z80Cpu => Z80Cpu {
+  a: 0xFF,
+  f: 0xFF,
+  b: 0,
+  c: 0,
+  d: 0,
+  e: 0,
+  h: 0,
+  l: 0,
+  af_: 0,
+  bc_: 0,
+  de_: 0,
+  hl_: 0,
+  ix: 0,
+  iy: 0,
+  sp: 0xFFFF,
+  pc: 0,
+  i: 0,
+  r: 0,
+  wz: 0,
+  iff1: false,
+  iff2: false,
+  im: 0,
+  q: 0,
+  p: false,
+  ei: false,
+  halted: false,
+  flags_written: false,
+  nmi_pending: false,
+}
+
+/// /RESET: PC, I and R cleared, interrupts off, mode 0 — the other registers keep what they
+/// held.
+pub let reset_z80 = (cpu: mut Z80Cpu) -> void => {
+  cpu.pc = 0
+  cpu.i = 0
+  cpu.r = 0
+  cpu.iff1 = false
+  cpu.iff2 = false
+  cpu.im = 0
+  cpu.halted = false
+  cpu.ei = false
+  cpu.p = false
+  cpu.q = 0
+}
+
+/// One step: an NMI or an interrupt taken if one is due, else one instruction (or, halted,
+/// one idle fetch).
+pub let step<b> where b: Z80Bus = (cpu: mut Z80Cpu, bus: mut b) -> void => {
+  cpu.flags_written = false
+  if cpu.nmi_pending {
+    take_nmi(cpu, bus)
+  } else if cpu.iff1 && !cpu.ei && bus.interrupt_line() {
+    take_interrupt(cpu, bus)
+  } else if cpu.halted {
+    // HALT fetches on from the address after it, taking nothing, until an interrupt.
+    bus.fetch(cpu.pc)
+    bump_r(cpu)
+    cpu.ei = false
+    cpu.p = false
+  } else {
+    cpu.ei = false
+    cpu.p = false
+    let op = fetch_opcode(cpu, bus)
+    execute(cpu, bus, op, 0)
+  }
+  cpu.q = if cpu.flags_written { cpu.f } else { 0 }
+}
+
+// ── Interrupts ───────────────────────────────────────────────────────────────
+
+/// The NMI: 11 T-states — a fetch cycle the chip ignores, one more, PC pushed — to 0066,
+/// IFF1 cleared and IFF2 keeping what it was.
+let take_nmi<b> where b: Z80Bus = (cpu: mut Z80Cpu, bus: mut b) -> void => {
+  cpu.nmi_pending = false
+  cpu.halted = false
+  bus.fetch(cpu.pc)
+  bump_r(cpu)
+  bus.idle(1)
+  cpu.iff1 = false
+  push(cpu, bus, cpu.pc)
+  cpu.pc = 0x0066
+  cpu.wz = cpu.pc
+  cpu.ei = false
+  cpu.p = false
+}
+
+/// A maskable interrupt, by mode: 0 runs the byte the device answers as an opcode (the
+/// Genesis answers FF, RST 38), 1 is RST 38, 2 takes its address from the table at I and
+/// the device's byte. Interrupts are disabled on the way in.
+let take_interrupt<b> where b: Z80Bus = (cpu: mut Z80Cpu, bus: mut b) -> void => {
+  cpu.halted = false
+  cpu.iff1 = false
+  cpu.iff2 = false
+  cpu.p = false
+  let data = bus.acknowledge()
+  bump_r(cpu)
+  match cpu.im {
+    2 => {
+      bus.idle(1)
+      push(cpu, bus, cpu.pc)
+      let table = (u16(cpu.i) << 8) | u16(data)
+      let low = bus.read(table)
+      let high = bus.read(table.wrapping_add(1))
+      cpu.pc = (u16(high) << 8) | u16(low)
+      cpu.wz = cpu.pc
+    },
+    1 => {
+      bus.idle(1)
+      push(cpu, bus, cpu.pc)
+      cpu.pc = 0x0038
+      cpu.wz = cpu.pc
+    },
+    _ => {
+      // Mode 0 runs the byte as an opcode; only an RST (or a one-byte instruction) makes
+      // sense there, which is all a Genesis or a Master System ever answers.
+      execute(cpu, bus, data, 0)
+    },
+  }
+}
+
+// ── Fetching ─────────────────────────────────────────────────────────────────
+
+/// An opcode fetch at PC (M1): PC advances and R counts it.
+let fetch_opcode<b> where b: Z80Bus = (cpu: mut Z80Cpu, bus: mut b) -> u8 => {
+  let op = bus.fetch(cpu.pc)
+  cpu.pc = cpu.pc.wrapping_add(1)
+  bump_r(cpu)
+  op
+}
+
+/// R's low 7 bits count; bit 7 is only ever what LD R,A put there.
+let bump_r = (cpu: mut Z80Cpu) -> void => { cpu.r = (cpu.r & 0x80) | ((cpu.r + 1) & 0x7F) }
+
+/// The byte at PC, as an operand.
+let fetch_byte<b> where b: Z80Bus = (cpu: mut Z80Cpu, bus: mut b) -> u8 => {
+  let v = bus.read(cpu.pc)
+  cpu.pc = cpu.pc.wrapping_add(1)
+  v
+}
+
+/// The word at PC, low byte first.
+let fetch_word<b> where b: Z80Bus = (cpu: mut Z80Cpu, bus: mut b) -> u16 => {
+  let low = fetch_byte(cpu, bus)
+  let high = fetch_byte(cpu, bus)
+  (u16(high) << 8) | u16(low)
+}
+
+let push<b> where b: Z80Bus = (cpu: mut Z80Cpu, bus: mut b, v: u16) -> void => {
+  cpu.sp = cpu.sp.wrapping_sub(1)
+  bus.write(cpu.sp, u8(v >> 8))
+  cpu.sp = cpu.sp.wrapping_sub(1)
+  bus.write(cpu.sp, u8(v & 0xFF))
+}
+
+let pop<b> where b: Z80Bus = (cpu: mut Z80Cpu, bus: mut b) -> u16 => {
+  let low = bus.read(cpu.sp)
+  cpu.sp = cpu.sp.wrapping_add(1)
+  let high = bus.read(cpu.sp)
+  cpu.sp = cpu.sp.wrapping_add(1)
+  (u16(high) << 8) | u16(low)
+}
+
+// ── Registers ────────────────────────────────────────────────────────────────
+//
+// `index` is the prefix in force: 0 none (HL), 1 DD (IX), 2 FD (IY). Under one, H and L
+// name the index register's halves — except in an instruction that also names (HL), which
+// is (IX+d) there while H and L stay H and L.
+
+let bc = pure (cpu: Z80Cpu) -> u16 => (u16(cpu.b) << 8) | u16(cpu.c)
+let de = pure (cpu: Z80Cpu) -> u16 => (u16(cpu.d) << 8) | u16(cpu.e)
+let hl = pure (cpu: Z80Cpu) -> u16 => (u16(cpu.h) << 8) | u16(cpu.l)
+let af = pure (cpu: Z80Cpu) -> u16 => (u16(cpu.a) << 8) | u16(cpu.f)
+
+let set_bc = (cpu: mut Z80Cpu, v: u16) -> void => {
+  cpu.b = u8(v >> 8)
+  cpu.c = u8(v & 0xFF)
+}
+
+let set_de = (cpu: mut Z80Cpu, v: u16) -> void => {
+  cpu.d = u8(v >> 8)
+  cpu.e = u8(v & 0xFF)
+}
+
+let set_hl = (cpu: mut Z80Cpu, v: u16) -> void => {
+  cpu.h = u8(v >> 8)
+  cpu.l = u8(v & 0xFF)
+}
+
+let set_af = (cpu: mut Z80Cpu, v: u16) -> void => {
+  cpu.a = u8(v >> 8)
+  cpu.f = u8(v & 0xFF)
+}
+
+/// HL, IX or IY, by the prefix.
+let hl_of = pure (cpu: Z80Cpu, index: u8) -> u16 => match index {
+  1 => cpu.ix,
+  2 => cpu.iy,
+  _ => hl(cpu),
+}
+
+let set_hl_of = (cpu: mut Z80Cpu, index: u8, v: u16) -> void => match index {
+  1 => { cpu.ix = v },
+  2 => { cpu.iy = v },
+  _ => set_hl(cpu, v),
+}
+
+/// Register pair p: BC, DE, HL (or the index), SP.
+let rp = pure (cpu: Z80Cpu, p: u8, index: u8) -> u16 => match p {
+  0 => bc(cpu),
+  1 => de(cpu),
+  2 => hl_of(cpu, index),
+  _ => cpu.sp,
+}
+
+let set_rp = (cpu: mut Z80Cpu, p: u8, index: u8, v: u16) -> void => match p {
+  0 => set_bc(cpu, v),
+  1 => set_de(cpu, v),
+  2 => set_hl_of(cpu, index, v),
+  _ => { cpu.sp = v },
+}
+
+/// Register pair p for PUSH and POP: BC, DE, HL (or the index), AF.
+let rp2 = pure (cpu: Z80Cpu, p: u8, index: u8) -> u16 =>
+  if p == 3 { af(cpu) } else { rp(cpu, p, index) }
+
+let set_rp2 = (cpu: mut Z80Cpu, p: u8, index: u8, v: u16) -> void =>
+  if p == 3 { set_af(cpu, v) } else { set_rp(cpu, p, index, v) }
+
+/// Register y (not 6, which is memory): B, C, D, E, H, L, -, A — H and L the index's halves
+/// under a prefix.
+let reg = pure (cpu: Z80Cpu, y: u8, index: u8) -> u8 => match y {
+  0 => cpu.b,
+  1 => cpu.c,
+  2 => cpu.d,
+  3 => cpu.e,
+  4 => u8(hl_of(cpu, index) >> 8),
+  5 => u8(hl_of(cpu, index) & 0xFF),
+  _ => cpu.a,
+}
+
+let set_reg = (cpu: mut Z80Cpu, y: u8, index: u8, v: u8) -> void => match y {
+  0 => { cpu.b = v },
+  1 => { cpu.c = v },
+  2 => { cpu.d = v },
+  3 => { cpu.e = v },
+  4 => set_hl_of(cpu, index, (hl_of(cpu, index) & 0x00FF) | (u16(v) << 8)),
+  5 => set_hl_of(cpu, index, (hl_of(cpu, index) & 0xFF00) | u16(v)),
+  _ => { cpu.a = v },
+}
+
+/// The address of the memory operand (HL) — or, under a prefix, (IX+d): the displacement
+/// read, then 5 T-states adding it (`extra` of them are spent elsewhere by the caller).
+let memory_operand<b> where b: Z80Bus = (
+  cpu: mut Z80Cpu,
+  bus: mut b,
+  index: u8,
+  internal: i64
+) -> u16 => {
+  if index == 0 { return hl(cpu) }
+  let d = fetch_byte(cpu, bus)
+  let address = hl_of(cpu, index).wrapping_add(sign_extend(d))
+  bus.idle(internal)
+  cpu.wz = address
+  address
+}
+
+/// Condition y: NZ, Z, NC, C, PO, PE, P, M.
+let condition = pure (cpu: Z80Cpu, y: u8) -> bool => match y {
+  0 => (cpu.f & FLAG_Z) == 0,
+  1 => (cpu.f & FLAG_Z) != 0,
+  2 => (cpu.f & FLAG_C) == 0,
+  3 => (cpu.f & FLAG_C) != 0,
+  4 => (cpu.f & FLAG_P) == 0,
+  5 => (cpu.f & FLAG_P) != 0,
+  6 => (cpu.f & FLAG_S) == 0,
+  _ => (cpu.f & FLAG_S) != 0,
+}
+
+// ── The unprefixed instructions ──────────────────────────────────────────────
+
+/// Run the instruction whose opcode `op` has been fetched, under prefix `index`.
+let execute<b> where b: Z80Bus = (
+  cpu: mut Z80Cpu,
+  bus: mut b,
+  op: u8,
+  index: u8
+) -> void => {
+  let x = op >> 6
+  let y = (op >> 3) & 7
+  let z = op & 7
+  match x {
+    0 => execute_x0(cpu, bus, y, z, index),
+    1 => {
+      if op == 0x76 {
+        // HALT: PC is already past it.
+        cpu.halted = true
+      } else if y == 6 {
+        let address = memory_operand(cpu, bus, index, 5)
+        bus.write(address, reg(cpu, z, 0))
+      } else if z == 6 {
+        let address = memory_operand(cpu, bus, index, 5)
+        set_reg(cpu, y, 0, bus.read(address))
+      } else {
+        set_reg(cpu, y, index, reg(cpu, z, index))
+      }
+    },
+    2 => {
+      let v = if z == 6 {
+        bus.read(memory_operand(cpu, bus, index, 5))
+      } else {
+        reg(cpu, z, index)
+      }
+      alu(cpu, y, v)
+    },
+    _ => execute_x3(cpu, bus, y, z, index),
+  }
+}
+
+let execute_x0<b> where b: Z80Bus = (
+  cpu: mut Z80Cpu,
+  bus: mut b,
+  y: u8,
+  z: u8,
+  index: u8
+) -> void => {
+  let p = y >> 1
+  let q = y & 1
+  match z {
+    0 => match y {
+      0 => {},
+      1 => {
+        let t = af(cpu)
+        set_af(cpu, cpu.af_)
+        cpu.af_ = t
+      },
+      2 => {
+        bus.idle(1)
+        let d = fetch_byte(cpu, bus)
+        cpu.b = cpu.b.wrapping_sub(1)
+        if cpu.b != 0 { jump_relative(cpu, bus, d) }
+      },
+      3 => jump_relative(cpu, bus, fetch_byte(cpu, bus)),
+      _ => {
+        let d = fetch_byte(cpu, bus)
+        if condition(cpu, y - 4) { jump_relative(cpu, bus, d) }
+      },
+    },
+    1 => {
+      if q == 0 {
+        set_rp(cpu, p, index, fetch_word(cpu, bus))
+      } else {
+        let target = hl_of(cpu, index)
+        cpu.wz = target.wrapping_add(1)
+        bus.idle(7)
+        set_hl_of(cpu, index, add16(cpu, target, rp(cpu, p, index)))
+      }
+    },
+    2 => indirect_load(cpu, bus, p, q, index),
+    3 => {
+      bus.idle(2)
+      let v = rp(cpu, p, index)
+      set_rp(cpu, p, index, if q == 0 { v.wrapping_add(1) } else { v.wrapping_sub(1) })
+    },
+    4 | 5 => {
+      if y == 6 {
+        let address = memory_operand(cpu, bus, index, 5)
+        let v = bus.read(address)
+        bus.idle(1)
+        bus.write(address, if z == 4 { inc8(cpu, v) } else { dec8(cpu, v) })
+      } else {
+        let v = reg(cpu, y, index)
+        set_reg(cpu, y, index, if z == 4 { inc8(cpu, v) } else { dec8(cpu, v) })
+      }
+    },
+    6 => {
+      if y == 6 {
+        let address = memory_operand(cpu, bus, index, 0)
+        let v = fetch_byte(cpu, bus)
+        if index != 0 { bus.idle(2) }
+        bus.write(address, v)
+      } else {
+        set_reg(cpu, y, index, fetch_byte(cpu, bus))
+      }
+    },
+    _ => match y {
+      0 | 1 | 2 | 3 => rotate_a(cpu, y),
+      4 => daa(cpu),
+      5 => {
+        cpu.a = ~cpu.a
+        set_flags(
+          cpu,
+          (cpu.f & (FLAG_S | FLAG_Z | FLAG_P | FLAG_C)) | FLAG_H | FLAG_N | (cpu.a & (FLAG_Y | FLAG_X))
+        )
+      },
+      6 => {
+        let xy = ((cpu.q ~ cpu.f) | cpu.a) & (FLAG_Y | FLAG_X)
+        set_flags(cpu, (cpu.f & (FLAG_S | FLAG_Z | FLAG_P)) | xy | FLAG_C)
+      },
+      _ => {
+        let xy = ((cpu.q ~ cpu.f) | cpu.a) & (FLAG_Y | FLAG_X)
+        let h = if (cpu.f & FLAG_C) != 0 { FLAG_H } else { 0 }
+        let c = (cpu.f & FLAG_C) ~ FLAG_C
+        set_flags(cpu, (cpu.f & (FLAG_S | FLAG_Z | FLAG_P)) | xy | h | c)
+      },
+    },
+  }
+}
+
+/// JR and DJNZ taken: 5 T-states adding the displacement.
+let jump_relative<b> where b: Z80Bus = (cpu: mut Z80Cpu, bus: mut b, d: u8) -> void => {
+  bus.idle(5)
+  cpu.pc = cpu.pc.wrapping_add(sign_extend(d))
+  cpu.wz = cpu.pc
+}
+
+/// The x=0, z=2 loads: LD (BC),A, LD (DE),A, LD (nn),HL, LD (nn),A and their reverses.
+let indirect_load<b> where b: Z80Bus = (
+  cpu: mut Z80Cpu,
+  bus: mut b,
+  p: u8,
+  q: u8,
+  index: u8
+) -> void => {
+  match p {
+    0 | 1 => {
+      let address = if p == 0 { bc(cpu) } else { de(cpu) }
+      if q == 0 {
+        bus.write(address, cpu.a)
+        cpu.wz = (u16(cpu.a) << 8) | (address.wrapping_add(1) & 0xFF)
+      } else {
+        cpu.a = bus.read(address)
+        cpu.wz = address.wrapping_add(1)
+      }
+    },
+    2 => {
+      let address = fetch_word(cpu, bus)
+      if q == 0 {
+        let v = hl_of(cpu, index)
+        bus.write(address, u8(v & 0xFF))
+        bus.write(address.wrapping_add(1), u8(v >> 8))
+      } else {
+        let low = bus.read(address)
+        let high = bus.read(address.wrapping_add(1))
+        set_hl_of(cpu, index, (u16(high) << 8) | u16(low))
+      }
+      cpu.wz = address.wrapping_add(1)
+    },
+    _ => {
+      let address = fetch_word(cpu, bus)
+      if q == 0 {
+        bus.write(address, cpu.a)
+        cpu.wz = (u16(cpu.a) << 8) | (address.wrapping_add(1) & 0xFF)
+      } else {
+        cpu.a = bus.read(address)
+        cpu.wz = address.wrapping_add(1)
+      }
+    },
+  }
+}
+
+let execute_x3<b> where b: Z80Bus = (
+  cpu: mut Z80Cpu,
+  bus: mut b,
+  y: u8,
+  z: u8,
+  index: u8
+) -> void => {
+  let p = y >> 1
+  let q = y & 1
+  match z {
+    0 => {
+      bus.idle(1)
+      if condition(cpu, y) {
+        cpu.pc = pop(cpu, bus)
+        cpu.wz = cpu.pc
+      }
+    },
+    1 => {
+      if q == 0 {
+        set_rp2(cpu, p, index, pop(cpu, bus))
+      } else {
+        match p {
+          0 => {
+            cpu.pc = pop(cpu, bus)
+            cpu.wz = cpu.pc
+          },
+          1 => {
+            let t_bc = bc(cpu)
+            let t_de = de(cpu)
+            let t_hl = hl(cpu)
+            set_bc(cpu, cpu.bc_)
+            set_de(cpu, cpu.de_)
+            set_hl(cpu, cpu.hl_)
+            cpu.bc_ = t_bc
+            cpu.de_ = t_de
+            cpu.hl_ = t_hl
+          },
+          2 => { cpu.pc = hl_of(cpu, index) },
+          _ => {
+            bus.idle(2)
+            cpu.sp = hl_of(cpu, index)
+          },
+        }
+      }
+    },
+    2 => {
+      let target = fetch_word(cpu, bus)
+      cpu.wz = target
+      if condition(cpu, y) { cpu.pc = target }
+    },
+    3 => match y {
+      0 => {
+        cpu.pc = fetch_word(cpu, bus)
+        cpu.wz = cpu.pc
+      },
+      1 => {
+        if index == 0 {
+          execute_cb(cpu, bus, fetch_opcode(cpu, bus))
+        } else {
+          execute_index_cb(cpu, bus, index)
+        }
+      },
+      2 => {
+        let n = fetch_byte(cpu, bus)
+        let port = (u16(cpu.a) << 8) | u16(n)
+        bus.output(port, cpu.a)
+        cpu.wz = (u16(cpu.a) << 8) | (u16(n).wrapping_add(1) & 0xFF)
+      },
+      3 => {
+        let n = fetch_byte(cpu, bus)
+        let port = (u16(cpu.a) << 8) | u16(n)
+        cpu.a = bus.input(port)
+        cpu.wz = port.wrapping_add(1)
+      },
+      4 => {
+        let low = bus.read(cpu.sp)
+        let high = bus.read(cpu.sp.wrapping_add(1))
+        bus.idle(1)
+        let v = hl_of(cpu, index)
+        bus.write(cpu.sp.wrapping_add(1), u8(v >> 8))
+        bus.write(cpu.sp, u8(v & 0xFF))
+        bus.idle(2)
+        let got = (u16(high) << 8) | u16(low)
+        set_hl_of(cpu, index, got)
+        cpu.wz = got
+      },
+      5 => {
+        let t = de(cpu)
+        set_de(cpu, hl(cpu))
+        set_hl(cpu, t)
+      },
+      6 => {
+        cpu.iff1 = false
+        cpu.iff2 = false
+      },
+      _ => {
+        cpu.iff1 = true
+        cpu.iff2 = true
+        cpu.ei = true
+      },
+    },
+    4 => {
+      let target = fetch_word(cpu, bus)
+      cpu.wz = target
+      if condition(cpu, y) {
+        bus.idle(1)
+        push(cpu, bus, cpu.pc)
+        cpu.pc = target
+      }
+    },
+    5 => {
+      if q == 0 {
+        bus.idle(1)
+        push(cpu, bus, rp2(cpu, p, index))
+      } else {
+        match p {
+          0 => {
+            let target = fetch_word(cpu, bus)
+            cpu.wz = target
+            bus.idle(1)
+            push(cpu, bus, cpu.pc)
+            cpu.pc = target
+          },
+          // A DD or FD prefix is an instruction of its own that writes no flags, so what
+          // follows sees Q clear.
+          1 => {
+            cpu.q = 0
+            execute(cpu, bus, fetch_opcode(cpu, bus), 1)
+          },
+          2 => execute_ed(cpu, bus, fetch_opcode(cpu, bus)),
+          _ => {
+            cpu.q = 0
+            execute(cpu, bus, fetch_opcode(cpu, bus), 2)
+          },
+        }
+      }
+    },
+    6 => alu(cpu, y, fetch_byte(cpu, bus)),
+    _ => {
+      bus.idle(1)
+      push(cpu, bus, cpu.pc)
+      cpu.pc = u16(y) * 8
+      cpu.wz = cpu.pc
+    },
+  }
+}

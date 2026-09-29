@@ -1,0 +1,235 @@
+module z80
+//! The arithmetic and its flags. Every result sets the undocumented bits 5 and 3 (Y and X)
+//! from somewhere — usually the result, but not always, which is most of what this file is
+//! for — and each writer marks the flags written, for [Z80.q].
+
+/// The flag register's bits.
+pub const FLAG_S: u8 = 0x80
+pub const FLAG_Z: u8 = 0x40
+pub const FLAG_Y: u8 = 0x20
+pub const FLAG_H: u8 = 0x10
+pub const FLAG_X: u8 = 0x08
+pub const FLAG_P: u8 = 0x04
+pub const FLAG_N: u8 = 0x02
+pub const FLAG_C: u8 = 0x01
+
+/// Set the flags, marking them written by this instruction.
+let set_flags = (cpu: mut Z80Cpu, f: u8) -> void => {
+  cpu.f = f
+  cpu.flags_written = true
+}
+
+/// S, Z, Y and X from a byte.
+let sz_xy = pure (v: u8) -> u8 => {
+  var f = v & (FLAG_S | FLAG_Y | FLAG_X)
+  if v == 0 { f = f | FLAG_Z }
+  f
+}
+
+/// P/V as parity: set when `v` has an even number of bits set.
+let parity = pure (v: u8) -> u8 => {
+  var x = v ~ (v >> 4)
+  x = x ~ (x >> 2)
+  x = x ~ (x >> 1)
+  if (x & 1) == 0 { FLAG_P } else { 0 }
+}
+
+/// S, Z, Y, X and parity: what the logical operations, rotates and inputs set.
+let szp = pure (v: u8) -> u8 => sz_xy(v) | parity(v)
+
+// ── 8-bit arithmetic on A ────────────────────────────────────────────────────
+
+/// A + v (+ carry).
+let add_a = (cpu: mut Z80Cpu, v: u8, with_carry: bool) -> void => {
+  let carry: u32 = if with_carry && (cpu.f & FLAG_C) != 0 { 1 } else { 0 }
+  let a = u32(cpu.a)
+  let total = a + u32(v) + carry
+  let r = u8(total & 0xFF)
+  var f = sz_xy(r)
+  if ((a & 0xF) + (u32(v) & 0xF) + carry) > 0xF { f = f | FLAG_H }
+  if ((~(a ~ u32(v))) & (a ~ total) & 0x80) != 0 { f = f | FLAG_P }
+  if total > 0xFF { f = f | FLAG_C }
+  cpu.a = r
+  set_flags(cpu, f)
+}
+
+/// A - v (- carry), stored unless it is a compare — whose Y and X come from the operand,
+/// not the result.
+let sub_a = (cpu: mut Z80Cpu, v: u8, with_carry: bool, store: bool) -> void => {
+  let carry: i64 = if with_carry && (cpu.f & FLAG_C) != 0 { 1 } else { 0 }
+  let a = i64(cpu.a)
+  let diff = (a - i64(v) - carry) & 0x1FF
+  let r = u8(diff & 0xFF)
+  var f = (sz_xy(r) & ~(FLAG_Y | FLAG_X)) | FLAG_N
+  f = f | (if store { r } else { v }) & (FLAG_Y | FLAG_X)
+  if (a & 0xF) < (i64(v) & 0xF) + carry { f = f | FLAG_H }
+  if ((a ~ i64(v)) & (a ~ diff) & 0x80) != 0 { f = f | FLAG_P }
+  if a < i64(v) + carry { f = f | FLAG_C }
+  if store { cpu.a = r }
+  set_flags(cpu, f)
+}
+
+let and_a = (cpu: mut Z80Cpu, v: u8) -> void => {
+  cpu.a = cpu.a & v
+  set_flags(cpu, szp(cpu.a) | FLAG_H)
+}
+
+let xor_a = (cpu: mut Z80Cpu, v: u8) -> void => {
+  cpu.a = cpu.a ~ v
+  set_flags(cpu, szp(cpu.a))
+}
+
+let or_a = (cpu: mut Z80Cpu, v: u8) -> void => {
+  cpu.a = cpu.a | v
+  set_flags(cpu, szp(cpu.a))
+}
+
+/// The eight ALU operations by number: ADD, ADC, SUB, SBC, AND, XOR, OR, CP.
+let alu = (cpu: mut Z80Cpu, op: u8, v: u8) -> void => match op {
+  0 => add_a(cpu, v, false),
+  1 => add_a(cpu, v, true),
+  2 => sub_a(cpu, v, false, true),
+  3 => sub_a(cpu, v, true, true),
+  4 => and_a(cpu, v),
+  5 => xor_a(cpu, v),
+  6 => or_a(cpu, v),
+  _ => sub_a(cpu, v, false, false),
+}
+
+/// v + 1: carry kept, overflow at 7F → 80.
+let inc8 = (cpu: mut Z80Cpu, v: u8) -> u8 => {
+  let r = v.wrapping_add(1)
+  var f = (cpu.f & FLAG_C) | sz_xy(r)
+  if (r & 0x0F) == 0 { f = f | FLAG_H }
+  if r == 0x80 { f = f | FLAG_P }
+  set_flags(cpu, f)
+  r
+}
+
+/// v - 1: carry kept, overflow at 80 → 7F.
+let dec8 = (cpu: mut Z80Cpu, v: u8) -> u8 => {
+  let r = v.wrapping_sub(1)
+  var f = (cpu.f & FLAG_C) | sz_xy(r) | FLAG_N
+  if (r & 0x0F) == 0x0F { f = f | FLAG_H }
+  if r == 0x7F { f = f | FLAG_P }
+  set_flags(cpu, f)
+  r
+}
+
+// ── 16-bit arithmetic ────────────────────────────────────────────────────────
+
+/// ADD HL, rp: S, Z and P/V kept; H from bit 11, C from bit 15, Y and X from the high byte.
+let add16 = (cpu: mut Z80Cpu, a: u16, b: u16) -> u16 => {
+  let total = u32(a) + u32(b)
+  let r = u16(total & 0xFFFF)
+  var f = (cpu.f & (FLAG_S | FLAG_Z | FLAG_P)) | (u8(r >> 8) & (FLAG_Y | FLAG_X))
+  if ((u32(a) & 0xFFF) + (u32(b) & 0xFFF)) > 0xFFF { f = f | FLAG_H }
+  if total > 0xFFFF { f = f | FLAG_C }
+  set_flags(cpu, f)
+  r
+}
+
+/// ADC HL, rp: every flag, over 16 bits.
+let adc16 = (cpu: mut Z80Cpu, a: u16, b: u16) -> u16 => {
+  let carry: u32 = if (cpu.f & FLAG_C) != 0 { 1 } else { 0 }
+  let total = u32(a) + u32(b) + carry
+  let r = u16(total & 0xFFFF)
+  var f = u8(r >> 8) & (FLAG_S | FLAG_Y | FLAG_X)
+  if r == 0 { f = f | FLAG_Z }
+  if ((u32(a) & 0xFFF) + (u32(b) & 0xFFF) + carry) > 0xFFF { f = f | FLAG_H }
+  if ((~(u32(a) ~ u32(b))) & (u32(a) ~ total) & 0x8000) != 0 { f = f | FLAG_P }
+  if total > 0xFFFF { f = f | FLAG_C }
+  set_flags(cpu, f)
+  r
+}
+
+/// SBC HL, rp.
+let sbc16 = (cpu: mut Z80Cpu, a: u16, b: u16) -> u16 => {
+  let carry: i64 = if (cpu.f & FLAG_C) != 0 { 1 } else { 0 }
+  let diff = (i64(a) - i64(b) - carry) & 0x1FFFF
+  let r = u16(diff & 0xFFFF)
+  var f = (u8(r >> 8) & (FLAG_S | FLAG_Y | FLAG_X)) | FLAG_N
+  if r == 0 { f = f | FLAG_Z }
+  if (i64(a) & 0xFFF) < (i64(b) & 0xFFF) + carry { f = f | FLAG_H }
+  if ((i64(a) ~ i64(b)) & (i64(a) ~ diff) & 0x8000) != 0 { f = f | FLAG_P }
+  if i64(a) < i64(b) + carry { f = f | FLAG_C }
+  set_flags(cpu, f)
+  r
+}
+
+// ── Rotates and shifts ───────────────────────────────────────────────────────
+
+/// The CB group's eight rotates and shifts by number — RLC, RRC, RL, RR, SLA, SRA, SLL (the
+/// undocumented one, shifting in a 1), SRL — with S, Z, parity, Y, X from the result.
+let rotate = (cpu: mut Z80Cpu, op: u8, v: u8) -> u8 => {
+  let carry_in: u8 = if (cpu.f & FLAG_C) != 0 { 1 } else { 0 }
+  var r: u8 = 0
+  var carry: u8 = 0
+  match op {
+    0 => {
+      carry = v >> 7
+      r = (v << 1) | carry
+    },
+    1 => {
+      carry = v & 1
+      r = (v >> 1) | (carry << 7)
+    },
+    2 => {
+      carry = v >> 7
+      r = (v << 1) | carry_in
+    },
+    3 => {
+      carry = v & 1
+      r = (v >> 1) | (carry_in << 7)
+    },
+    4 => {
+      carry = v >> 7
+      r = v << 1
+    },
+    5 => {
+      carry = v & 1
+      r = (v >> 1) | (v & 0x80)
+    },
+    6 => {
+      carry = v >> 7
+      r = (v << 1) | 1
+    },
+    _ => {
+      carry = v & 1
+      r = v >> 1
+    },
+  }
+  set_flags(cpu, szp(r) | carry)
+  r
+}
+
+/// RLCA, RRCA, RLA, RRA: the accumulator rotates, S, Z and P/V kept, Y and X from A.
+let rotate_a = (cpu: mut Z80Cpu, op: u8) -> void => {
+  let keep = cpu.f & (FLAG_S | FLAG_Z | FLAG_P)
+  let r = rotate(cpu, op, cpu.a)
+  cpu.a = r
+  set_flags(cpu, keep | (r & (FLAG_Y | FLAG_X)) | (cpu.f & FLAG_C))
+}
+
+/// DAA: A adjusted to BCD after an addition or subtraction (N says which).
+let daa = (cpu: mut Z80Cpu) -> void => {
+  let a = cpu.a
+  var correction: u8 = 0
+  var carry = cpu.f & FLAG_C
+  if (cpu.f & FLAG_H) != 0 || (a & 0x0F) > 9 { correction = 0x06 }
+  if carry != 0 || a > 0x99 {
+    correction = correction | 0x60
+    carry = FLAG_C
+  }
+  let subtract = (cpu.f & FLAG_N) != 0
+  let r = if subtract { a.wrapping_sub(correction) } else { a.wrapping_add(correction) }
+  var f = szp(r) | carry | (cpu.f & FLAG_N)
+  let half = if subtract {
+    (cpu.f & FLAG_H) != 0 && (a & 0x0F) < 6
+  } else {
+    (a & 0x0F) > 9
+  }
+  if half { f = f | FLAG_H }
+  cpu.a = r
+  set_flags(cpu, f)
+}

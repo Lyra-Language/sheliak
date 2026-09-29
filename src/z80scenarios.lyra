@@ -1,0 +1,202 @@
+// z80scenarios — the Z80's interrupts, which the SingleStepTests suite never raises, scenario
+// by scenario on a scripted bus, against Zilog's documented behaviour: IM 1 takes 13
+// T-states, IM 2 19, an NMI 11, IM 0 running the RST the bus answers 13; EI holds
+// interrupts off for one instruction; HALT is left for the address after it; RETN puts
+// IFF2 back in IFF1.
+//
+//   build/z80scenarios        prints each failure, then a verdict; exits 1 on any
+
+import z80.{ Z80Cpu, Z80Bus, new_z80, step }
+
+let main = () -> u8 => {
+  var failed = 0
+  failed += check("IM 1: RST 38, 13 T-states", im1())
+  failed += check("EI holds interrupts off for one instruction", ei_delay())
+  failed += check("IM 2: through the table at I and the bus's byte, 19 T-states", im2())
+  failed += check("IM 0: the RST the bus answers, 13 T-states", im0())
+  failed += check("NMI: to 0066, 11 T-states, IFF2 kept", nmi())
+  failed += check("HALT: left for the address after it", halt())
+  failed += check("RETN: IFF2 back into IFF1", retn())
+  failed += check("DI: no interrupt taken", disabled())
+  if failed == 0 {
+    println("z80scenarios: all passed")
+    return 0
+  }
+  println("z80scenarios: ${failed} failed")
+  1
+}
+
+let check = (name: string, problem: string) -> i64 => {
+  if problem == "" { return 0 }
+  println("  ${name}: ${problem}")
+  1
+}
+
+// ── Scenarios ────────────────────────────────────────────────────────────────
+
+/// Interrupts on in mode 1, the line raised: the next step takes it.
+let im1 = () -> string => {
+  var cpu = Z80Cpu { new_z80() | pc: 0x1000, sp: 0x8000, iff1: true, iff2: true, im: 1 }
+  var bus = scripted([0x00])
+  bus.line = true
+  step(cpu, bus)
+  expect_interrupt(cpu, bus, 0x0038, 0x1000, 13)
+}
+
+/// EI; NOP with the line already raised: EI runs, NOP runs, then the interrupt — returning
+/// to the instruction after the NOP.
+let ei_delay = () -> string => {
+  var cpu = Z80Cpu { new_z80() | pc: 0x1000, sp: 0x8000, im: 1 }
+  var bus = scripted([0xFB, 0x00, 0x00])
+  bus.line = true
+  step(cpu, bus)
+  if cpu.pc != 0x1001 { return "EI left PC at ${cpu.pc.to_hex()}" }
+  step(cpu, bus)
+  if cpu.pc != 0x1002 { return "the interrupt came before the instruction after EI" }
+  bus.t = 0
+  step(cpu, bus)
+  expect_interrupt(cpu, bus, 0x0038, 0x1002, 13)
+}
+
+/// Mode 2, I = 12, the bus answering 34: the handler's address is the word at 1234.
+let im2 = () -> string => {
+  var cpu = Z80Cpu { new_z80() | pc: 0x1000, sp: 0x8000, iff1: true, iff2: true, im: 2, i: 0x12 }
+  var bus = scripted([0x00])
+  bus.line = true
+  bus.answer = 0x34
+  bus.ram[0x1234] = 0x78
+  bus.ram[0x1235] = 0x56
+  step(cpu, bus)
+  expect_interrupt(cpu, bus, 0x5678, 0x1000, 19)
+}
+
+/// Mode 0, the bus answering FF (RST 38), as the Genesis's does.
+let im0 = () -> string => {
+  var cpu = Z80Cpu { new_z80() | pc: 0x1000, sp: 0x8000, iff1: true, iff2: true, im: 0 }
+  var bus = scripted([0x00])
+  bus.line = true
+  bus.answer = 0xFF
+  step(cpu, bus)
+  expect_interrupt(cpu, bus, 0x0038, 0x1000, 13)
+}
+
+/// An NMI with interrupts enabled: IFF1 cleared, IFF2 left set for RETN to restore.
+let nmi = () -> string => {
+  var cpu = Z80Cpu { new_z80() | pc: 0x1000, sp: 0x8000, iff1: true, iff2: true }
+  cpu.nmi_pending = true
+  var bus = scripted([0x00])
+  step(cpu, bus)
+  if cpu.pc != 0x0066 { return "PC ${cpu.pc.to_hex()}, want 0066" }
+  if bus.t != 11 { return "${bus.t} T-states, want 11" }
+  if cpu.iff1 || !cpu.iff2 { return "IFF1 ${cpu.iff1}, IFF2 ${cpu.iff2}; want false, true" }
+  let top = pushed(cpu, bus)
+  if top != 0x1000 { return "pushed ${top.to_hex()}, want 1000" }
+  ""
+}
+
+/// HALT with interrupts on: steps idle at the address after it, 4 T-states each, until the
+/// line rises; the interrupt returns past the HALT.
+let halt = () -> string => {
+  var cpu = Z80Cpu { new_z80() | pc: 0x1000, sp: 0x8000, iff1: true, iff2: true, im: 1 }
+  var bus = scripted([0x76, 0x00])
+  step(cpu, bus)
+  if !cpu.halted || cpu.pc != 0x1001 { return "HALT: halted ${cpu.halted}, PC ${cpu.pc.to_hex()}" }
+  bus.t = 0
+  step(cpu, bus)
+  step(cpu, bus)
+  if cpu.pc != 0x1001 || bus.t != 8 { return "halted steps: PC ${cpu.pc.to_hex()}, ${bus.t} T-states" }
+  bus.line = true
+  bus.t = 0
+  step(cpu, bus)
+  if cpu.halted { return "still halted after the interrupt" }
+  expect_interrupt(cpu, bus, 0x0038, 0x1001, 13)
+}
+
+/// After an NMI, RETN returns and re-enables what IFF2 held.
+let retn = () -> string => {
+  var cpu = Z80Cpu { new_z80() | pc: 0x2000, sp: 0x7FFE, iff1: false, iff2: true }
+  var bus = scripted([])
+  bus.ram[0x2000] = 0xED
+  bus.ram[0x2001] = 0x45
+  bus.ram[0x7FFE] = 0x34
+  bus.ram[0x7FFF] = 0x12
+  step(cpu, bus)
+  if cpu.pc != 0x1234 { return "PC ${cpu.pc.to_hex()}, want 1234" }
+  if !cpu.iff1 { return "IFF1 still clear" }
+  if bus.t != 14 { return "${bus.t} T-states, want 14" }
+  ""
+}
+
+/// DI, then the line raised: instructions run on.
+let disabled = () -> string => {
+  var cpu = Z80Cpu { new_z80() | pc: 0x1000, sp: 0x8000, iff1: true, iff2: true, im: 1 }
+  var bus = scripted([0xF3, 0x00, 0x00])
+  step(cpu, bus)
+  bus.line = true
+  step(cpu, bus)
+  step(cpu, bus)
+  if cpu.pc != 0x1003 { return "PC ${cpu.pc.to_hex()}, want 1003 (an interrupt was taken)" }
+  ""
+}
+
+/// The interrupt landed at `handler`, `from` pushed, in `length` T-states, disabled.
+let expect_interrupt = pure (
+  cpu: Z80Cpu,
+  bus: Script,
+  handler: u16,
+  from: u16,
+  length: i64
+) -> string => {
+  if cpu.pc != handler { return "PC ${cpu.pc.to_hex()}, want ${handler.to_hex()}" }
+  if bus.t != length { return "${bus.t} T-states, want ${length}" }
+  if cpu.iff1 || cpu.iff2 { return "interrupts still enabled" }
+  let top = pushed(cpu, bus)
+  if top != from { return "pushed ${top.to_hex()}, want ${from.to_hex()}" }
+  ""
+}
+
+/// The word on top of the stack.
+let pushed = pure (cpu: Z80Cpu, bus: Script) -> u16 =>
+  (u16(bus.ram[i64(cpu.sp) + 1]) << 8) | u16(bus.ram[i64(cpu.sp)])
+
+// ── The scripted bus ─────────────────────────────────────────────────────────
+
+/// 64 KB of RAM, `code` at 1000, an interrupt line and the byte an acknowledge answers.
+struct Script {
+  ram: []u8,
+  line: bool,
+  answer: u8,
+  t: i64,
+}
+
+let scripted = pure (code: []u8) -> Script => {
+  var bus = Script { ram: [0; 65536], line: false, answer: 0xFF, t: 0 }
+  for i, b in code { bus.ram[0x1000 + i] = b }
+  bus
+}
+
+impl Z80Bus for Script {
+  fetch = (self, address) => {
+    self.t += 4
+    self.ram[i64(address)]
+  }
+  read = (self, address) => {
+    self.t += 3
+    self.ram[i64(address)]
+  }
+  write = (self, address, value) => {
+    self.ram[i64(address)] = value
+    self.t += 3
+  }
+  input = (self, port) => {
+    self.t += 4
+    0xFF
+  }
+  output = (self, port, value) => { self.t += 4 }
+  idle = (self, n) => { self.t += n }
+  interrupt_line = pure (self) => self.line
+  acknowledge = (self) => {
+    self.t += 6
+    self.answer
+  }
+}

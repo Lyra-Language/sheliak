@@ -1,0 +1,98 @@
+module genesis
+//! The Z80's side of the Genesis: the sound processor and the memory it sees — its 8 KB of
+//! RAM, the YM2612's ports, the bank register, and a 32 KB window onto the 68000's space —
+//! with its clock, a T-state every 15 master clocks, kept here and run on by the 68000's
+//! bus ([GenesisBus.run_z80]) to wherever the 68000 has got.
+//!
+//! **No sound chip is emulated yet**: the YM2612 reads as idle (not busy, no timer
+//! overflowed) and its writes, and the PSG's, are dropped. **The window reaches the
+//! cartridge only**: a Z80 read of the 68000's RAM or I/O through it answers FF, and a
+//! write there is dropped.
+//!
+//! **Its /INT** is the VDP's: held low from the slot the 68000's V interrupt is raised in,
+//! for 2,573 master clocks (BlastEm's measured ~171 Z80 clocks).
+
+import z80.{ Z80Bus }
+
+/// Master clocks per Z80 T-state, and how long the VDP holds the Z80's /INT.
+pub const Z80_CLOCKS: i64 = 15
+const Z80_INT_CLOCKS: i64 = 2573
+
+/// What the Z80 is wired to.
+pub struct Z80Side {
+  /// 8 KB of RAM, which the 68000 reaches too (A00000–A01FFF) while it holds the bus.
+  ram: []u8,
+  /// The cartridge, for the bank window.
+  rom: []u8,
+  /// The bank register: the window at 8000–FFFF shows the 68000's 32 KB at bank << 15.
+  bank: u32,
+  /// The master clock at which the Z80's next T-state begins.
+  clock: i64,
+  /// The 68000 holds the Z80's bus (A11100), or its reset line (A11200): either way the
+  /// Z80 is stopped.
+  bus_requested: bool,
+  in_reset: bool,
+  /// The master clock the VDP last pulled /INT low at.
+  int_from: i64,
+}
+
+pub let new_z80_side = pure (rom: []u8) -> Z80Side => Z80Side {
+  ram: [0; 8192],
+  rom: rom,
+  bank: 0,
+  clock: 0,
+  bus_requested: false,
+  in_reset: true,
+  int_from: -Z80_INT_CLOCKS,
+}
+
+impl Z80Bus for Z80Side {
+  fetch = (self, address) => {
+    self.clock += 4 * Z80_CLOCKS
+    self.peek(address)
+  }
+  read = (self, address) => {
+    self.clock += 3 * Z80_CLOCKS
+    self.peek(address)
+  }
+  write = (self, address, value) => {
+    self.clock += 3 * Z80_CLOCKS
+    self.poke(address, value)
+  }
+  // The Genesis wires nothing to the Z80's I/O space.
+  input = (self, port) => {
+    self.clock += 4 * Z80_CLOCKS
+    0xFF
+  }
+  output = (self, port, value) => { self.clock += 4 * Z80_CLOCKS }
+  idle = (self, n) => { self.clock += n * Z80_CLOCKS }
+  interrupt_line = pure (self) =>
+    self.clock >= self.int_from && self.clock < self.int_from + Z80_INT_CLOCKS
+  // Nothing drives the data bus in the acknowledge: it floats high, FF — RST 38 in mode 0.
+  acknowledge = (self) => {
+    self.clock += 6 * Z80_CLOCKS
+    0xFF
+  }
+}
+
+/// A byte of the Z80's map: RAM (mirrored at 2000), the YM2612 (idle), the bank window.
+let peek = pure (self: Z80Side, address: u16) -> u8 => {
+  let a = i64(address)
+  if a < 0x4000 { return self.ram[a & 0x1FFF] }
+  if a < 0x6000 { return 0 }
+  if a < 0x8000 { return 0xFF }
+  let target = i64((self.bank << 15) | u32(a & 0x7FFF))
+  if target < 0x400000 && target < self.rom.len() { return self.rom[target] }
+  0xFF
+}
+
+/// A byte written by the Z80: RAM, or the bank register (6000–60FF), which takes bit 0 as
+/// the top bit of nine, shifting the rest down.
+let poke = (self: mut Z80Side, address: u16, value: u8) -> void => {
+  let a = i64(address)
+  if a < 0x4000 {
+    self.ram[a & 0x1FFF] = value
+  } else if a >= 0x6000 && a < 0x6100 {
+    self.bank = ((self.bank >> 1) | (u32(value & 1) << 8)) & 0x1FF
+  }
+}

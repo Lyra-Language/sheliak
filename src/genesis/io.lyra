@@ -1,9 +1,7 @@
 module genesis
-//! The console's I/O chip and the Z80's corner of the 68000's map — as much of each as a
-//! game touches to start and to play without sound: the controller ports with 3-button
-//! pads, the Z80's bus request and reset lines, and its 8 KB of RAM (where a game loads
-//! its sound driver). **No Z80 runs yet**: a request for its bus is granted at once, and
-//! the sound chips are written to and read as idle.
+//! The console's I/O chip, and the Z80's corner of the 68000's map: the controller ports
+//! with 3-button pads; the Z80's 8 KB of RAM (where a game loads its sound driver) and its
+//! bus request line. The sound chips read as idle.
 
 /// Pad buttons, as a mask of those held — the front end's to set in [GenesisBus.pads].
 pub const PAD_UP: u8 = 0x01
@@ -64,16 +62,18 @@ let write_io = (bus: mut GenesisBus, a: u32, value: u8) -> void => {
 /// mirrored once), the YM2612's status (never busy), and nothing else.
 let read_z80_space = pure (bus: GenesisBus, a: u32) -> u8 => {
   let offset = a & 0xFFFF
-  if offset < 0x4000 { return bus.z80_ram[i64(offset & 0x1FFF)] }
+  if offset < 0x4000 { return bus.sound.ram[i64(offset & 0x1FFF)] }
   0
 }
 
 let write_z80_space = (bus: mut GenesisBus, a: u32, value: u8) -> void => {
   let offset = a & 0xFFFF
-  if offset < 0x4000 { bus.z80_ram[i64(offset & 0x1FFF)] = value }
+  if offset < 0x4000 { bus.sound.ram[i64(offset & 0x1FFF)] = value }
 }
 
 /// The Z80 bus request register (A11100) as read: bit 0 of its even byte is clear once the
-/// bus is the 68000's — at once, here, as no Z80 holds it.
+/// bus is the 68000's — as soon as it is asked for, the Z80 stopping between instructions,
+/// but only while the Z80 is out of reset: a Z80 held in reset never grants its bus
+/// (BlastEm's model, and why Sega's start-up sequence releases the reset first).
 let read_bus_request = pure (bus: GenesisBus) -> u8 =>
-  if bus.z80_bus_requested { 0 } else { 1 }
+  if bus.sound.bus_requested && !bus.sound.in_reset { 0 } else { 1 }
