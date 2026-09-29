@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
+//
+// Unlike the rest of Sheliak (MIT), this file is LGPL-2.1-or-later: it exists only to be built
+// with Nuked-OPN2's ym3438.c, which it includes.
 /*
  * ym_nuked — Nuked-OPN2 (LGPL-2.1, downloaded pinned into build/deps/nuked-opn2 and never
  * linked into Sheliak) run on a script as a YM2612, printing its output, for tests/ym.sh to

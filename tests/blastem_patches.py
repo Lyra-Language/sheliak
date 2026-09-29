@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Unlike the rest of Sheliak (MIT), this file is GPL-3.0-or-later: it quotes BlastEm's
+# source to patch it, and what it adds is code for BlastEm.
 """Patch a pinned BlastEm source tree for use as tests/vdp.sh's oracle.
 
     tests/blastem_patches.py BLASTEM_SOURCE_DIR

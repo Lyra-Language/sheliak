@@ -3,9 +3,14 @@
 Sheliak is a Sega Genesis / Mega Drive emulator written in Lyra, built for Vega (the
 retro-console studio in `../vega`) to run and debug what it makes — and to run **any
 existing cartridge ROM, playable**. Master System and Game Gear follow, reusing its Z80 and
-SN76489. **Private and proprietary** (`LICENSE`); Vega is sold, so nothing copyleft or
-non-commercial is linked in. Lives in the Lyra workspace beside `lyra/`; the workspace's
-`CLAUDE.md` rules apply here too. Never "Sega", "Genesis" or "Mega Drive" in a product name.
+SN76489. **Open source, MIT** (`LICENSE`); Vega, which uses it, is closed and sold, so
+nothing copyleft or non-commercial is linked in — and nothing of BlastEm's or Nuked-OPN2's
+is ever copied in, which a public repository makes everyone's to check. The three `tests/`
+files that work with those projects' code carry their own licences (GPL-3.0-or-later,
+LGPL-2.1-or-later), with SPDX headers; keep new ones like them marked the same way.
+Contributions are not being accepted yet. Lives in the Lyra workspace beside `lyra/`; the
+workspace's `CLAUDE.md` rules apply here too. Never "Sega", "Genesis" or "Mega Drive" in a
+product name.
 
 ## Commands
 
@@ -83,7 +88,8 @@ frame-at-a-time shortcuts from the start:
   be checked against real software.
 - **Test data is downloaded, never committed or shipped**: SingleStepTests' 68000 suite
   declares no licence; `tests/fetch.sh` pins it to a commit under `build/`. The Z80 suite
-  (MIT) is treated the same way by `tests/fetch_z80.sh`.
+  (MIT) is treated the same way by `tests/fetch_z80.sh`, and Musashi's opcode table (MIT) by
+  `tests/legal.sh`, though their licences would allow more.
 - **The Z80 is checked T-state by T-state**, as the 68000 is by transaction: every register
   (the undocumented WZ, Q, P, EI and R included), RAM, and each memory and I/O access with
   the T-state it came at. Its interrupts, which the suite never raises, are scenarios on
@@ -94,8 +100,7 @@ frame-at-a-time shortcuts from the start:
   approximations the `z80_run` ROM sidesteps: it ends the Z80's /INT pulse only when it
   next synchronises (so a handler re-enabling interrupts within the ~171 T-state pulse is
   taken again a number of times that depends on that), and it schedules the first frame's
-  interrupt from the VDP's power-on mode 4 (an extra one near line 192). Musashi's opcode table
-  (MIT) is treated the same way by `tests/legal.sh`, though its licence would allow more.
+  interrupt from the VDP's power-on mode 4 (an extra one near line 192).
 - **Legality is decided once, before decoding**: `is_legal` (`src/m68k/legal.lyra`) says
   whether the 68000 has an opcode, and `step` takes the illegal-instruction (or line A/F)
   exception for any it does not. The decoder may therefore match by bit pattern alone —

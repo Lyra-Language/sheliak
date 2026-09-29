@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// Unlike the rest of Sheliak (MIT), this file is GPL-3.0-or-later: it exists only to be built
+// with BlastEm's psg.c, which is.
 /*
  * psg_blastem — BlastEm's PSG (psg.c, GPLv3, built from the pinned BlastEm tree beside it and
  * never linked into Sheliak) run on a script, printing its state after every tick, for
