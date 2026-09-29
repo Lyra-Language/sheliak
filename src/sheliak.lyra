@@ -22,15 +22,19 @@
 // the right shoulder for X, Y and Z; Start and Back for Start and Mode.
 //
 // The ROM is a raw image, an SMD one or an MGD one (the copiers' interleaved formats),
-// whatever the file's name (`.bin`, `.gen`, `.md`, `.smd`). A split SMD image's parts follow the first
-// on the command line, or are found beside it by their names (`game.1` then `game.2`,
-// `sf2md1.smd` then `sf2md2.smd`, `sf2a.smd` then `sf2b.smd`). A cartridge with save RAM keeps it in a
-// `.srm` file beside the ROM (the ROM's name, its extension replaced): loaded at start,
-// written every ten seconds while the game has changed it, and on quitting — BlastEm's
-// `save.sram` format, a byte per byte of RAM. Headless runs read and write it only when
-// given `--save`.
+// whatever the file's name (`.bin`, `.gen`, `.md`, `.smd`). A split SMD image's parts
+// follow the first on the command line, or are found beside it by their names (`game.1`
+// then `game.2`, `sf2md1.smd` then `sf2md2.smd`, `sf2a.smd` then `sf2b.smd`). Any of them
+// may be in a zip archive, whose ROM — or split image's parts — is played.
+//
+// A cartridge with save RAM keeps it in a `.srm` file beside the ROM (the ROM's name, its
+// extension replaced — both of them for `game.smd.zip`): loaded at start, written every ten
+// seconds while the game has changed it, and on quitting — BlastEm's `save.sram` format, a
+// byte per byte of RAM. Headless runs read and write it only when given `--save`.
 
 import std.io.{ read_bytes, write_bytes }
+import std.zip.{ is_zip }
+import std.path
 import bindings.sdl3.{
   init, quit, last_error, INIT_VIDEO, INIT_GAMEPAD,
   Window, create_window, destroy_window, set_fullscreen, WINDOW_RESIZABLE,
@@ -51,7 +55,7 @@ import bindings.sdl3.{
 import m68k.{ Cpu }
 import genesis.{
   GenesisBus, genesis_bus, new_cpu, power_on, run_frame, new_mixer, mix_audio,
-  rom_image, is_split_part, next_part_path, save_bytes, load_save, set_pads,
+  rom_image, roms_in_zip, is_split_part, next_part_path, save_bytes, load_save, set_pads,
   PAD_UP, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_A, PAD_B, PAD_C, PAD_START,
   PAD_X, PAD_Y, PAD_Z, PAD_MODE,
 }
@@ -163,19 +167,31 @@ let main = () -> u8 => {
   status
 }
 
-/// The files of a dump, read: those given, and when only the first part of a split SMD
-/// image is, the parts after it, by the names they are guessed to have. `None`, having
-/// said why, if one cannot be read.
+/// The files of a dump, read: those given — a zip archive's ROM, or split image's parts, in
+/// its place — and when only the first part of a split SMD image is, the parts after it,
+/// by the names they are guessed to have. `None`, having said why, if one cannot be read.
 let read_rom_files = (paths: []string) -> Maybe<[][]u8> => {
   var files: [][]u8 = []
+  var zipped = false
   for path in paths {
     let Some(file) = read_bytes(path) else {
       println("sheliak: cannot read ${path}")
       return None
     }
-    files.push(file)
+    if is_zip(file) {
+      zipped = true
+      match roms_in_zip(file) {
+        Ok(roms) => for rom in roms { files.push(rom) },
+        Err(why) => {
+          println("sheliak: ${path} is ${why}")
+          return None
+        },
+      }
+    } else {
+      files.push(file)
+    }
   }
-  if paths.len() > 1 { return Some(files) }
+  if paths.len() > 1 || zipped { return Some(files) }
   var path = paths[0]
   for files.len() < MAX_PARTS && is_split_part(files[files.len() - 1]) {
     let Some(next) = next_part_path(path) else {
@@ -328,8 +344,15 @@ let write_save = (bus: mut GenesisBus, path: string) -> void => {
   }
 }
 
-/// The save file beside a ROM: its name with the extension replaced by `.srm`.
-let save_file_for = pure (rom_path: string) -> string => {
+/// The save file beside a ROM: its name with the extension replaced by `.srm` — both of a
+/// zipped ROM's, `game.smd.zip` saving to `game.srm`.
+let save_file_for = pure (path: string) -> string => {
+  let unzipped = path.strip_suffix(".zip").unwrap_or(path.strip_suffix(".ZIP").unwrap_or(path))
+  let rom_path = if unzipped.len() < path.len() && unzipped.extension().is_some() {
+    unzipped
+  } else {
+    path
+  }
   var dot = -1
   var i: i64 = 0
   for c in rom_path {

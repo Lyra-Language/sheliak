@@ -1,11 +1,12 @@
 // romtest — ROM files as dumped, read back as the ROM images inside them: raw, SMD, split
 // SMD and MGD (made here from a known image by the copier's layout, written out
-// independently of `rom_image`'s reading of it); and the names a split image's next part
-// is looked for by.
+// independently of `rom_image`'s reading of it); the names a split image's next part is
+// looked for by; and which of a zip archive's files are the ROM.
 //
 //   build/romtest        prints each failure, then a verdict; exits 1 on any
 
-import genesis.{ rom_image, next_part_path }
+import genesis.{ rom_image, roms_in_zip, next_part_path }
+import std.compress.{ crc32 }
 
 let main = () -> u8 => {
   var failed = 0
@@ -21,6 +22,7 @@ let main = () -> u8 => {
   failed += mgd_images()
   failed += split_images()
   failed += part_names()
+  failed += zipped()
   if failed == 0 {
     println("romtest: all passed")
     return 0
@@ -116,6 +118,84 @@ let part_names = () -> i64 => {
     }
   }
   failed
+}
+
+// ── Zip archives ─────────────────────────────────────────────────────────────
+
+/// The ROM beside a readme and a directory; a lone file with no extension; a split image's
+/// parts, stored out of order; and an archive of two ROMs, refused.
+let zipped = () -> i64 => {
+  let image = test_image(4 * 0x4000 + 5000)
+  var failed = expect_zip(
+    "zipped ROM",
+    zip_file([("docs/", []), ("readme.txt", [0x68, 0x69]), ("docs/game.bin", image)]),
+    image
+  )
+  failed += expect_zip("zipped file with no extension", zip_file([("game", image)]), image)
+  let part1 = smd_file(image.slice(0, 0x8000), 0x40)
+  let part2 = smd_file(image.slice(0x8000, 0x10000), 0x40)
+  let part3 = smd_file(image.slice(0x10000, image.len()), 0)
+  failed += expect_zip(
+    "zipped split SMD image",
+    zip_file([("SF3.SMD", part3), ("readme.txt", [0x68]), ("SF1.SMD", part1), ("SF2.SMD", part2)]),
+    image
+  )
+  match roms_in_zip(zip_file([("a.bin", image), ("b.bin", image)])) {
+    Ok(_) => {
+      println("zip of two ROMs: read, not refused")
+      failed += 1
+    },
+    Err(_) => {},
+  }
+  failed
+}
+
+let expect_zip = (name: string, archive: []u8, want: []u8) -> i64 => match roms_in_zip(archive) {
+  Ok(files) => expect_image(name, files, want),
+  Err(why) => {
+    println("${name}: refused as ${why}")
+    1
+  },
+}
+
+/// A zip archive of these entries, stored uncompressed: each one's local header and bytes,
+/// then the central directory and its end record.
+let zip_file = (entries: [](string, []u8)) -> []u8 => {
+  var out: []u8 = []
+  var directory: []u8 = []
+  for entry in entries {
+    let (name, data) = entry
+    let offset = out.len()
+    var name_bytes: []u8 = []
+    for c in name { name_bytes.push(u8(i64(c))) }
+    let crc = i64(crc32(data))
+    put_le(out, 0x04034B50, 4)
+    for v in [20, 0, 0, 0, 0] { put_le(out, v, 2) }
+    for v in [crc, data.len(), data.len()] { put_le(out, v, 4) }
+    put_le(out, name_bytes.len(), 2)
+    put_le(out, 0, 2)
+    for b in name_bytes { out.push(b) }
+    for b in data { out.push(b) }
+    put_le(directory, 0x02014B50, 4)
+    for v in [20, 20, 0, 0, 0, 0] { put_le(directory, v, 2) }
+    for v in [crc, data.len(), data.len()] { put_le(directory, v, 4) }
+    for v in [name_bytes.len(), 0, 0, 0, 0] { put_le(directory, v, 2) }
+    put_le(directory, 0, 4)
+    put_le(directory, offset, 4)
+    for b in name_bytes { directory.push(b) }
+  }
+  let directory_at = out.len()
+  for b in directory { out.push(b) }
+  put_le(out, 0x06054B50, 4)
+  for v in [0, 0, entries.len(), entries.len()] { put_le(out, v, 2) }
+  put_le(out, directory.len(), 4)
+  put_le(out, directory_at, 4)
+  put_le(out, 0, 2)
+  out
+}
+
+let put_le = (bytes: mut []u8, value: i64, size: i64) -> void => {
+  for i in 0..<size { bytes.push(u8((value >> (8 * i)) & 0xFF)) }
 }
 
 /// `size` bytes no two neighbours of which are alike, "SEGA" where a header says it.

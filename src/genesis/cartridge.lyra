@@ -37,9 +37,17 @@ module genesis
 //! the format; the front end finds the parts after the first by their names
 //! ([next_part_path]), or is given them.
 //!
+//! **A zip archive holds the files** ([roms_in_zip]): the ROM in it — the one file with a
+//! ROM's extension (`.bin`, `.gen`, `.md`, `.smd`, a numbered part), or the one file if
+//! none has — or a split SMD image's parts, found from the first by their names as on
+//! disk. An archive holding several ROMs is refused, naming them, rather than one picked.
+//!
 //! **Not here**: the serial EEPROMs some cartridges carry (no header declares them — BlastEm
 //! finds them in a database), the lock-on and unlicensed mappers. The Z80's bank window
 //! reads the ROM as it lies, not through the mapper.
+
+import std.zip.{ ZipEntry, zip_entries, unzip }
+import std.path
 
 /// Save RAM's buses.
 pub const SAVE_NONE: u8 = 0
@@ -129,6 +137,48 @@ pub let next_part_path = pure (path: string) -> Maybe<string> => {
   let c = runes[stem_end - 1]
   if !(c >= 'a' && c < 'z') && !(c >= 'A' && c < 'Z') { return None }
   Some(path.slice(0, stem_end - 1) ++ "${rune(i64(c) + 1)}" ++ path.slice(stem_end, runes.len()))
+}
+
+/// The ROM files a zip archive holds, as [rom_image] takes them: the one ROM, or a split
+/// SMD image's parts in order.
+pub let roms_in_zip = pure (archive: []u8) -> Result<[][]u8, string> => {
+  let entries = zip_entries(archive)?
+  var files: []ZipEntry = []
+  for entry in entries {
+    if !entry.is_directory() { files.push(entry) }
+  }
+  var roms: []ZipEntry = []
+  for entry in files {
+    if looks_like_rom(entry.name) { roms.push(entry) }
+  }
+  if roms.len() == 0 { roms = files }
+  if roms.len() == 0 { return Err("an archive with no files in it") }
+  if roms.len() == 1 { return Ok([unzip(archive, roms[0])?]) }
+  // Several: a split image's parts, if the first by name leads through all of them.
+  let by_name = roms.sorted_by((a, b) => a.name <=> b.name)
+  var parts: [][]u8 = [unzip(archive, by_name[0])?]
+  var name = by_name[0].name
+  for parts.len() < by_name.len() && is_split_part(parts[parts.len() - 1]) {
+    let Some(next) = next_part_path(name) else { break }
+    var found = false
+    for entry in by_name {
+      if entry.name == next {
+        parts.push(unzip(archive, entry)?)
+        found = true
+      }
+    }
+    if !found { break }
+    name = next
+  }
+  if parts.len() == by_name.len() { return Ok(parts) }
+  Err("an archive of several ROMs (${by_name.map((e) => e.name).join(", ")}); unzip the one to play")
+}
+
+/// Whether a file's name says it is a ROM, or one part of one.
+let looks_like_rom = pure (name: string) -> bool => {
+  let Some(ext) = name.extension() else { return false }
+  let lower = ext.to_ascii_lower()
+  lower == "bin" || lower == "gen" || lower == "md" || lower == "smd" || all_digits(ext.to_runes(), 0, ext.len())
 }
 
 const SMD_HEADER: i64 = 512

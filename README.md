@@ -32,8 +32,9 @@ Mode; F full screen; Escape quits. Gamepads are pads 1 and 2. The pads are 6-but
 A ROM may be a raw image, an SMD one or an MGD one (the Multi Game Doctor's, often `.md`),
 whatever its extension. A split SMD image is found from its first part by the names of the
 rest (`game.1`, `game.2`, …; `sf2md1.smd`, `sf2md2.smd`, …; `sf2a.smd`, `sf2b.smd`, …), or
-its parts can be given in order: `build/sheliak part1 part2 …`. A cartridge with save RAM
-keeps it in a `.srm` file beside the ROM.
+its parts can be given in order: `build/sheliak part1 part2 …`. Any of these may be zipped
+(`game.zip`, `game.smd.zip`). A cartridge with save RAM keeps it in a `.srm` file beside
+the ROM.
 
 ## Testing
 
