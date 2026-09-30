@@ -4,13 +4,16 @@
 //   build/sheliak [ROM [PART …]] [--pads 3]            play (no ROM: macOS asks for one)
 //   build/sheliak ROM --frames N [--screenshot FILE] [--ppm FILE] [--wav FILE] [--save]
 //                     [--display pixels|scanlines|crt] [--fit integer|tv|square]
+//                     [--hold up,right,a,…]
 //                                                      run N frames and quit, saving the
 //                                                      last: as SDL drew the window (BMP),
 //                                                      and as the texels sent to it (PPM,
 //                                                      which tests/vdp.sh compares with
 //                                                      BlastEm); the sound of all N as a
 //                                                      WAV — headless with
-//                                                      SDL_VIDEODRIVER=dummy
+//                                                      SDL_VIDEODRIVER=dummy; --hold
+//                                                      keeps pad 1's buttons named
+//                                                      held throughout
 //
 // The pads are 6-button, as most players' are; `--pads 3` makes them the original 3-button
 // pad, which a few early games need (they misread a 6-button one).
@@ -109,6 +112,7 @@ let main = () -> u8 => {
   var headless_save = false
   var pads_arg: Maybe<bool> = None
   var look_arg: Maybe<string> = None
+  var held: u16 = 0
   var fit_arg: Maybe<string> = None
   var i = 1
   for i < args.len() {
@@ -129,6 +133,15 @@ let main = () -> u8 => {
       i += 2
     } else if args[i] == "--display" && i + 1 < args.len() {
       look_arg = Some(args[i + 1])
+      i += 2
+    } else if args[i] == "--hold" && i + 1 < args.len() {
+      match buttons_named(args[i + 1]) {
+        Ok(buttons) => { held = buttons },
+        Err(name) => {
+          println("sheliak: --hold takes up, down, left, right, a, b, c, x, y, z, start and mode, not ${name}")
+          return 2
+        },
+      }
       i += 2
     } else if args[i] == "--save" {
       headless_save = true
@@ -200,7 +213,7 @@ let main = () -> u8 => {
     if display.look != LOOK_PIXELS && effect.is_none() {
       println("sheliak: no GPU shader here, so the picture is sharp pixels")
     }
-    run_headless(paths, pads_arg.unwrap_or(true), renderer, display, frames_only, screenshot, ppm, wav, headless_save)
+    run_headless(paths, pads_arg.unwrap_or(true), renderer, display, frames_only, screenshot, ppm, wav, headless_save, held)
   } else {
     run_window(paths, pads_arg, look_arg, fit, prefs, prefs_file, renderer, window, effect)
   }
@@ -211,7 +224,7 @@ let main = () -> u8 => {
   status
 }
 
-const USAGE: string = "usage: sheliak ROM [PART …] [--pads 3] [--display pixels|scanlines|crt] [--fit integer|tv|square] [--frames N] [--screenshot FILE] [--ppm FILE] [--wav FILE] [--save]"
+const USAGE: string = "usage: sheliak ROM [PART …] [--pads 3] [--display pixels|scanlines|crt] [--fit integer|tv|square] [--frames N] [--screenshot FILE] [--ppm FILE] [--wav FILE] [--save] [--hold BUTTONS]"
 
 /// How frames are drawn: through the display shader, where there is one, in a look; and
 /// across the logical screen of a fit.
@@ -305,7 +318,8 @@ let read_rom_files = (paths: []string) -> Result<[][]u8, string> => {
 /// Parts looked for by name, at most: a guess that goes astray stops here.
 const MAX_PARTS: i64 = 16
 
-/// Run `frames` frames as fast as they go, show the last, and save it if asked.
+/// Run `frames` frames as fast as they go, pad 1 holding `held`, show the last, and save
+/// it if asked.
 let run_headless = (
   paths: []string,
   six_button: bool,
@@ -315,7 +329,8 @@ let run_headless = (
   screenshot: string,
   ppm: string,
   wav: string,
-  saving: bool
+  saving: bool,
+  held: u16
 ) -> u8 => {
   let rom = match load_rom(paths) {
     Ok(image) => image,
@@ -326,6 +341,7 @@ let run_headless = (
   }
   let save_path = save_file_for(paths[0])
   var (cpu, bus) = power_up(rom, six_button, save_path, saving)
+  bus.pads[0] = held
   let status = run_frames(cpu, bus, renderer, display, frames, screenshot, ppm, wav)
   if saving { write_save(bus, save_path) }
   status
@@ -851,6 +867,31 @@ let pixel_color = pure (pixel: u16) -> u32 => {
 }
 
 // ── The pads ─────────────────────────────────────────────────────────────────
+
+/// Pad buttons from their names, comma-separated (`--hold up,a`); the first name not
+/// known, if one is not.
+let buttons_named = pure (names: string) -> Result<u16, string> => {
+  var held: u16 = 0
+  for name in names.split(",") {
+    let button = match name.trim().to_ascii_lower() {
+      "up" => PAD_UP,
+      "down" => PAD_DOWN,
+      "left" => PAD_LEFT,
+      "right" => PAD_RIGHT,
+      "a" => PAD_A,
+      "b" => PAD_B,
+      "c" => PAD_C,
+      "x" => PAD_X,
+      "y" => PAD_Y,
+      "z" => PAD_Z,
+      "start" => PAD_START,
+      "mode" => PAD_MODE,
+      other => return Err(other),
+    }
+    held = held | button
+  }
+  Ok(held)
+}
 
 /// Pad 1's buttons held on the keyboard, by key position.
 let keyboard_buttons = () -> u16 => {

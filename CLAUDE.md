@@ -25,6 +25,8 @@ build/sheliak ROM           # play: arrows, Z/X/C = A/B/C, A/S/D = X/Y/Z, Return
                             #    in the preferences
 SDL_VIDEODRIVER=dummy build/sheliak ROM --frames 600 --screenshot out.bmp   # headless
                             #    (--wav FILE: the sound; --save: use the .srm too;
+                            #    --hold right,a: pad 1 holds those throughout — Vega's
+                            #    ROM checks move a sprite with it;
                             #    --display crt / --fit tv, without the dummy driver: the
                             #    shader's or the fit's frame)
 tests/fetch.sh              # SingleStepTests 68000 suite -> build/deps/680x0 (~200 MB, once)
