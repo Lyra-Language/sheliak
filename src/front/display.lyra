@@ -11,6 +11,18 @@ module front
 //! brightest at its centre and darkest where it meets the next, so they stay one per line
 //! at any scale. The grille is the display's own pixels, red, green and blue in turn.
 
+/// How the frame fills the window, as the preferences file names them: whole-number
+/// multiples of the 320×224 frame (sharp, with borders); or as large as fits, either at
+/// 4:3 — the television's shape, each pixel a little taller than wide — or with square
+/// pixels.
+pub const FIT_INTEGER: string = "integer"
+pub const FIT_TV: string = "tv"
+pub const FIT_SQUARE: string = "square"
+
+/// The logical screen a fit draws the frame across: the frame's own 320×224, or 896×672
+/// (4:3, three times the frame's height) for the television's shape.
+pub let fit_size = pure (fit: string) -> (i64, i64) => if fit == FIT_TV { (896, 672) } else { (320, 224) }
+
 /// The looks, as the preferences file names them.
 pub const LOOK_PIXELS: string = "pixels"
 pub const LOOK_SCANLINES: string = "scanlines"

@@ -19,8 +19,9 @@ pub struct Prefs {
   fullscreen: bool,
   six_button: bool,
   muted: bool,
-  /// One of `display.lyra`'s looks.
+  /// One of `display.lyra`'s looks, and one of its fits.
   look: string,
+  fit: string,
 }
 
 pub let default_prefs = pure () -> Prefs => Prefs {
@@ -29,6 +30,7 @@ pub let default_prefs = pure () -> Prefs => Prefs {
   six_button: true,
   muted: false,
   look: LOOK_PIXELS,
+  fit: FIT_INTEGER,
 }
 
 /// Preferences from a file's text, each line that says something valid taking effect.
@@ -52,6 +54,8 @@ pub let parse_prefs = pure (text: string) -> Prefs => {
       if let Some(b) = flag(value) { prefs.muted = b }
     } else if key == "display" {
       if value == LOOK_PIXELS || value == LOOK_SCANLINES || value == LOOK_CRT { prefs.look = value }
+    } else if key == "fit" {
+      if value == FIT_INTEGER || value == FIT_TV || value == FIT_SQUARE { prefs.fit = value }
     }
   }
   prefs
@@ -60,7 +64,7 @@ pub let parse_prefs = pure (text: string) -> Prefs => {
 /// Preferences as a file's text.
 pub let format_prefs = pure (prefs: ref Prefs) -> string => {
   let pads = if prefs.six_button { 6 } else { 3 }
-  "scale = ${prefs.scale}\nfullscreen = ${prefs.fullscreen}\npads = ${pads}\nmuted = ${prefs.muted}\ndisplay = ${prefs.look}\n"
+  "scale = ${prefs.scale}\nfullscreen = ${prefs.fullscreen}\npads = ${pads}\nmuted = ${prefs.muted}\ndisplay = ${prefs.look}\nfit = ${prefs.fit}\n"
 }
 
 /// Where the preferences live, or `None` without a home directory to put them in.

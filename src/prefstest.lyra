@@ -4,7 +4,9 @@
 //
 //   build/prefstest      prints each failure, then a verdict; exits 1 on any
 
-import front.{ Prefs, default_prefs, parse_prefs, format_prefs, LOOK_CRT, LOOK_SCANLINES }
+import front.{
+  Prefs, default_prefs, parse_prefs, format_prefs, LOOK_CRT, LOOK_SCANLINES, FIT_TV, FIT_SQUARE,
+}
 
 let main = () -> u8 => {
   var failed = 0
@@ -15,10 +17,11 @@ let main = () -> u8 => {
     six_button: false,
     muted: true,
     look: LOOK_CRT,
+    fit: FIT_TV,
   }
   failed += check_prefs("round trip", parse_prefs(format_prefs(chosen)), chosen)
   let lenient = parse_prefs(
-    "scale = 9\nvolume = -3\npads = 4\nfullscreen = yes\ncolour = blue\njust words\n= 2\nmuted=true\n  scale   =   2  \ndisplay = vhs\ndisplay=scanlines\n"
+    "scale = 9\nvolume = -3\npads = 4\nfullscreen = yes\ncolour = blue\njust words\n= 2\nmuted=true\n  scale   =   2  \ndisplay = vhs\ndisplay=scanlines\nfit = square\nfit = stretched\n"
   )
   failed += check_prefs(
     "lenient",
@@ -29,6 +32,7 @@ let main = () -> u8 => {
       six_button: true,
       muted: true,
       look: LOOK_SCANLINES,
+      fit: FIT_SQUARE,
     }
   )
   if failed == 0 {

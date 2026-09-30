@@ -19,12 +19,14 @@ product name.
 ./build.sh                  # -> build/: sheliak, cputest, legaltest, scenariotest, vdproms,
                             #    vdpcheck, padtest, romtest, prefstest
 build/sheliak ROM           # play: arrows, Z/X/C = A/B/C, A/S/D = X/Y/Z, Return = Start,
-                            #    Q = Mode, F = full screen, Escape; gamepads on ports 1 and 2;
-                            #    --pads 3 for 3-button pads; no ROM: macOS asks for one; the
-                            #    menu bar sets the rest, kept in the preferences
+                            #    Q = Mode, F = full screen (Escape leaves it), ⌘Q quits;
+                            #    gamepads on ports 1 and 2; --pads 3 for 3-button pads; no
+                            #    ROM: macOS asks for one; the menu bar sets the rest, kept
+                            #    in the preferences
 SDL_VIDEODRIVER=dummy build/sheliak ROM --frames 600 --screenshot out.bmp   # headless
                             #    (--wav FILE: the sound; --save: use the .srm too;
-                            #    --display crt, without the dummy driver: the shader's frame)
+                            #    --display crt / --fit tv, without the dummy driver: the
+                            #    shader's or the fit's frame)
 tests/fetch.sh              # SingleStepTests 68000 suite -> build/deps/680x0 (~200 MB, once)
 tests/cpu.sh                # every 68000 test file (~1M tests, ~17 s)
 tests/cpu.sh MOVE.l DIVS    # just these
@@ -65,8 +67,8 @@ frame-at-a-time shortcuts from the start:
 
 ## Rules
 
-- **A headless run ignores the preferences**: its pads and look are `--pads` and
-  `--display`, never how someone last played, so a comparison cannot depend on it. It runs
+- **A headless run ignores the preferences**: its pads, look and fit are `--pads`,
+  `--display` and `--fit`, never how someone last played, so a comparison cannot depend on it. It runs
   in a hidden window; under `SDL_VIDEODRIVER=dummy` there is no GPU renderer and the look
   is always sharp pixels (`--ppm` is the texels before any look either way).
 - **The display shader is Metal, fed as SDL's GPU renderer feeds it** (`front/display.lyra`,
@@ -225,7 +227,8 @@ src/sheliak.lyra     the emulator in an SDL window: frames paced to 59.92 Hz, th
                      macOS menu bar (open, pause, reset, pads, mute, scale, look)
 src/front/           the front end's pieces (module front):
   prefs.lyra         the preferences, kept between runs as `key = value` lines
-  display.lyra       the looks — sharp pixels, scanlines, a CRT — and their Metal shader
+  display.lyra       the fits (whole numbers, 4:3, square pixels) and the looks (sharp
+                     pixels, scanlines, a CRT) with their Metal shader
 src/prefstest.lyra   the preferences file read and written
 src/padtest.lyra     the controller ports with buttons held, read through the bus
 src/romtest.lyra     ROM files as dumped (raw, SMD, split SMD, MGD) read back as images;
@@ -369,7 +372,8 @@ pads (3 with `--pads 3`; the protocol matched against BlastEm with nothing held,
 `pads6`; with buttons held, `build/padtest`), frames paced to the console's 59.92 Hz
 whatever the display's rate, ~4.7 ms a frame with sound on an M-series Mac. On macOS, a
 **menu bar** opens a ROM (a native Open panel), pauses and resets, and sets the pads, the
-window's scale, full screen, mute and the **look** — sharp pixels, or scanlines or a
+window's scale, full screen, mute, the **fit** — whole-number multiples, or as large as
+fits at 4:3 or with square pixels, sampled with SDL's pixel-art mode — and the **look** — sharp pixels, or scanlines or a
 CRT through a Metal shader on SDL's GPU renderer — all kept between runs. **Cartridges**: the ROM mirrored at its
 size, save RAM (odd, even or both buses; past the ROM or through the Sega mapper, with
 write-protect), the SSF2 bank mapper, and save files beside the ROM. **Not yet**: serial
