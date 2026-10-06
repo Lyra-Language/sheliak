@@ -1079,9 +1079,9 @@ let sprite_entry = pure (
 
 let words_to_bytes = pure (words: []u16) -> []u8 => {
   var bytes: []u8 = []
-  for w in words {
-    bytes.push(u8(w >> 8))
-    bytes.push(u8(w & 0xFF))
+  for v in words {
+    bytes.push(u8(v >> 8))
+    bytes.push(u8(v & 0xFF))
   }
   bytes
 }

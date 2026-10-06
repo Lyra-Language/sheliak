@@ -373,7 +373,7 @@ let script_bus = (program: []u16, level: u8, raise_at: i64) -> ScriptBus => {
     level: level,
     raise_at: raise_at,
   }
-  for i, word in program { bus.ram.insert(CODE + u32(2 * i), word) }
+  for i, op in program { bus.ram.insert(CODE + u32(2 * i), op) }
   for v in 24..<32 { bus.set_long(u32(v) * 4, HANDLER) }
   bus.set_long(8 * 4, PRIVILEGE_HANDLER)
   bus.set_long(9 * 4, TRACE_HANDLER)

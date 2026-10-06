@@ -94,7 +94,7 @@ let shift_value = pure (
   var c = false
   var overflow = false
   let width = size * 8
-  for step in 0..<count {
+  for shifted in 0..<count {
     if left {
       let out = (v & sign) != 0
       let into: u32 = match kind {
@@ -109,7 +109,7 @@ let shift_value = pure (
       // ASR past the operand's width keeps filling with the sign, but what it shifts out
       // is counted as zero: C and X end clear even for a negative operand (every one of
       // the ~6,000 such tests; at exactly the width, C is the sign bit as usual).
-      let out = (v & 1) != 0 && !(kind == Arithmetic && step >= width)
+      let out = (v & 1) != 0 && !(kind == Arithmetic && shifted >= width)
       let into: u32 = match kind {
         Arithmetic => v & sign,
         Rotate => if out { sign } else { 0 },

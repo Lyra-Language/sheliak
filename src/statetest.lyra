@@ -18,17 +18,17 @@ import vdp.{ shown_frame }
 let main = () -> u8 => {
   let args = program_args()
   var frames: i64 = 300
-  var first = 1
+  var first_rom = 1
   if args.len() > 2 && args[1] == "--frames" {
     frames = args[2].parse_i64().unwrap_or(300)
-    first = 3
+    first_rom = 3
   }
-  if args.len() <= first {
+  if args.len() <= first_rom {
     println("usage: statetest [--frames N] ROM…")
     return 2
   }
   var failed = 0
-  for path in args.slice(first, args.len()) {
+  for path in args.slice(first_rom, args.len()) {
     let Some(rom) = read_bytes(path) else {
       println("${path}: cannot read")
       failed += 1
