@@ -17,7 +17,7 @@ product name.
 ```bash
 ../lyra/build.sh            # the compiler, with std/ beside it
 ./build.sh                  # -> build/: sheliak, cputest, legaltest, scenariotest, vdproms,
-                            #    vdpcheck, padtest, romtest, prefstest
+                            #    vdpcheck, padtest, romtest, prefstest, statetest
 build/sheliak ROM           # play: arrows, Z/X/C = A/B/C, A/S/D = X/Y/Z, Return = Start,
                             #    Q = Mode, F = full screen (Escape leaves it), ⌘Q quits;
                             #    gamepads on ports 1 and 2; --pads 3 for 3-button pads; no
@@ -28,7 +28,8 @@ SDL_VIDEODRIVER=dummy build/sheliak ROM --frames 600 --screenshot out.bmp   # he
                             #    --hold right,a: pad 1 holds those throughout — Vega's
                             #    ROM checks move a sprite with it;
                             #    --display crt / --fit tv, without the dummy driver: the
-                            #    shader's or the fit's frame)
+                            #    shader's or the fit's frame; --load-state FILE before,
+                            #    --save-state FILE after)
 tests/fetch.sh              # SingleStepTests 68000 suite -> build/deps/680x0 (~200 MB, once)
 tests/cpu.sh                # every 68000 test file (~1M tests, ~17 s)
 tests/cpu.sh MOVE.l DIVS    # just these
@@ -46,6 +47,8 @@ tests/vdp.sh fill copy      # just these
 build/padtest               # the pads, buttons held, through the bus
 build/romtest               # ROM files read: raw, SMD, split SMD, MGD, zipped; part names
 build/prefstest             # the preferences file read (leniently) and written
+tests/state.sh [ROM…]       # save states: loaded equal to saved, then in lockstep; the test
+                            #    ROMs, and any games given (raw images), which test far more
 ```
 
 ## Accuracy Target
@@ -68,6 +71,14 @@ frame-at-a-time shortcuts from the start:
 - **Out of scope unless decided otherwise**: Sega CD, 32X; the SVP (Virtua Racing) is late.
 
 ## Rules
+
+- **Every field of a chip's state is in its `state.lyra`, saver and loader alike, in the
+  struct's order.** A field added to `Cpu`, `Vdp`, `Ym2612` … is a line in each, or save
+  states silently lose it; `tests/state.sh` catches one that matters (a loaded machine must
+  *equal* the saved one, which catches what 300 frames of lockstep would not). Bump
+  `STATE_VERSION` in `genesis/state.lyra` with any change, so an old state is refused
+  rather than misread. What the ROM decides (the ROM, its mapper, the YM's tables) is not
+  saved: a state names its ROM by CRC-32 and loads only against it.
 
 - **A headless run ignores the preferences**: its pads, look and fit are `--pads`,
   `--display` and `--fit`, never how someone last played, so a comparison cannot depend on it. It runs
@@ -263,15 +274,19 @@ src/m68k/            the 68000 (module m68k):
   registers.lyra     SWAP, EXT, EXG
   unary.lyra         NEGX, CLR, NEG, NOT, TST (CLR reads before it writes), TAS
   movem.lyra         MOVEM (with the extra read), MOVEP
+  state.lyra         the 68000's part of a save state
 src/z80/             the Z80 (module z80):
   cpu.lyra           Z80Cpu, the Z80Bus trait, step, interrupts (IM 0/1/2, NMI, HALT),
                      registers and the unprefixed instructions, decoded by x/y/z/p/q
   prefixed.lyra      CB, DD CB / FD CB, ED (block instructions and their repeat flags)
   alu.lyra           arithmetic and the flags, bits 5 and 3 included
+  state.lyra         the Z80's part of a save state
 src/psg/psg.lyra     the SN76489 (module psg): tone and noise channels, the Sega LFSR
+src/psg/state.lyra   its part of a save state
 src/ym2612/ym2612.lyra  the YM2612 (module ym2612), cycle by cycle: the register file,
                      phase and envelope generators, SSG-EG, LFO, operators and algorithms,
                      channel accumulation, the multiplexed 9-bit DAC and its ladder, timers
+src/ym2612/state.lyra  its part of a save state (all but its ROM tables)
 src/vdp/             the VDP (module vdp):
   vdp.lyra           memories, registers, the control and data ports, status, DMA's start
   slots.lyra         the access slots: which slots are the 68000's, the FIFO, reads fetched
@@ -283,6 +298,7 @@ src/vdp/             the VDP (module vdp):
                      coloured as it goes out, the CRAM dot; the plane fetch pipeline (fine
                      scroll, column scroll, the window and its edge bug), sprites and their
                      limits, priority, shadow/highlight
+  state.lyra         the VDP's part of a save state
 src/genesis/         the machine (module genesis):
   machine.lyra       power on, and run a frame
   cartridge.lyra     the ROM file read (raw, SMD, split SMD, MGD, zip, 7z, RAR 5); the ROM
@@ -297,6 +313,10 @@ src/genesis/         the machine (module genesis):
   bus.lyra           the 68000's memory map: ROM, work RAM, the VDP ports, I/O, Z80, TMSS;
                      the master clock, refresh, the interrupt pins and E-clock acknowledge;
                      the 68000 held by the VDP, and fed to it during a transfer
+  state.lyra         save states: the machine to bytes and back (each chip's part its
+                     own), refused for another game, version or a damaged file
+src/snapshot/        the bytes of a save state (module snapshot): Writer and Reader
+src/statetest.lyra   save states held to the machine saved: equal, then in lockstep
 src/vdproms.lyra     writes the VDP test ROMs (and each one's parking address)
 src/vdpcheck.lyra    runs one test ROM on Sheliak and dumps the VDP for comparison
 tests/fetch.sh       download the pinned 68000 suite
@@ -373,7 +393,8 @@ Raw, SMD, split SMD and MGD ROM images, bare or in zip, 7z or RAR 5 archives, tw
 pads (3 with `--pads 3`; the protocol matched against BlastEm with nothing held, `pads` and
 `pads6`; with buttons held, `build/padtest`), frames paced to the console's 59.92 Hz
 whatever the display's rate, ~4.7 ms a frame with sound on an M-series Mac. On macOS, a
-**menu bar** opens a ROM (a native Open panel), pauses and resets, and sets the pads, the
+**menu bar** opens a ROM (a native Open panel), saves and loads the game's **state** (beside
+the ROM as `game.state`), pauses and resets, and sets the pads, the
 window's scale, full screen, mute and a volume slider, the **fit** — whole-number multiples, or as large as
 fits at 4:3 or with square pixels, sampled with SDL's pixel-art mode — and the **look** — sharp pixels, or scanlines or a
 CRT through a Metal shader on SDL's GPU renderer — all kept between runs. **Cartridges**: the ROM mirrored at its

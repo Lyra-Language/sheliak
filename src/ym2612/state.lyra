@@ -1,0 +1,244 @@
+module ym2612
+//! The YM2612's part of a save state: every register, latch and pipeline stage of
+//! [Ym2612] — all but its sine and exponent tables, which are the chip's ROMs.
+//!
+//! **Beside the struct, field for field**: a field added to the struct is a line in each of
+//! these, in the same place, or a saved state loses it. `build/statetest` catches one
+//! missed: a machine loaded from a state must equal the one saved.
+
+import snapshot.{
+  Writer, Reader, put_u8, put_bool, put_u16, put_u32, put_i16, put_i64, get_u8, get_bool,
+  get_u16, get_u32, get_i16, get_i64,
+}
+
+pub let save_ym2612 = (w: mut Writer, ym: ref Ym2612) -> void => {
+  put_i64(w, ym.cycle)
+  put_u16(w, ym.write_data)
+  put_u8(w, ym.write_a)
+  put_u8(w, ym.write_d)
+  put_bool(w, ym.busy)
+  put_bool(w, ym.busy_pending)
+  put_u8(w, ym.busy_count)
+  put_bool(w, ym.fm_address)
+  put_bool(w, ym.fm_data)
+  put_u16(w, ym.mode_address)
+  put_u16(w, ym.address)
+  put_u8(w, ym.data)
+  put_u8(w, ym.lfo_enable)
+  put_u8(w, ym.lfo_rate)
+  put_u8(w, ym.lfo_count)
+  put_u8(w, ym.lfo_divider)
+  put_bool(w, ym.lfo_step)
+  put_u8(w, ym.lfo_pm)
+  put_u8(w, ym.lfo_am)
+  put_u16(w, ym.pg_fnum)
+  put_u8(w, ym.pg_block)
+  put_u8(w, ym.pg_kcode)
+  for v in ym.pg_inc { put_u32(w, v) }
+  for v in ym.pg_phase { put_u32(w, v) }
+  for v in ym.pg_reset { put_bool(w, v) }
+  put_u8(w, ym.eg_divider)
+  put_u16(w, ym.eg_timer)
+  put_u16(w, ym.eg_timer_carry)
+  put_u8(w, ym.eg_bit)
+  put_bool(w, ym.eg_bit_found)
+  put_u8(w, ym.eg_shift)
+  put_u8(w, ym.eg_shift_locked)
+  put_u8(w, ym.eg_timer_low)
+  put_u8(w, ym.eg_rate)
+  put_u8(w, ym.eg_ksv)
+  put_u8(w, ym.eg_inc)
+  put_bool(w, ym.eg_rate_max)
+  put_u16(w, ym.eg_lfo_am)
+  for v in ym.eg_tl { put_u16(w, v) }
+  for v in ym.eg_sl { put_u8(w, v) }
+  for v in ym.eg_state { put_u8(w, v) }
+  for v in ym.eg_level { put_u16(w, v) }
+  for v in ym.eg_out { put_u16(w, v) }
+  for v in ym.eg_key { put_bool(w, v) }
+  for v in ym.eg_key_latch { put_bool(w, v) }
+  for v in ym.eg_key_csm { put_bool(w, v) }
+  for v in ym.ssg_enable { put_bool(w, v) }
+  for v in ym.ssg_reset { put_bool(w, v) }
+  for v in ym.ssg_repeat { put_bool(w, v) }
+  for v in ym.ssg_hold { put_bool(w, v) }
+  for v in ym.ssg_dir { put_bool(w, v) }
+  for v in ym.ssg_inv { put_bool(w, v) }
+  for v in ym.op1_out { put_i16(w, v) }
+  for v in ym.op2_out { put_i16(w, v) }
+  for v in ym.fm_out { put_i16(w, v) }
+  for v in ym.fm_mod { put_i16(w, v) }
+  for v in ym.ch_acc { put_i16(w, v) }
+  for v in ym.ch_out { put_i16(w, v) }
+  put_i16(w, ym.ch_lock)
+  put_bool(w, ym.ch_lock_l)
+  put_bool(w, ym.ch_lock_r)
+  save_timer(w, ym.timer_a)
+  save_timer(w, ym.timer_b)
+  put_u8(w, ym.timer_b_sub)
+  put_u8(w, ym.mode_ch3)
+  put_bool(w, ym.mode_csm)
+  put_bool(w, ym.csm_key)
+  put_u8(w, ym.key_channel)
+  for v in ym.key_ops { put_bool(w, v) }
+  for v in ym.key { put_bool(w, v) }
+  put_bool(w, ym.dac_on)
+  put_u16(w, ym.dac_data)
+  for v in ym.dt { put_u8(w, v) }
+  for v in ym.multi { put_u8(w, v) }
+  for v in ym.tl { put_u8(w, v) }
+  for v in ym.ks { put_u8(w, v) }
+  for v in ym.ar { put_u8(w, v) }
+  for v in ym.am { put_bool(w, v) }
+  for v in ym.dr { put_u8(w, v) }
+  for v in ym.sr { put_u8(w, v) }
+  for v in ym.sl { put_u8(w, v) }
+  for v in ym.rr { put_u8(w, v) }
+  for v in ym.ssg_eg { put_u8(w, v) }
+  for v in ym.fnum { put_u16(w, v) }
+  for v in ym.block { put_u8(w, v) }
+  for v in ym.kcode { put_u8(w, v) }
+  for v in ym.fnum3 { put_u16(w, v) }
+  for v in ym.block3 { put_u8(w, v) }
+  for v in ym.kcode3 { put_u8(w, v) }
+  put_u8(w, ym.latch_a4)
+  put_u8(w, ym.latch_ac)
+  for v in ym.algorithm { put_u8(w, v) }
+  for v in ym.feedback { put_u8(w, v) }
+  for v in ym.pan_l { put_bool(w, v) }
+  for v in ym.pan_r { put_bool(w, v) }
+  for v in ym.ams { put_u8(w, v) }
+  for v in ym.pms { put_u8(w, v) }
+  put_u8(w, ym.status)
+  put_i64(w, ym.status_time)
+  put_i64(w, ym.out_l)
+  put_i64(w, ym.out_r)
+}
+
+pub let load_ym2612 = (r: mut Reader, ym: mut Ym2612) -> void => {
+  ym.cycle = get_i64(r)
+  ym.write_data = get_u16(r)
+  ym.write_a = get_u8(r)
+  ym.write_d = get_u8(r)
+  ym.busy = get_bool(r)
+  ym.busy_pending = get_bool(r)
+  ym.busy_count = get_u8(r)
+  ym.fm_address = get_bool(r)
+  ym.fm_data = get_bool(r)
+  ym.mode_address = get_u16(r)
+  ym.address = get_u16(r)
+  ym.data = get_u8(r)
+  ym.lfo_enable = get_u8(r)
+  ym.lfo_rate = get_u8(r)
+  ym.lfo_count = get_u8(r)
+  ym.lfo_divider = get_u8(r)
+  ym.lfo_step = get_bool(r)
+  ym.lfo_pm = get_u8(r)
+  ym.lfo_am = get_u8(r)
+  ym.pg_fnum = get_u16(r)
+  ym.pg_block = get_u8(r)
+  ym.pg_kcode = get_u8(r)
+  for i in 0..<24 { ym.pg_inc[i] = get_u32(r) }
+  for i in 0..<24 { ym.pg_phase[i] = get_u32(r) }
+  for i in 0..<24 { ym.pg_reset[i] = get_bool(r) }
+  ym.eg_divider = get_u8(r)
+  ym.eg_timer = get_u16(r)
+  ym.eg_timer_carry = get_u16(r)
+  ym.eg_bit = get_u8(r)
+  ym.eg_bit_found = get_bool(r)
+  ym.eg_shift = get_u8(r)
+  ym.eg_shift_locked = get_u8(r)
+  ym.eg_timer_low = get_u8(r)
+  ym.eg_rate = get_u8(r)
+  ym.eg_ksv = get_u8(r)
+  ym.eg_inc = get_u8(r)
+  ym.eg_rate_max = get_bool(r)
+  ym.eg_lfo_am = get_u16(r)
+  for i in 0..<2 { ym.eg_tl[i] = get_u16(r) }
+  for i in 0..<2 { ym.eg_sl[i] = get_u8(r) }
+  for i in 0..<24 { ym.eg_state[i] = get_u8(r) }
+  for i in 0..<24 { ym.eg_level[i] = get_u16(r) }
+  for i in 0..<24 { ym.eg_out[i] = get_u16(r) }
+  for i in 0..<24 { ym.eg_key[i] = get_bool(r) }
+  for i in 0..<24 { ym.eg_key_latch[i] = get_bool(r) }
+  for i in 0..<24 { ym.eg_key_csm[i] = get_bool(r) }
+  for i in 0..<24 { ym.ssg_enable[i] = get_bool(r) }
+  for i in 0..<24 { ym.ssg_reset[i] = get_bool(r) }
+  for i in 0..<24 { ym.ssg_repeat[i] = get_bool(r) }
+  for i in 0..<24 { ym.ssg_hold[i] = get_bool(r) }
+  for i in 0..<24 { ym.ssg_dir[i] = get_bool(r) }
+  for i in 0..<24 { ym.ssg_inv[i] = get_bool(r) }
+  for i in 0..<12 { ym.op1_out[i] = get_i16(r) }
+  for i in 0..<6 { ym.op2_out[i] = get_i16(r) }
+  for i in 0..<24 { ym.fm_out[i] = get_i16(r) }
+  for i in 0..<24 { ym.fm_mod[i] = get_i16(r) }
+  for i in 0..<6 { ym.ch_acc[i] = get_i16(r) }
+  for i in 0..<6 { ym.ch_out[i] = get_i16(r) }
+  ym.ch_lock = get_i16(r)
+  ym.ch_lock_l = get_bool(r)
+  ym.ch_lock_r = get_bool(r)
+  load_timer(r, ym.timer_a)
+  load_timer(r, ym.timer_b)
+  ym.timer_b_sub = get_u8(r)
+  ym.mode_ch3 = get_u8(r)
+  ym.mode_csm = get_bool(r)
+  ym.csm_key = get_bool(r)
+  ym.key_channel = get_u8(r)
+  for i in 0..<4 { ym.key_ops[i] = get_bool(r) }
+  for i in 0..<24 { ym.key[i] = get_bool(r) }
+  ym.dac_on = get_bool(r)
+  ym.dac_data = get_u16(r)
+  for i in 0..<24 { ym.dt[i] = get_u8(r) }
+  for i in 0..<24 { ym.multi[i] = get_u8(r) }
+  for i in 0..<24 { ym.tl[i] = get_u8(r) }
+  for i in 0..<24 { ym.ks[i] = get_u8(r) }
+  for i in 0..<24 { ym.ar[i] = get_u8(r) }
+  for i in 0..<24 { ym.am[i] = get_bool(r) }
+  for i in 0..<24 { ym.dr[i] = get_u8(r) }
+  for i in 0..<24 { ym.sr[i] = get_u8(r) }
+  for i in 0..<24 { ym.sl[i] = get_u8(r) }
+  for i in 0..<24 { ym.rr[i] = get_u8(r) }
+  for i in 0..<24 { ym.ssg_eg[i] = get_u8(r) }
+  for i in 0..<6 { ym.fnum[i] = get_u16(r) }
+  for i in 0..<6 { ym.block[i] = get_u8(r) }
+  for i in 0..<6 { ym.kcode[i] = get_u8(r) }
+  for i in 0..<6 { ym.fnum3[i] = get_u16(r) }
+  for i in 0..<6 { ym.block3[i] = get_u8(r) }
+  for i in 0..<6 { ym.kcode3[i] = get_u8(r) }
+  ym.latch_a4 = get_u8(r)
+  ym.latch_ac = get_u8(r)
+  for i in 0..<6 { ym.algorithm[i] = get_u8(r) }
+  for i in 0..<6 { ym.feedback[i] = get_u8(r) }
+  for i in 0..<6 { ym.pan_l[i] = get_bool(r) }
+  for i in 0..<6 { ym.pan_r[i] = get_bool(r) }
+  for i in 0..<6 { ym.ams[i] = get_u8(r) }
+  for i in 0..<6 { ym.pms[i] = get_u8(r) }
+  ym.status = get_u8(r)
+  ym.status_time = get_i64(r)
+  ym.out_l = get_i64(r)
+  ym.out_r = get_i64(r)
+}
+
+let save_timer = (w: mut Writer, timer: ref Timer) -> void => {
+  put_u16(w, timer.count)
+  put_u16(w, timer.period)
+  put_bool(w, timer.load)
+  put_bool(w, timer.load_lock)
+  put_bool(w, timer.load_latch)
+  put_bool(w, timer.enable)
+  put_bool(w, timer.reset)
+  put_bool(w, timer.overflow)
+  put_bool(w, timer.flag)
+}
+
+let load_timer = (r: mut Reader, timer: mut Timer) -> void => {
+  timer.count = get_u16(r)
+  timer.period = get_u16(r)
+  timer.load = get_bool(r)
+  timer.load_lock = get_bool(r)
+  timer.load_latch = get_bool(r)
+  timer.enable = get_bool(r)
+  timer.reset = get_bool(r)
+  timer.overflow = get_bool(r)
+  timer.flag = get_bool(r)
+}

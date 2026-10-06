@@ -1,0 +1,138 @@
+module vdp
+//! The VDP's part of a save state: its memories, registers, FIFO, the beam, the line being
+//! drawn and the last frame shown — everything of [Vdp].
+//!
+//! **Beside the struct, field for field**: a field added to the struct is a line in each of
+//! these, in the same place, or a saved state loses it. `build/statetest` catches one
+//! missed: a machine loaded from a state must equal the one saved.
+
+import snapshot.{
+  Writer, Reader, put_u8, put_bool, put_u16, put_u32, put_i64, put_bytes, put_u16s,
+  put_bools, get_u8, get_bool, get_u16, get_u32, get_i64, get_bytes, get_u16s, get_bools,
+}
+
+pub let save_vdp = (w: mut Writer, vdp: ref Vdp) -> void => {
+  put_bytes(w, vdp.vram)
+  put_u16s(w, vdp.cram)
+  put_u16s(w, vdp.vsram)
+  for v in vdp.regs { put_u8(w, v) }
+  put_u32(w, vdp.address)
+  put_u8(w, vdp.code)
+  put_bool(w, vdp.pending)
+  for entry in vdp.fifo { save_fifo_entry(w, entry) }
+  put_i64(w, vdp.fifo_write)
+  put_i64(w, vdp.fifo_read)
+  put_bool(w, vdp.dma_run)
+  put_u16(w, vdp.dma_word)
+  put_u16(w, vdp.prefetch)
+  put_bool(w, vdp.fetched)
+  put_bool(w, vdp.read_half)
+  put_i64(w, vdp.read_latency)
+  put_i64(w, vdp.resume_at)
+  put_i64(w, vdp.clock)
+  put_u16(w, vdp.hslot)
+  put_u16(w, vdp.vcounter)
+  put_u8(w, match vdp.phase { Active => 0, Preparing => 1, Blank => 2 })
+  put_u8(w, vdp.hint_counter)
+  put_bool(w, vdp.vint_pending)
+  put_i64(w, vdp.z80_int_at)
+  put_bool(w, vdp.hint_pending)
+  put_u16(w, vdp.hv_latch)
+  for v in vdp.vscroll_latch { put_u16(w, v) }
+  for v in vdp.line_hscroll { put_i64(w, v) }
+  save_dots(w, vdp.strip_a)
+  save_dots(w, vdp.strip_b)
+  put_bools(w, vdp.window_blocks)
+  save_dots(w, vdp.window_dots)
+  save_dots(w, vdp.sprites_next)
+  save_dots(w, vdp.sprites_row)
+  put_i64(w, vdp.row)
+  put_i64(w, vdp.row_width)
+  put_u16s(w, vdp.drawing)
+  put_i64(w, vdp.drawing_width)
+  put_i64(w, vdp.shown.width)
+  put_i64(w, vdp.shown.height)
+  put_u16s(w, vdp.shown.pixels)
+  put_i64(w, vdp.frames)
+}
+
+pub let load_vdp = (r: mut Reader, vdp: mut Vdp) -> void => {
+  vdp.vram = get_bytes(r, 65536)
+  vdp.cram = get_u16s(r, vdp.cram.len())
+  vdp.vsram = get_u16s(r, vdp.vsram.len())
+  for i in 0..<24 { vdp.regs[i] = get_u8(r) }
+  vdp.address = get_u32(r)
+  vdp.code = get_u8(r)
+  vdp.pending = get_bool(r)
+  for i in 0..<4 { load_fifo_entry(r, vdp.fifo[i]) }
+  vdp.fifo_write = get_i64(r)
+  vdp.fifo_read = get_i64(r)
+  vdp.dma_run = get_bool(r)
+  vdp.dma_word = get_u16(r)
+  vdp.prefetch = get_u16(r)
+  vdp.fetched = get_bool(r)
+  vdp.read_half = get_bool(r)
+  vdp.read_latency = get_i64(r)
+  vdp.resume_at = get_i64(r)
+  vdp.clock = get_i64(r)
+  vdp.hslot = get_u16(r)
+  vdp.vcounter = get_u16(r)
+  vdp.phase = match get_u8(r) { 0 => Active, 1 => Preparing, _ => Blank }
+  vdp.hint_counter = get_u8(r)
+  vdp.vint_pending = get_bool(r)
+  vdp.z80_int_at = get_i64(r)
+  vdp.hint_pending = get_bool(r)
+  vdp.hv_latch = get_u16(r)
+  for i in 0..<2 { vdp.vscroll_latch[i] = get_u16(r) }
+  for i in 0..<2 { vdp.line_hscroll[i] = get_i64(r) }
+  vdp.strip_a = load_dots(r)
+  vdp.strip_b = load_dots(r)
+  vdp.window_blocks = get_bools(r, -1)
+  vdp.window_dots = load_dots(r)
+  vdp.sprites_next = load_dots(r)
+  vdp.sprites_row = load_dots(r)
+  vdp.row = get_i64(r)
+  vdp.row_width = get_i64(r)
+  vdp.drawing = get_u16s(r, -1)
+  vdp.drawing_width = get_i64(r)
+  vdp.shown.width = get_i64(r)
+  vdp.shown.height = get_i64(r)
+  vdp.shown.pixels = get_u16s(r, -1)
+  vdp.frames = get_i64(r)
+}
+
+let save_fifo_entry = (w: mut Writer, entry: ref FifoEntry) -> void => {
+  put_i64(w, entry.ready)
+  put_u32(w, entry.address)
+  put_u8(w, entry.code)
+  put_u16(w, entry.value)
+  put_bool(w, entry.partial)
+}
+
+let load_fifo_entry = (r: mut Reader, entry: mut FifoEntry) -> void => {
+  entry.ready = get_i64(r)
+  entry.address = get_u32(r)
+  entry.code = get_u8(r)
+  entry.value = get_u16(r)
+  entry.partial = get_bool(r)
+}
+
+/// A row of dots, as many as there are.
+let save_dots = (w: mut Writer, dots: []Dot) -> void => {
+  put_i64(w, dots.len())
+  for dot in dots {
+    put_u8(w, dot.color)
+    put_bool(w, dot.high)
+  }
+}
+
+let load_dots = (r: mut Reader) -> []Dot => {
+  let n = get_i64(r)
+  var dots: []Dot = []
+  for _ in 0..<(if n > 0 && n <= 4096 { n } else { 0 }) {
+    let color = get_u8(r)
+    let high = get_bool(r)
+    dots.push(Dot { color: color, high: high })
+  }
+  dots
+}

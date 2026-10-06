@@ -1,0 +1,145 @@
+// statetest — save states, held to the machine they were saved from: each test ROM run a
+// while, saved, and loaded into a fresh machine, which must equal the running one field for
+// field (so a field the state leaves out shows here) and then run on in lockstep with it,
+// frame for frame and sample for sample; and a damaged, truncated or foreign state refused.
+//
+//   build/statetest [--frames N] ROM…   runs each ROM given (raw images) N frames before
+//                                       saving and N after (300); prints failures, then a
+//                                       verdict; exits 1 on any
+
+import std.io.{ read_bytes }
+import m68k.{ Cpu }
+import genesis.{
+  GenesisBus, genesis_bus, new_cpu, power_on, run_frame, new_mixer, mix_audio, save_state,
+  load_state,
+}
+import vdp.{ shown_frame }
+
+let main = () -> u8 => {
+  let args = program_args()
+  var frames: i64 = 300
+  var first = 1
+  if args.len() > 2 && args[1] == "--frames" {
+    frames = args[2].parse_i64().unwrap_or(300)
+    first = 3
+  }
+  if args.len() <= first {
+    println("usage: statetest [--frames N] ROM…")
+    return 2
+  }
+  var failed = 0
+  for path in args.slice(first, args.len()) {
+    let Some(rom) = read_bytes(path) else {
+      println("${path}: cannot read")
+      failed += 1
+      continue
+    }
+    failed += check_rom(path, rom, frames)
+  }
+  if failed == 0 {
+    println("statetest: all passed")
+    return 0
+  }
+  println("statetest: ${failed} failed")
+  1
+}
+
+/// One ROM: run `frames` frames, save, load into a fresh machine, compare, run both that
+/// many more.
+let check_rom = (name: string, rom: []u8, frames: i64) -> i64 => {
+  var cpu = new_cpu()
+  var bus = genesis_bus(rom)
+  power_on(cpu, bus)
+  var mixer = new_mixer(48000)
+  for _ in 0..<frames {
+    run_frame(cpu, bus)
+    let _ = mix_audio(bus, mixer)
+  }
+  let state = save_state(cpu, bus)
+  let (loaded_cpu, loaded_bus) = match load_state(state, rom) {
+    Ok(machine) => machine,
+    Err(why) => {
+      println("${name}: its own state refused: ${why}")
+      return 1
+    },
+  }
+  var failed: i64 = 0
+  if loaded_cpu != cpu {
+    println("${name}: the 68000 loaded differs from the one saved")
+    failed += 1
+  }
+  if loaded_bus != bus {
+    println("${name}: the machine loaded differs from the one saved${where_differs(loaded_bus, bus)}")
+    failed += 1
+  }
+  if save_state(loaded_cpu, loaded_bus) != state {
+    println("${name}: the loaded machine saves a different state")
+    failed += 1
+  }
+  failed += lockstep(name, cpu, bus, loaded_cpu, loaded_bus, frames)
+  failed += refusals(name, state, rom)
+  failed
+}
+
+/// Both machines run `frames` frames more, their pictures and sound compared at each.
+let lockstep = (
+  name: string,
+  cpu: mut Cpu,
+  bus: mut GenesisBus,
+  other_cpu: Cpu,
+  other_bus: GenesisBus,
+  frames: i64
+) -> i64 => {
+  var cpu2 = other_cpu
+  var bus2 = other_bus
+  var mixer = new_mixer(48000)
+  var mixer2 = new_mixer(48000)
+  for frame in 0..<frames {
+    run_frame(cpu, bus)
+    run_frame(cpu2, bus2)
+    let sound = mix_audio(bus, mixer)
+    let sound2 = mix_audio(bus2, mixer2)
+    if shown_frame(bus.vdp).pixels != shown_frame(bus2.vdp).pixels || sound != sound2 {
+      println("${name}: the loaded machine drifts from the saved one, ${frame + 1} frames on")
+      return 1
+    }
+  }
+  0
+}
+
+/// A state cut short, with a byte changed in its header, or loaded against another ROM.
+let refusals = (name: string, state: []u8, rom: []u8) -> i64 => {
+  var failed: i64 = 0
+  if load_state(state.slice(0, state.len() - 1), rom).is_ok() {
+    println("${name}: a truncated state was loaded")
+    failed += 1
+  }
+  var damaged = state.slice(0, state.len())
+  damaged[3] = damaged[3] ~ 0xFF
+  if load_state(damaged, rom).is_ok() {
+    println("${name}: a state with a damaged header was loaded")
+    failed += 1
+  }
+  var other_rom = rom.slice(0, rom.len())
+  other_rom[0x200] = other_rom[0x200] ~ 0x55
+  if load_state(state, other_rom).is_ok() {
+    println("${name}: a state was loaded for another ROM")
+    failed += 1
+  }
+  failed
+}
+
+/// Which part of the machine differs, to start looking.
+let where_differs = pure (a: ref GenesisBus, b: ref GenesisBus) -> string => {
+  var parts: []string = []
+  if a.cart != b.cart { parts.push("cartridge") }
+  if a.ram != b.ram { parts.push("work RAM") }
+  if a.vdp != b.vdp { parts.push("VDP") }
+  if a.ports != b.ports { parts.push("ports") }
+  if a.z80 != b.z80 { parts.push("Z80") }
+  if a.sound.ym != b.sound.ym { parts.push("YM2612") }
+  if a.sound.psg != b.sound.psg { parts.push("PSG") }
+  if a.sound != b.sound { parts.push("Z80 side") }
+  if a.clock != b.clock || a.refresh != b.refresh || a.open_bus != b.open_bus { parts.push("bus") }
+  if parts.len() == 0 { "" } else { " (${parts.join(", ")})" }
+}

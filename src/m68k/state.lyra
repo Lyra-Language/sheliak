@@ -1,0 +1,44 @@
+module m68k
+//! The 68000's part of a save state: every register and latch of [Cpu].
+//!
+//! **Beside the struct, field for field**: a field added to the struct is a line in each of
+//! these, in the same place, or a saved state loses it. `build/statetest` catches one
+//! missed: a machine loaded from a state must equal the one saved.
+
+import snapshot.{
+  Writer, Reader, put_u8, put_bool, put_u16, put_u32, get_u8, get_bool, get_u16, get_u32,
+}
+
+pub let save_cpu = (w: mut Writer, cpu: ref Cpu) -> void => {
+  for v in cpu.d { put_u32(w, v) }
+  for v in cpu.a { put_u32(w, v) }
+  put_u32(w, cpu.inactive_sp)
+  put_u16(w, cpu.sr)
+  put_u32(w, cpu.pc)
+  put_u16(w, cpu.ird)
+  put_u16(w, cpu.irc)
+  put_bool(w, cpu.faulted)
+  put_u32(w, cpu.fault_address)
+  put_u16(w, cpu.fault_status)
+  put_u8(w, cpu.ipl)
+  put_bool(w, cpu.nmi)
+  put_bool(w, cpu.stopped)
+  put_bool(w, cpu.untraced)
+}
+
+pub let load_cpu = (r: mut Reader, cpu: mut Cpu) -> void => {
+  for i in 0..<8 { cpu.d[i] = get_u32(r) }
+  for i in 0..<8 { cpu.a[i] = get_u32(r) }
+  cpu.inactive_sp = get_u32(r)
+  cpu.sr = get_u16(r)
+  cpu.pc = get_u32(r)
+  cpu.ird = get_u16(r)
+  cpu.irc = get_u16(r)
+  cpu.faulted = get_bool(r)
+  cpu.fault_address = get_u32(r)
+  cpu.fault_status = get_u16(r)
+  cpu.ipl = get_u8(r)
+  cpu.nmi = get_bool(r)
+  cpu.stopped = get_bool(r)
+  cpu.untraced = get_bool(r)
+}

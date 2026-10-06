@@ -74,7 +74,7 @@ import bindings.sdl3.{
 import m68k.{ Cpu }
 import genesis.{
   GenesisBus, genesis_bus, new_cpu, power_on, run_frame, new_mixer, mix_audio,
-  rom_image, roms_in_zip, roms_in_7z, roms_in_rar, is_split_part, next_part_path, save_bytes, load_save, set_pads,
+  rom_image, roms_in_zip, roms_in_7z, roms_in_rar, save_state, load_state, is_split_part, next_part_path, save_bytes, load_save, set_pads,
   PAD_UP, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_A, PAD_B, PAD_C, PAD_START,
   PAD_X, PAD_Y, PAD_Z, PAD_MODE,
 }
@@ -111,6 +111,8 @@ let main = () -> u8 => {
   var ppm = ""
   var wav = ""
   var headless_save = false
+  var state_out = ""
+  var state_in = ""
   var pads_arg: Maybe<bool> = None
   var look_arg: Maybe<string> = None
   var held: u16 = 0
@@ -147,6 +149,12 @@ let main = () -> u8 => {
     } else if args[i] == "--save" {
       headless_save = true
       i += 1
+    } else if args[i] == "--save-state" && i + 1 < args.len() {
+      state_out = args[i + 1]
+      i += 2
+    } else if args[i] == "--load-state" && i + 1 < args.len() {
+      state_in = args[i + 1]
+      i += 2
     } else if args[i] == "--wav" && i + 1 < args.len() {
       wav = args[i + 1]
       i += 2
@@ -214,7 +222,7 @@ let main = () -> u8 => {
     if display.look != LOOK_PIXELS && effect.is_none() {
       println("sheliak: no GPU shader here, so the picture is sharp pixels")
     }
-    run_headless(paths, pads_arg.unwrap_or(true), renderer, display, frames_only, screenshot, ppm, wav, headless_save, held)
+    run_headless(paths, pads_arg.unwrap_or(true), renderer, display, frames_only, screenshot, ppm, wav, headless_save, held, state_in, state_out)
   } else {
     run_window(paths, pads_arg, look_arg, fit, prefs, prefs_file, renderer, window, effect)
   }
@@ -331,7 +339,9 @@ let run_headless = (
   ppm: string,
   wav: string,
   saving: bool,
-  held: u16
+  held: u16,
+  state_in: string,
+  state_out: string
 ) -> u8 => {
   let rom = match load_rom(paths) {
     Ok(image) => image,
@@ -342,8 +352,28 @@ let run_headless = (
   }
   let save_path = save_file_for(paths[0])
   var (cpu, bus) = power_up(rom, six_button, save_path, saving)
+  if state_in != "" {
+    let Some(state) = read_bytes(state_in) else {
+      println("sheliak: cannot read ${state_in}")
+      return 1
+    }
+    match load_state(state, rom) {
+      Ok((loaded_cpu, loaded_bus)) => {
+        cpu = loaded_cpu
+        bus = loaded_bus
+      },
+      Err(why) => {
+        println("sheliak: ${state_in} is ${why}")
+        return 1
+      },
+    }
+  }
   bus.pads[0] = held
   let status = run_frames(cpu, bus, renderer, display, frames, screenshot, ppm, wav)
+  if state_out != "" && !write_bytes(state_out, save_state(cpu, bus)) {
+    println("sheliak: cannot write ${state_out}")
+    return 1
+  }
   if saving { write_save(bus, save_path) }
   status
 }
@@ -434,6 +464,9 @@ let run_window = (
   var session = Session {
     rom_path: rom_paths[0],
     save_path: save_file_for(rom_paths[0]),
+    state_path: state_file_for(rom_paths[0]),
+    notice: "",
+    notice_until: 0,
     prefs: prefs,
     prefs_file: prefs_file,
     six_button: pads_arg.unwrap_or(prefs.six_button),
@@ -458,6 +491,11 @@ let run_window = (
 struct Session {
   rom_path: string,
   save_path: string,
+  /// The save state's file, beside the ROM as the save RAM's is.
+  state_path: string,
+  /// A word for the title bar — "State Saved" — until `notice_until` (in ticks_ns).
+  notice: string,
+  notice_until: i64,
   prefs: Prefs,
   prefs_file: Maybe<string>,
   six_button: bool,
@@ -542,9 +580,26 @@ let play = (
         }
       } else if tag == MENU_RESET {
         power_on(cpu, bus)
+      } else if tag == MENU_SAVE_STATE {
+        if write_bytes(session.state_path, save_state(cpu, bus)) {
+          notify(session, "State Saved")
+        } else {
+          alert("Sheliak cannot save the state", "${session.state_path} cannot be written.")
+        }
+      } else if tag == MENU_LOAD_STATE {
+        if let Some((loaded_cpu, loaded_bus)) = load_saved_state(bus, session) {
+          cpu = loaded_cpu
+          bus = loaded_bus
+          frames_since_save = 0
+          notify(session, "State Loaded")
+        }
       } else {
         on_menu(bus, session, window, tag)
       }
+      show_state(session, window)
+    }
+    if session.notice != "" && i64(ticks_ns()) >= session.notice_until {
+      session.notice = ""
       show_state(session, window)
     }
     if session.display.fit != applied_fit {
@@ -597,6 +652,8 @@ const EVENT_LEAVE_FULLSCREEN: u32 = 0x218
 
 /// The menu items' tags.
 const MENU_OPEN: i32 = 1
+const MENU_SAVE_STATE: i32 = 50
+const MENU_LOAD_STATE: i32 = 51
 const MENU_PAUSE: i32 = 2
 const MENU_RESET: i32 = 3
 const MENU_PADS_6: i32 = 4
@@ -617,6 +674,9 @@ const FITS: [3]string = #[FIT_INTEGER, FIT_TV, FIT_SQUARE]
 let install_menus = (volume: i64) -> bool => {
   menu("File")
   item("Open ROM…", "o", COMMAND, MENU_OPEN)
+  separator()
+  item("Save State", "s", COMMAND, MENU_SAVE_STATE)
+  item("Load State", "l", COMMAND, MENU_LOAD_STATE)
   menu("Emulation")
   item("Pause", "p", COMMAND, MENU_PAUSE)
   item("Reset", "r", COMMAND, MENU_RESET)
@@ -696,8 +756,36 @@ let open_rom = (bus: mut GenesisBus, session: mut Session) -> Maybe<(Cpu, Genesi
   write_save(bus, session.save_path)
   session.rom_path = path
   session.save_path = save_file_for(path)
+  session.state_path = state_file_for(path)
   session.paused = false
   Some(power_up(rom, session.six_button, session.save_path, true))
+}
+
+/// The game's save state, loaded into a fresh machine in place of this one — or nothing,
+/// with an alert saying why: none saved yet, or one that cannot be loaded. The pads the
+/// state was saved with are its own, and the menu follows them.
+let load_saved_state = (bus: ref GenesisBus, session: mut Session) -> Maybe<(Cpu, GenesisBus)> => {
+  let Some(state) = read_bytes(session.state_path) else {
+    alert("No saved state", "Save one with File ▸ Save State (⌘S) first.")
+    return None
+  }
+  match load_state(state, bus.cart.rom) {
+    Ok((cpu, loaded)) => {
+      session.six_button = loaded.ports[0].six_button
+      session.paused = false
+      Some((cpu, loaded))
+    },
+    Err(why) => {
+      alert("Sheliak cannot load the state", "${session.state_path} is ${why}.")
+      None
+    },
+  }
+}
+
+/// A word in the title bar for two seconds.
+let notify = (session: mut Session, notice: string) -> void => {
+  session.notice = notice
+  session.notice_until = i64(ticks_ns()) + 2000000000
 }
 
 let toggle_fullscreen = (session: mut Session, window: Window) -> void => {
@@ -718,7 +806,8 @@ let keep_prefs = (session: ref Session) -> void => {
 /// The menus' checkmarks and the window's title, as the session now is.
 let show_state = (session: ref Session, window: Window) -> void => {
   let name = session.rom_path.base()
-  let title = if session.paused { "${name} — Paused" } else { name }
+  let paused = if session.paused { "${name} — Paused" } else { name }
+  let title = if session.notice != "" { "${paused} — ${session.notice}" } else { paused }
   set_window_title(window, title)
   if !session.native { return }
   set_checked(MENU_PAUSE, session.paused)
@@ -752,9 +841,15 @@ let write_save = (bus: mut GenesisBus, path: string) -> void => {
   }
 }
 
-/// The save file beside a ROM: its name with the extension replaced by `.srm` — both of a
-/// zipped ROM's, `game.smd.zip` (or `.7z`, `.rar`) saving to `game.srm`.
-let save_file_for = pure (path: string) -> string => {
+/// The save RAM's file beside a ROM, `game.srm`.
+let save_file_for = pure (path: string) -> string => beside_rom(path, "srm")
+
+/// The save state's file beside a ROM, `game.state`.
+let state_file_for = pure (path: string) -> string => beside_rom(path, "state")
+
+/// A file beside a ROM: its name with the extension replaced by `extension` — both of a
+/// zipped ROM's, `game.smd.zip` (or `.7z`, `.rar`) giving `game.srm`.
+let beside_rom = pure (path: string, extension: string) -> string => {
   var unzipped = path
   for suffix in [".zip", ".ZIP", ".7z", ".7Z", ".rar", ".RAR"] {
     if let Some(stem) = path.strip_suffix(suffix) { unzipped = stem }
@@ -772,7 +867,7 @@ let save_file_for = pure (path: string) -> string => {
     i += 1
   }
   let stem = if dot > 0 { rom_path.slice(0, dot) } else { rom_path }
-  stem ++ ".srm"
+  "${stem}.${extension}"
 }
 
 /// Stereo samples, -1 to 1, as a 16-bit PCM WAV file at the audio rate.
@@ -902,9 +997,11 @@ let buttons_named = pure (names: string) -> Result<u16, string> => {
   Ok(held)
 }
 
-/// Pad 1's buttons held on the keyboard, by key position.
+/// Pad 1's buttons held on the keyboard, by key position — none while ⌘ or ⌃ is held, so a
+/// menu's shortcut (⌘S) does not press a button (S is Y) on its way to the menu.
 let keyboard_buttons = () -> u16 => {
   var held: u16 = 0
+  if (modifiers() & (MOD_LGUI | MOD_RGUI | MOD_LCTRL | MOD_RCTRL)) != 0 { return held }
   if key_held(SCANCODE_UP) { held = held | PAD_UP }
   if key_held(SCANCODE_DOWN) { held = held | PAD_DOWN }
   if key_held(SCANCODE_LEFT) { held = held | PAD_LEFT }

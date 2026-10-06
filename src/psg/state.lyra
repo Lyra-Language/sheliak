@@ -1,0 +1,30 @@
+module psg
+//! The PSG's part of a save state: every counter and register of [Psg].
+//!
+//! **Beside the struct, field for field**: a field added to the struct is a line in each of
+//! these, in the same place, or a saved state loses it. `build/statetest` catches one
+//! missed: a machine loaded from a state must equal the one saved.
+
+import snapshot.{
+  Writer, Reader, put_u8, put_bool, put_u16, get_u8, get_bool, get_u16,
+}
+
+pub let save_psg = (w: mut Writer, psg: ref Psg) -> void => {
+  for v in psg.period { put_u16(w, v) }
+  for v in psg.volume { put_u8(w, v) }
+  for v in psg.counter { put_u16(w, v) }
+  for v in psg.output { put_bool(w, v) }
+  put_u16(w, psg.lfsr)
+  put_bool(w, psg.noise_out)
+  put_u8(w, psg.latched)
+}
+
+pub let load_psg = (r: mut Reader, psg: mut Psg) -> void => {
+  for i in 0..<4 { psg.period[i] = get_u16(r) }
+  for i in 0..<4 { psg.volume[i] = get_u8(r) }
+  for i in 0..<4 { psg.counter[i] = get_u16(r) }
+  for i in 0..<4 { psg.output[i] = get_bool(r) }
+  psg.lfsr = get_u16(r)
+  psg.noise_out = get_bool(r)
+  psg.latched = get_u8(r)
+}

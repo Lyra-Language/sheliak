@@ -1,0 +1,72 @@
+module z80
+//! The Z80's part of a save state: every register and latch of [Z80Cpu].
+//!
+//! **Beside the struct, field for field**: a field added to the struct is a line in each of
+//! these, in the same place, or a saved state loses it. `build/statetest` catches one
+//! missed: a machine loaded from a state must equal the one saved.
+
+import snapshot.{
+  Writer, Reader, put_u8, put_bool, put_u16, get_u8, get_bool, get_u16,
+}
+
+pub let save_z80 = (w: mut Writer, z80: ref Z80Cpu) -> void => {
+  put_u8(w, z80.a)
+  put_u8(w, z80.f)
+  put_u8(w, z80.b)
+  put_u8(w, z80.c)
+  put_u8(w, z80.d)
+  put_u8(w, z80.e)
+  put_u8(w, z80.h)
+  put_u8(w, z80.l)
+  put_u16(w, z80.af_)
+  put_u16(w, z80.bc_)
+  put_u16(w, z80.de_)
+  put_u16(w, z80.hl_)
+  put_u16(w, z80.ix)
+  put_u16(w, z80.iy)
+  put_u16(w, z80.sp)
+  put_u16(w, z80.pc)
+  put_u8(w, z80.i)
+  put_u8(w, z80.r)
+  put_u16(w, z80.wz)
+  put_bool(w, z80.iff1)
+  put_bool(w, z80.iff2)
+  put_u8(w, z80.im)
+  put_u8(w, z80.q)
+  put_bool(w, z80.p)
+  put_bool(w, z80.ei)
+  put_bool(w, z80.halted)
+  put_bool(w, z80.flags_written)
+  put_bool(w, z80.nmi_pending)
+}
+
+pub let load_z80 = (r: mut Reader, z80: mut Z80Cpu) -> void => {
+  z80.a = get_u8(r)
+  z80.f = get_u8(r)
+  z80.b = get_u8(r)
+  z80.c = get_u8(r)
+  z80.d = get_u8(r)
+  z80.e = get_u8(r)
+  z80.h = get_u8(r)
+  z80.l = get_u8(r)
+  z80.af_ = get_u16(r)
+  z80.bc_ = get_u16(r)
+  z80.de_ = get_u16(r)
+  z80.hl_ = get_u16(r)
+  z80.ix = get_u16(r)
+  z80.iy = get_u16(r)
+  z80.sp = get_u16(r)
+  z80.pc = get_u16(r)
+  z80.i = get_u8(r)
+  z80.r = get_u8(r)
+  z80.wz = get_u16(r)
+  z80.iff1 = get_bool(r)
+  z80.iff2 = get_bool(r)
+  z80.im = get_u8(r)
+  z80.q = get_u8(r)
+  z80.p = get_bool(r)
+  z80.ei = get_bool(r)
+  z80.halted = get_bool(r)
+  z80.flags_written = get_bool(r)
+  z80.nmi_pending = get_bool(r)
+}

@@ -1,0 +1,152 @@
+module genesis
+//! Save states: the whole machine as bytes ([save_state]), and a machine again from them
+//! ([load_state]) — the 68000, the Z80, the VDP, both sound chips, the cartridge's banks and
+//! save RAM, the I/O ports, every clock — so that a loaded machine runs on exactly as the
+//! saved one would have.
+//!
+//! **What is not in a state is what the ROM decides**: the ROM itself, its mirroring and
+//! mapper, the save RAM's place, and the YM2612's tables. A state names the ROM it was saved
+//! from by its CRC-32 and is refused for any other, and a state from another version of
+//! the format is refused rather than misread.
+//!
+//! **Loaded into a fresh machine**, not the running one: a state cut short, or damaged,
+//! leaves the game being played as it was. Each chip's part is in that chip's own
+//! `state.lyra`; `build/statetest` holds a loaded machine equal to the one saved, and
+//! running on in lockstep with it.
+
+import std.compress.{ crc32 }
+import m68k.{ Cpu, save_cpu, load_cpu }
+import z80.{ save_z80, load_z80 }
+import vdp.{ save_vdp, load_vdp }
+import psg.{ save_psg, load_psg }
+import ym2612.{ save_ym2612, load_ym2612 }
+import snapshot.{
+  Writer, Reader, new_writer, new_reader, finish, put_u8, put_bool, put_u16, put_u32,
+  put_i64, put_bytes, put_i32s, get_u8, get_bool, get_u16, get_u32, get_i64, get_bytes,
+  get_i32s,
+}
+
+/// The machine as a save state.
+pub let save_state = (cpu: ref Cpu, bus: ref GenesisBus) -> []u8 => {
+  var w = new_writer()
+  for b in STATE_MAGIC { put_u8(w, b) }
+  put_u16(w, STATE_VERSION)
+  put_u32(w, crc32(bus.cart.rom))
+  save_cpu(w, cpu)
+  save_bus(w, bus)
+  w.bytes
+}
+
+/// A machine from a save state and the ROM image it was saved with — or why not: not a
+/// state, a state of another version, of another game, or damaged.
+pub let load_state = (state: []u8, rom: []u8) -> Result<(Cpu, GenesisBus), string> => {
+  var r = new_reader(state)
+  for b in STATE_MAGIC {
+    if get_u8(r) != b { return Err("not a Sheliak save state") }
+  }
+  let version = get_u16(r)
+  if version != STATE_VERSION {
+    return Err("a save state of another Sheliak (format ${version}, this one reads ${STATE_VERSION})")
+  }
+  if get_u32(r) != crc32(rom) { return Err("a save state of another game") }
+  var cpu = new_cpu()
+  var bus = genesis_bus(rom)
+  load_cpu(r, cpu)
+  load_bus(r, bus)
+  if !finish(r) { return Err("a damaged save state") }
+  Ok((cpu, bus))
+}
+
+/// "SHLKSTAT".
+const STATE_MAGIC: [8]u8 = #[0x53, 0x48, 0x4C, 0x4B, 0x53, 0x54, 0x41, 0x54]
+
+/// The format's version: one more whenever a chip's state gains, loses or reorders a field.
+const STATE_VERSION: u16 = 1
+
+let save_bus = (w: mut Writer, bus: ref GenesisBus) -> void => {
+  save_cartridge(w, bus.cart)
+  put_bytes(w, bus.ram)
+  save_vdp(w, bus.vdp)
+  put_i64(w, bus.clock)
+  put_i64(w, bus.refresh)
+  put_u16(w, bus.open_bus)
+  for port in bus.ports { save_port(w, port) }
+  for v in bus.pads { put_u16(w, v) }
+  save_z80(w, bus.z80)
+  save_z80_side(w, bus.sound)
+}
+
+let load_bus = (r: mut Reader, bus: mut GenesisBus) -> void => {
+  load_cartridge(r, bus.cart)
+  bus.ram = get_bytes(r, 65536)
+  load_vdp(r, bus.vdp)
+  bus.clock = get_i64(r)
+  bus.refresh = get_i64(r)
+  bus.open_bus = get_u16(r)
+  for i in 0..<3 { load_port(r, bus.ports[i]) }
+  for i in 0..<2 { bus.pads[i] = get_u16(r) }
+  load_z80(r, bus.z80)
+  load_z80_side(r, bus.sound)
+}
+
+let save_cartridge = (w: mut Writer, cart: ref Cartridge) -> void => {
+  for v in cart.banks { put_u8(w, v) }
+  put_bytes(w, cart.save)
+  put_bool(w, cart.save_dirty)
+}
+
+let load_cartridge = (r: mut Reader, cart: mut Cartridge) -> void => {
+  for i in 0..<8 { cart.banks[i] = get_u8(r) }
+  cart.save = get_bytes(r, cart.save.len())
+  cart.save_dirty = get_bool(r)
+}
+
+let save_port = (w: mut Writer, port: ref Port) -> void => {
+  put_u8(w, port.data)
+  put_u8(w, port.control)
+  put_bool(w, port.six_button)
+  put_u8(w, port.th_count)
+  put_i64(w, port.th_timeout)
+}
+
+let load_port = (r: mut Reader, port: mut Port) -> void => {
+  port.data = get_u8(r)
+  port.control = get_u8(r)
+  port.six_button = get_bool(r)
+  port.th_count = get_u8(r)
+  port.th_timeout = get_i64(r)
+}
+
+let save_z80_side = (w: mut Writer, side: ref Z80Side) -> void => {
+  put_bytes(w, side.ram)
+  put_u32(w, side.bank)
+  put_i64(w, side.clock)
+  put_bool(w, side.bus_requested)
+  put_bool(w, side.in_reset)
+  put_i64(w, side.int_from)
+  save_ym2612(w, side.ym)
+  save_psg(w, side.psg)
+  put_i64(w, side.ym_clock)
+  put_i64(w, side.psg_clock)
+  put_i32s(w, side.fm_samples)
+  put_i32s(w, side.psg_samples)
+  put_i64(w, side.ym_left)
+  put_i64(w, side.ym_right)
+}
+
+let load_z80_side = (r: mut Reader, side: mut Z80Side) -> void => {
+  side.ram = get_bytes(r, side.ram.len())
+  side.bank = get_u32(r)
+  side.clock = get_i64(r)
+  side.bus_requested = get_bool(r)
+  side.in_reset = get_bool(r)
+  side.int_from = get_i64(r)
+  load_ym2612(r, side.ym)
+  load_psg(r, side.psg)
+  side.ym_clock = get_i64(r)
+  side.psg_clock = get_i64(r)
+  side.fm_samples = get_i32s(r, -1)
+  side.psg_samples = get_i32s(r, -1)
+  side.ym_left = get_i64(r)
+  side.ym_right = get_i64(r)
+}
