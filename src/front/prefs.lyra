@@ -1,11 +1,13 @@
 module front
 //! The player's preferences, kept between runs: the window's scale, full screen, the kind of
-//! pad, the sound's volume and whether it is muted, and how the picture looks.
+//! pad, the sound's volume and whether it is muted, how the picture looks, and the ROMs
+//! played lately (File ▸ Open Recent).
 //!
-//! **A text file of `key = value` lines**, read leniently: a key it does not know, a line it
-//! cannot read and a value out of range are passed over, and the default stands. A file
-//! from a later Sheliak, or one edited by hand, is never a reason not to start. Written
-//! whole after every change.
+//! **A text file of `key = value` lines**, the value everything after the first `=` (a path
+//! may hold one), and a `recent` line for each recent ROM, newest first. Read leniently: a
+//! key it does not know, a line it cannot read and a value out of range are passed over,
+//! and the default stands. A file from a later Sheliak, or one edited by hand, is never a
+//! reason not to start. Written whole after every change.
 //!
 //! **Where**: `~/Library/Application Support/Sheliak/preferences` where that folder exists
 //! (macOS), `~/.config/sheliak/preferences` otherwise.
@@ -24,7 +26,12 @@ pub struct Prefs {
   /// One of `display.lyra`'s looks, and one of its fits.
   look: string,
   fit: string,
+  /// The ROMs played lately, as absolute paths, newest first: at most [MAX_RECENT].
+  recent: []string,
 }
+
+/// How many recent ROMs are kept, as macOS's own Open Recent keeps ten.
+pub const MAX_RECENT: i64 = 10
 
 pub let default_prefs = pure () -> Prefs => Prefs {
   scale: 3,
@@ -34,16 +41,16 @@ pub let default_prefs = pure () -> Prefs => Prefs {
   muted: false,
   look: LOOK_PIXELS,
   fit: FIT_INTEGER,
+  recent: [],
 }
 
 /// Preferences from a file's text, each line that says something valid taking effect.
 pub let parse_prefs = pure (text: string) -> Prefs => {
   var prefs = default_prefs()
   for line in text.lines() {
-    let parts = line.split("=")
-    if parts.len() != 2 { continue }
-    let key = parts[0].trim()
-    let value = parts[1].trim()
+    let Some(equals) = line.index("=") else { continue }
+    let key = line.slice(0, equals).trim()
+    let value = line.slice(equals + 1, line.len()).trim()
     if key == "scale" {
       if let Some(n) = value.parse_i64() {
         if n >= 1 && n <= 5 { prefs.scale = n }
@@ -63,6 +70,8 @@ pub let parse_prefs = pure (text: string) -> Prefs => {
       if value == LOOK_PIXELS || value == LOOK_SCANLINES || value == LOOK_CRT { prefs.look = value }
     } else if key == "fit" {
       if value == FIT_INTEGER || value == FIT_TV || value == FIT_SQUARE { prefs.fit = value }
+    } else if key == "recent" {
+      if value != "" && prefs.recent.len() < MAX_RECENT { prefs.recent.push(value) }
     }
   }
   prefs
@@ -71,8 +80,27 @@ pub let parse_prefs = pure (text: string) -> Prefs => {
 /// Preferences as a file's text.
 pub let format_prefs = pure (prefs: ref Prefs) -> string => {
   let pads = if prefs.six_button { 6 } else { 3 }
-  "scale = ${prefs.scale}\nfullscreen = ${prefs.fullscreen}\npads = ${pads}\nvolume = ${prefs.volume}\nmuted = ${prefs.muted}\ndisplay = ${prefs.look}\nfit = ${prefs.fit}\n"
+  var text = "scale = ${prefs.scale}\nfullscreen = ${prefs.fullscreen}\npads = ${pads}\nvolume = ${prefs.volume}\nmuted = ${prefs.muted}\ndisplay = ${prefs.look}\nfit = ${prefs.fit}\n"
+  for path in prefs.recent { text = "${text}recent = ${path}\n" }
+  text
 }
+
+/// The recent ROMs with `path` first — moved there if it was already among them — and the
+/// oldest let go past [MAX_RECENT]. A path a line cannot hold (one with a line break, or
+/// spaces at either end, which reading trims) is not kept.
+pub let with_recent = pure (recent: []string, path: string) -> []string => {
+  let unwritable = path.contains("\n") || path.contains("\r") || path.trim() != path
+  if unwritable { return recent.slice(0, recent.len()) }
+  var kept: []string = [path]
+  for other in recent {
+    if other != path && kept.len() < MAX_RECENT { kept.push(other) }
+  }
+  kept
+}
+
+/// The recent ROMs without `path`.
+pub let without_recent = pure (recent: []string, path: string) -> []string =>
+  recent.filter((other) => other != path)
 
 /// Where the preferences live, or `None` without a home directory to put them in.
 pub let prefs_path = () -> Maybe<string> => {

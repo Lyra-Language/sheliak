@@ -29,7 +29,8 @@ Keys (pad 1): arrows; Z, X, C for A, B, C and A, S, D for X, Y, Z; Return for St
 Mode; F full screen, Escape to leave it; ⌘Q quits. Gamepads are pads 1 and 2. The pads are
 6-button; `--pads 3` gives the original 3-button pad, which a few early games need.
 
-On macOS the menu bar opens another ROM (⌘O; started with none, Sheliak asks for one),
+On macOS the menu bar opens another ROM (⌘O, or one of the last ten from File ▸ Open
+Recent; started with none, Sheliak asks for one),
 saves and loads the game's state (⌘S, ⌘L — beside the ROM as `game.state`), pauses (⌘P)
 and resets (⌘R), and sets the pads, mute (⇧⌘M) and the volume (a slider), the window's size
 (⌘1–⌘5), full screen (⌃⌘F), how the picture fills the screen — whole-number multiples, or

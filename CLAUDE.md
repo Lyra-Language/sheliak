@@ -237,9 +237,11 @@ Module paths resolve under `src/` (the entry file's directory), so entry points 
 ```
 src/sheliak.lyra     the emulator in an SDL window: frames paced to 59.92 Hz, the picture
                      through the DAC's levels, keyboard and gamepads as pads 1 and 2; the
-                     macOS menu bar (open, pause, reset, pads, mute, volume, scale, fit, look)
+                     macOS menu bar (open, open recent, save/load state, pause, reset, pads,
+                     mute, volume, scale, fit, look), made again when the recent ROMs change
 src/front/           the front end's pieces (module front):
-  prefs.lyra         the preferences, kept between runs as `key = value` lines
+  prefs.lyra         the preferences, kept between runs as `key = value` lines, and the
+                     ten recent ROMs (absolute paths, newest first)
   display.lyra       the fits (whole numbers, 4:3, square pixels) and the looks (sharp
                      pixels, scanlines, a CRT) with their Metal shader
 src/prefstest.lyra   the preferences file read and written
@@ -393,7 +395,8 @@ Raw, SMD, split SMD and MGD ROM images, bare or in zip, 7z or RAR 5 archives, tw
 pads (3 with `--pads 3`; the protocol matched against BlastEm with nothing held, `pads` and
 `pads6`; with buttons held, `build/padtest`), frames paced to the console's 59.92 Hz
 whatever the display's rate, ~4.7 ms a frame with sound on an M-series Mac. On macOS, a
-**menu bar** opens a ROM (a native Open panel), saves and loads the game's **state** (beside
+**menu bar** opens a ROM (a native Open panel, or File ▸ Open Recent's last ten, one
+that no longer plays taken off it), saves and loads the game's **state** (beside
 the ROM as `game.state`), pauses and resets, and sets the pads, the
 window's scale, full screen, mute and a volume slider, the **fit** — whole-number multiples, or as large as
 fits at 4:3 or with square pixels, sampled with SDL's pixel-art mode — and the **look** — sharp pixels, or scanlines or a

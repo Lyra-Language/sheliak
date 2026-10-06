@@ -1,11 +1,13 @@
 // prefstest — the preferences file read and written (src/front/prefs.lyra): defaults, a
 // round trip, and lenient reading — an unknown key, a line that says nothing, a value out
-// of range each passed over with the default standing.
+// of range each passed over with the default standing; and the recent ROMs kept newest
+// first, without repeats, at most ten.
 //
 //   build/prefstest      prints each failure, then a verdict; exits 1 on any
 
 import front.{
-  Prefs, default_prefs, parse_prefs, format_prefs, LOOK_CRT, LOOK_SCANLINES, FIT_TV, FIT_SQUARE,
+  Prefs, default_prefs, parse_prefs, format_prefs, with_recent, without_recent, MAX_RECENT,
+  LOOK_CRT, LOOK_SCANLINES, FIT_TV, FIT_SQUARE,
 }
 
 let main = () -> u8 => {
@@ -19,10 +21,11 @@ let main = () -> u8 => {
     muted: true,
     look: LOOK_CRT,
     fit: FIT_TV,
+    recent: ["/Games/Sonic 2.7z", "/Games/a=b/Gunstar Heroes.md", "/Games/sf2md1.smd"],
   }
   failed += check_prefs("round trip", parse_prefs(format_prefs(chosen)), chosen)
   let lenient = parse_prefs(
-    "scale = 9\nvolume = -3\npads = 4\nfullscreen = yes\ncolour = blue\njust words\n= 2\nmuted=true\n  scale   =   2  \ndisplay = vhs\ndisplay=scanlines\nfit = square\nfit = stretched\n"
+    "scale = 9\nvolume = -3\npads = 4\nfullscreen = yes\ncolour = blue\njust words\n= 2\nmuted=true\n  scale   =   2  \ndisplay = vhs\ndisplay=scanlines\nfit = square\nfit = stretched\nrecent =\nrecent = /x.bin\n"
   )
   failed += check_prefs(
     "lenient",
@@ -35,8 +38,28 @@ let main = () -> u8 => {
       muted: true,
       look: LOOK_SCANLINES,
       fit: FIT_SQUARE,
+      recent: ["/x.bin"],
     }
   )
+  let abc = ["/a", "/b", "/c"]
+  failed += check_recent("first", with_recent([], "/a"), ["/a"])
+  failed += check_recent("new first", with_recent(["/a", "/b"], "/c"), ["/c", "/a", "/b"])
+  failed += check_recent("moved, not repeated", with_recent(abc, "/b"), ["/b", "/a", "/c"])
+  failed += check_recent("a line break is not kept", with_recent(["/a"], "/b\nc"), ["/a"])
+  failed += check_recent("removed", without_recent(abc, "/b"), ["/a", "/c"])
+  var many: []string = []
+  var oldest_first: []string = []
+  for n in 0..<MAX_RECENT + 3 {
+    many = with_recent(many, "/${n}")
+    oldest_first.push("/${n}")
+  }
+  var newest_ten: []string = []
+  for n in 0..<MAX_RECENT { newest_ten.push("/${MAX_RECENT + 2 - n}") }
+  failed += check_recent("at most ten", many, newest_ten)
+  var file = default_prefs()
+  file.recent = oldest_first
+  let read_back = parse_prefs(format_prefs(file)).recent
+  failed += check_recent("ten read", read_back, oldest_first.slice(0, MAX_RECENT))
   if failed == 0 {
     println("prefstest: all passed")
     return 0
@@ -48,5 +71,11 @@ let main = () -> u8 => {
 let check_prefs = (name: string, got: Prefs, want: Prefs) -> i64 => {
   if got == want { return 0 }
   println("${name}: got\n${format_prefs(got)}want\n${format_prefs(want)}")
+  1
+}
+
+let check_recent = (name: string, got: []string, want: []string) -> i64 => {
+  if got == want { return 0 }
+  println("${name}: got ${got.join(", ")}, want ${want.join(", ")}")
   1
 }

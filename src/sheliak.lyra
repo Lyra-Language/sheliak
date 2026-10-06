@@ -18,7 +18,8 @@
 // The pads are 6-button, as most players' are; `--pads 3` makes them the original 3-button
 // pad, which a few early games need (they misread a 6-button one).
 //
-// On macOS a menu bar opens another ROM (⌘O), pauses (⌘P) and resets (⌘R), and sets the
+// On macOS a menu bar opens another ROM (⌘O, or one of the last ten from File ▸ Open
+// Recent), saves and loads its state (⌘S, ⌘L), pauses (⌘P) and resets (⌘R), and sets the
 // pads (3- or 6-button), the window's scale (⌘1–⌘5), full screen (⌃⌘F) and the sound
 // (mute ⇧⌘M, a volume slider), how the frame fills the window — whole-number multiples, or as large as fits
 // at 4:3 or with square pixels — and how the picture looks: sharp pixels, or through a shader on the
@@ -51,6 +52,7 @@ import std.zip.{ is_zip }
 import std.sevenzip.{ is_7z }
 import std.rar.{ is_rar }
 import std.path
+import std.env.{ lookup }
 import bindings.sdl3.{
   init, quit, last_error, INIT_VIDEO, INIT_GAMEPAD,
   Window, create_window, destroy_window, set_fullscreen, set_window_size, set_window_title,
@@ -80,11 +82,13 @@ import genesis.{
 }
 import vdp.{ Frame, shown_frame }
 import front.{
-  Prefs, default_prefs, prefs_path, load_prefs, save_prefs, look_uniforms, DISPLAY_SHADER,
+  Prefs, default_prefs, prefs_path, load_prefs, save_prefs, with_recent, without_recent,
+  look_uniforms, DISPLAY_SHADER,
   LOOK_PIXELS, LOOK_SCANLINES, LOOK_CRT, fit_size, FIT_INTEGER, FIT_TV, FIT_SQUARE,
 }
 import bindings.menubar.{
-  menu, item, separator, header, slider, slider_value, window_menu, install, poll_menu,
+  menu, item, separator, header, slider, slider_value, submenu, end_submenu, window_menu,
+  install, poll_menu,
   set_checked, set_enabled,
   choose_file, alert,
   COMMAND, CONTROL,
@@ -443,7 +447,7 @@ let run_window = (
   window: Window,
   effect: Maybe<Effect>
 ) -> u8 => {
-  let native = install_menus(prefs.volume)
+  let native = install_menus(prefs.volume, prefs.recent)
   var rom_paths = paths
   if rom_paths.len() == 0 {
     if !native {
@@ -479,6 +483,8 @@ let run_window = (
   }
   apply_fit(renderer, session.display.fit)
   var (cpu, bus) = power_up(rom, session.six_button, session.save_path, true)
+  // A split image's parts given one by one are not a file Open Recent could reopen.
+  if rom_paths.len() == 1 { remember(session, rom_paths[0]) }
   show_state(session, window)
   play(cpu, bus, session, renderer, window)
   write_save(bus, session.save_path)
@@ -572,11 +578,19 @@ let play = (
     }
     for {
       let Some(tag) = poll_menu() else { break }
-      if tag == MENU_OPEN {
-        if let Some((new_cpu, new_bus)) = open_rom(bus, session) {
-          cpu = new_cpu
-          bus = new_bus
-          frames_since_save = 0
+      let recent = i64(tag - MENU_RECENT - 1)
+      if tag == MENU_OPEN || (recent >= 0 && recent < session.prefs.recent.len()) {
+        let chosen = if tag == MENU_OPEN {
+          choose_file("Open a ROM", [])
+        } else {
+          Some(session.prefs.recent[recent])
+        }
+        if let Some(path) = chosen {
+          if let Some((new_cpu, new_bus)) = open_rom(bus, session, path) {
+            cpu = new_cpu
+            bus = new_bus
+            frames_since_save = 0
+          }
         }
       } else if tag == MENU_RESET {
         power_on(cpu, bus)
@@ -652,6 +666,9 @@ const EVENT_LEAVE_FULLSCREEN: u32 = 0x218
 
 /// The menu items' tags.
 const MENU_OPEN: i32 = 1
+/// 61 to 70: File ▸ Open Recent's ROMs, newest first; 60 its Clear Menu.
+const MENU_RECENT: i32 = 60
+const MENU_CLEAR_RECENT: i32 = 60
 const MENU_SAVE_STATE: i32 = 50
 const MENU_LOAD_STATE: i32 = 51
 const MENU_PAUSE: i32 = 2
@@ -670,10 +687,19 @@ const LOOKS: [3]string = #[LOOK_PIXELS, LOOK_SCANLINES, LOOK_CRT]
 const MENU_FIT: i32 = 40
 const FITS: [3]string = #[FIT_INTEGER, FIT_TV, FIT_SQUARE]
 
-/// The menu bar, on macOS, its volume slider at `volume`; whether there is one.
-let install_menus = (volume: i64) -> bool => {
+/// The menu bar, on macOS, its volume slider at `volume` and `recent` under Open Recent;
+/// whether there is one. Installed again whenever the recent ROMs change: a menu's items are
+/// its shape, which only a new menu bar changes.
+let install_menus = (volume: i64, recent: []string) -> bool => {
   menu("File")
   item("Open ROM…", "o", COMMAND, MENU_OPEN)
+  submenu("Open Recent")
+  for i in 0..<recent.len() {
+    item(recent_title(recent, i), "", 0, MENU_RECENT + 1 + i32(i))
+  }
+  if recent.len() > 0 { separator() }
+  item("Clear Menu", "", 0, MENU_CLEAR_RECENT)
+  end_submenu()
   separator()
   item("Save State", "s", COMMAND, MENU_SAVE_STATE)
   item("Load State", "l", COMMAND, MENU_LOAD_STATE)
@@ -700,7 +726,21 @@ let install_menus = (volume: i64) -> bool => {
   separator()
   item("Full Screen", "f", COMMAND | CONTROL, MENU_FULL_SCREEN)
   window_menu()
-  install("Sheliak")
+  let native = install("Sheliak")
+  set_enabled(MENU_CLEAR_RECENT, recent.len() > 0)
+  native
+}
+
+/// A recent ROM's name in Open Recent: its file's, and the folder it is in where another
+/// recent ROM has the same name, as macOS's own Open Recent tells them apart.
+let recent_title = pure (recent: []string, i: i64) -> string => {
+  let name = recent[i].base()
+  for j, other in recent {
+    if j != i && other.base() == name {
+      if let Some(folder) = recent[i].parent() { return "${name} — ${folder.base()}" }
+    }
+  }
+  name
 }
 
 /// A menu item's choice, beyond the three that replace or restart the machine.
@@ -738,18 +778,31 @@ let on_menu = (bus: mut GenesisBus, session: mut Session, window: Window, tag: i
     session.display.look = LOOKS[i64(tag - MENU_LOOK - 1)]
     session.prefs.look = session.display.look
     keep_prefs(session)
+  } else if tag == MENU_CLEAR_RECENT {
+    session.prefs.recent = []
+    keep_prefs(session)
+    refresh_menus(session)
   }
 }
 
-/// Another ROM, chosen in the Open panel and powered up in place of this one, whose save
-/// RAM is written first — or nothing, if the panel is cancelled or the file will not play
-/// (which an alert says).
-let open_rom = (bus: mut GenesisBus, session: mut Session) -> Maybe<(Cpu, GenesisBus)> => {
-  let Some(path) = choose_file("Open a ROM", []) else { return None }
+/// Another ROM, chosen in the Open panel or Open Recent, powered up in place of this one,
+/// whose save RAM is written first — or nothing, if the file will not play, which an alert
+/// says. One that will not is taken off Open Recent: moved, deleted, or never a ROM.
+let open_rom = (
+  bus: mut GenesisBus,
+  session: mut Session,
+  path: string
+) -> Maybe<(Cpu, GenesisBus)> => {
   let rom = match load_rom([path]) {
     Ok(image) => image,
     Err(why) => {
       alert("Sheliak cannot play that file", why)
+      let kept = without_recent(session.prefs.recent, absolute_path(path))
+      if kept.len() != session.prefs.recent.len() {
+        session.prefs.recent = kept
+        keep_prefs(session)
+        refresh_menus(session)
+      }
       return None
     },
   }
@@ -758,7 +811,30 @@ let open_rom = (bus: mut GenesisBus, session: mut Session) -> Maybe<(Cpu, Genesi
   session.save_path = save_file_for(path)
   session.state_path = state_file_for(path)
   session.paused = false
+  remember(session, path)
   Some(power_up(rom, session.six_button, session.save_path, true))
+}
+
+/// A ROM put first in Open Recent, and kept there between runs.
+let remember = (session: mut Session, path: string) -> void => {
+  session.prefs.recent = with_recent(session.prefs.recent, absolute_path(path))
+  keep_prefs(session)
+  refresh_menus(session)
+}
+
+/// The menu bar made again, Open Recent as the preferences now have it. A new bar starts
+/// without checkmarks; [show_state], which follows every menu choice, puts them back.
+let refresh_menus = (session: ref Session) -> void => {
+  if !session.native { return }
+  install_menus(session.prefs.volume, session.prefs.recent)
+}
+
+/// A path as one that means the same file from anywhere: a path given on the command line
+/// is relative to the folder Sheliak was started in, which Open Recent will not be.
+let absolute_path = (path: string) -> string => {
+  if path.is_absolute() { return path.normalize() }
+  let Some(here) = lookup("PWD") else { return path }
+  here.join(path).normalize()
 }
 
 /// The game's save state, loaded into a fresh machine in place of this one — or nothing,
