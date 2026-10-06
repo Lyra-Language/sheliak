@@ -1,12 +1,14 @@
 // prefstest — the preferences file read and written (src/front/prefs.lyra): defaults, a
 // round trip, and lenient reading — an unknown key, a line that says nothing, a value out
 // of range each passed over with the default standing; and the recent ROMs kept newest
-// first, without repeats, at most ten.
+// first, without repeats, at most ten; and the controls' maps, rebound by swapping, read
+// only whole and valid.
 //
 //   build/prefstest      prints each failure, then a verdict; exits 1 on any
 
 import front.{
   Prefs, default_prefs, parse_prefs, format_prefs, with_recent, without_recent, MAX_RECENT,
+  default_keys, default_pad, rebind, parse_keys, parse_pad, format_map,
   LOOK_CRT, LOOK_SCANLINES, FIT_TV, FIT_SQUARE,
 }
 
@@ -22,6 +24,8 @@ let main = () -> u8 => {
     look: LOOK_CRT,
     fit: FIT_TV,
     recent: ["/Games/Sonic 2.7z", "/Games/a=b/Gunstar Heroes.md", "/Games/sf2md1.smd"],
+    keys: rebind(default_keys(), 4, 44),
+    gamepads: [rebind(default_pad(), 5, 101), rebind(default_pad(), 0, 100)],
   }
   failed += check_prefs("round trip", parse_prefs(format_prefs(chosen)), chosen)
   let lenient = parse_prefs(
@@ -39,8 +43,29 @@ let main = () -> u8 => {
       look: LOOK_SCANLINES,
       fit: FIT_SQUARE,
       recent: ["/x.bin"],
+      keys: default_keys(),
+      gamepads: [default_pad(), default_pad()],
     }
   )
+  // Not twelve, a refused key (Escape), a repeat, an unknown gamepad input (the logo
+  // button, 5): each passed over.
+  failed += check_maps(
+    "maps passed over",
+    parse_prefs(
+      "keys = 1,2,3\nkeys = 82,81,80,79,29,27,6,40,4,22,7,41\npad1 = 11,11,13,14,2,0,1,6,9,3,10,4\npad2 = 11,12,13,14,2,0,1,5,9,3,10,4\n"
+    ),
+    default_keys(),
+    default_pad(),
+  )
+  let keys = parse_keys("82, 81, 80, 79, 29, 27, 6, 40, 4, 22, 7, 225").unwrap_or([])
+  let shifted = [82, 81, 80, 79, 29, 27, 6, 40, 4, 22, 7, 225]
+  failed += check_inputs("keys read", keys, shifted)
+  // A taken to Space, then B to Space: A gets B's X back.
+  let swapped = rebind(rebind(default_keys(), 4, 44), 5, 44)
+  let traded = [82, 81, 80, 79, 27, 44, 6, 40, 4, 22, 7, 20]
+  failed += check_inputs("swapped", swapped, traded)
+  let pad = parse_pad(format_map(default_pad())).unwrap_or([])
+  failed += check_inputs("pad read", pad, default_pad())
   let abc = ["/a", "/b", "/c"]
   failed += check_recent("first", with_recent([], "/a"), ["/a"])
   failed += check_recent("new first", with_recent(["/a", "/b"], "/c"), ["/c", "/a", "/b"])
@@ -77,5 +102,18 @@ let check_prefs = (name: string, got: Prefs, want: Prefs) -> i64 => {
 let check_recent = (name: string, got: []string, want: []string) -> i64 => {
   if got == want { return 0 }
   println("${name}: got ${got.join(", ")}, want ${want.join(", ")}")
+  1
+}
+
+let check_maps = (name: string, got: Prefs, keys: []i64, pad: []i64) -> i64 => {
+  var failed = check_inputs("${name}: keys", got.keys, keys)
+  failed += check_inputs("${name}: pad 1", got.gamepads[0], pad)
+  failed += check_inputs("${name}: pad 2", got.gamepads[1], pad)
+  failed
+}
+
+let check_inputs = (name: string, got: []i64, want: []i64) -> i64 => {
+  if got == want { return 0 }
+  println("${name}: got ${format_map(got)}, want ${format_map(want)}")
   1
 }

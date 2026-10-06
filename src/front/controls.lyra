@@ -1,0 +1,135 @@
+module front
+//! Which key, and which gamepad button, presses each of the Genesis pad's twelve buttons:
+//! the keyboard's map (pad 1's) and a map for each port's gamepad, set in the Settings
+//! window and kept with the preferences.
+//!
+//! **A map is a list of twelve inputs, a button's at its place in [BUTTONS]**: for the
+//! keyboard an SDL scancode (a key's position, so a map means the same keys on any layout),
+//! for a gamepad one of [PAD_INPUTS]. One input presses one button: binding an input another
+//! button had swaps the two, so nothing is ever left without one.
+//!
+//! **The left stick steers too**, as the d-pad does, whatever the map; it is not one of the
+//! inputs a map assigns.
+
+import genesis.{
+  PAD_UP, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_A, PAD_B, PAD_C, PAD_START, PAD_X, PAD_Y,
+  PAD_Z, PAD_MODE,
+}
+
+/// The Genesis pad's buttons, in a map's order, and the bit each sets in a pad's mask.
+pub const BUTTONS: [12]string = #[
+  "Up", "Down", "Left", "Right", "A", "B", "C", "Start", "X", "Y", "Z", "Mode",
+]
+pub const BUTTON_BITS: [12]u16 = #[
+  PAD_UP, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_A, PAD_B, PAD_C, PAD_START, PAD_X, PAD_Y,
+  PAD_Z, PAD_MODE,
+]
+
+/// The keyboard as it has always been: arrows; Z, X, C for A, B, C and A, S, D above them
+/// for X, Y, Z (the pad's two rows); Return for Start, Q for Mode.
+pub let default_keys = pure () -> []i64 => [82, 81, 80, 79, 29, 27, 6, 40, 4, 22, 7, 20]
+
+/// A gamepad as Sheliak has always read one: the d-pad; the left, bottom and right face
+/// buttons for A, B and C (the Genesis's bottom row, left to right), the left shoulder, top
+/// face button and right shoulder for X, Y and Z; Start and Back for Start and Mode.
+pub let default_pad = pure () -> []i64 => [11, 12, 13, 14, 2, 0, 1, 6, 9, 3, 10, 4]
+
+/// What a gamepad map may name: SDL's buttons by number (`bindings.sdl3`'s `BUTTON_…`) but
+/// the logo button, which macOS keeps, and the triggers, as [LEFT_TRIGGER] and
+/// [RIGHT_TRIGGER].
+pub const PAD_INPUTS: [22]i64 = #[
+  0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 100, 101,
+]
+pub const LEFT_TRIGGER: i64 = 100
+pub const RIGHT_TRIGGER: i64 = 101
+
+/// Keys a map may not name: Escape, which stops listening for one, and ⌃ and ⌘, whose
+/// presses are the menus'.
+pub let is_refused_key = pure (scancode: i64) -> bool =>
+  scancode == 41 ||
+  scancode == 224 ||
+  scancode == 227 ||
+  scancode == 228 ||
+  scancode == 231
+
+/// `map` with `button` pressed by `input` — and, if another button was, that button
+/// given `button`'s old input in exchange.
+pub let rebind = pure (inputs: []i64, button: i64, input: i64) -> []i64 => {
+  var bound = inputs.slice(0, inputs.len())
+  for i in 0..<bound.len() {
+    if i != button && bound[i] == input { bound[i] = inputs[button] }
+  }
+  bound[button] = input
+  bound
+}
+
+/// A gamepad input's name, by where it is rather than what it is labelled — a pad's
+/// bottom face button is Xbox A, PlayStation ✕ and Nintendo B.
+pub let pad_input_name = pure (input: i64) -> string => match input {
+  0 => "Bottom Face",
+  1 => "Right Face",
+  2 => "Left Face",
+  3 => "Top Face",
+  4 => "Back",
+  6 => "Start",
+  7 => "Left Stick In",
+  8 => "Right Stick In",
+  9 => "Left Shoulder",
+  10 => "Right Shoulder",
+  11 => "D-Pad Up",
+  12 => "D-Pad Down",
+  13 => "D-Pad Left",
+  14 => "D-Pad Right",
+  15 => "Share",
+  16 => "Right Paddle 1",
+  17 => "Left Paddle 1",
+  18 => "Right Paddle 2",
+  19 => "Left Paddle 2",
+  20 => "Touchpad",
+  100 => "Left Trigger",
+  101 => "Right Trigger",
+  _ => "None",
+}
+
+/// A map as the preferences file writes it: its inputs, comma-separated.
+pub let format_map = pure (inputs: []i64) -> string =>
+  inputs.map((input) => "${input}").join(",")
+
+/// A keyboard map from the preferences file, or `None` unless it names twelve keys, each a
+/// key there is and none refused, and none twice.
+pub let parse_keys = pure (text: string) -> Maybe<[]i64> => {
+  let Some(inputs) = parse_map(text) else { return None }
+  for k in inputs {
+    if k < 4 || k > 231 || is_refused_key(k) { return None }
+  }
+  Some(inputs)
+}
+
+/// A gamepad map from the preferences file, or `None` unless it names twelve of
+/// [PAD_INPUTS], none twice.
+pub let parse_pad = pure (text: string) -> Maybe<[]i64> => {
+  let Some(inputs) = parse_map(text) else { return None }
+  for input in inputs {
+    var known = false
+    for p in PAD_INPUTS {
+      if p == input { known = true }
+    }
+    if !known { return None }
+  }
+  Some(inputs)
+}
+
+/// Twelve distinct numbers, comma-separated.
+let parse_map = pure (text: string) -> Maybe<[]i64> => {
+  let parts = text.split(",")
+  if parts.len() != BUTTONS.len() { return None }
+  var inputs: []i64 = []
+  for part in parts {
+    let Some(n) = part.trim().parse_i64() else { return None }
+    for m in inputs {
+      if m == n { return None }
+    }
+    inputs.push(n)
+  }
+  Some(inputs)
+}

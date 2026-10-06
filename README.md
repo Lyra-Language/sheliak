@@ -26,8 +26,10 @@ build/sheliak game.bin    # plays a raw ROM image
 ```
 
 Keys (pad 1): arrows; Z, X, C for A, B, C and A, S, D for X, Y, Z; Return for Start, Q for
-Mode; F full screen, Escape to leave it; ⌘Q quits. Gamepads are pads 1 and 2. The pads are
-6-button; `--pads 3` gives the original 3-button pad, which a few early games need.
+Mode; F full screen, Escape to leave it; ⌘Q quits. Gamepads are pads 1 and 2. On macOS,
+Sheliak ▸ Settings… (⌘,) remaps the keyboard and each port's gamepad — a button, then the
+key or gamepad button for it — or resets them. The pads are 6-button; `--pads 3` gives the
+original 3-button pad, which a few early games need.
 
 On macOS the menu bar opens another ROM (⌘O, or one of the last ten from File ▸ Open
 Recent; started with none, Sheliak asks for one),

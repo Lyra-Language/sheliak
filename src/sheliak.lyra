@@ -27,13 +27,14 @@
 // (`front/prefs.lyra`); a headless run ignores them, so a comparison never depends on how
 // someone last played — it takes `--pads` and `--display` instead, in a hidden window.
 //
-// Keys (pad 1): arrows; Z, X, C for A, B, C and A, S, D above them for X, Y, Z (the
-// pad's two rows); Return for Start, Q for Mode. F toggles full screen (not F11, which
-// macOS keeps for showing the desktop) and Escape leaves it; ⌘Q quits. A key held with ⌘
-// or ⌃ is the menus'. A gamepad is a pad too — the first on port 1, the second on port 2:
-// d-pad or left stick; the West, South and East face buttons for A, B and C (the Genesis's
-// bottom row, left to right), the left shoulder, North and the right shoulder for X, Y
-// and Z; Start and Back for Start and Mode.
+// Keys (pad 1), unless Settings… (⌘,) has remapped them: arrows; Z, X, C for A, B, C and
+// A, S, D above them for X, Y, Z (the pad's two rows); Return for Start, Q for Mode. F
+// toggles full screen (not F11, which macOS keeps for showing the desktop) unless it is a
+// pad's, and Escape leaves it; ⌘Q quits. A key held with ⌘ or ⌃ is the menus'. A gamepad
+// is a pad too — the first on port 1, the second on port 2, each remappable apart: d-pad
+// or left stick; the left, bottom and right face buttons for A, B and C (the Genesis's
+// bottom row, left to right), the left shoulder, top face button and right shoulder for X,
+// Y and Z; Start and Back for Start and Mode (`front/controls.lyra`).
 //
 // The ROM is a raw image, an SMD one or an MGD one (the copiers' interleaved formats),
 // whatever the file's name (`.bin`, `.gen`, `.md`, `.smd`). A split SMD image's parts
@@ -63,13 +64,9 @@ import bindings.sdl3.{
   PRESENT_INTEGER_SCALE, PRESENT_LETTERBOX, set_vsync, set_draw_color, clear, present, save_screenshot,
   Texture, create_streaming_texture, update_texture, destroy_texture, draw_texture,
   set_default_scale_mode, SCALE_NEAREST, SCALE_PIXELART,
-  poll_event, KEY_ESCAPE, KEY_F,
-  key_held, SCANCODE_UP, SCANCODE_DOWN, SCANCODE_LEFT, SCANCODE_RIGHT, SCANCODE_Z,
-  SCANCODE_X, SCANCODE_C, SCANCODE_A, SCANCODE_S, SCANCODE_D, SCANCODE_Q, SCANCODE_RETURN,
+  poll_event, KEY_ESCAPE, KEY_F, key_held, scancode_name, SCANCODE_F, SCANCODE_ESCAPE,
   Gamepad, open_gamepad, close_gamepad, gamepad_id, gamepad_button, gamepad_axis,
-  BUTTON_DPAD_UP, BUTTON_DPAD_DOWN, BUTTON_DPAD_LEFT, BUTTON_DPAD_RIGHT, BUTTON_WEST,
-  BUTTON_SOUTH, BUTTON_EAST, BUTTON_NORTH, BUTTON_LEFT_SHOULDER, BUTTON_RIGHT_SHOULDER,
-  BUTTON_START, BUTTON_BACK, AXIS_LEFT_X, AXIS_LEFT_Y,
+  AXIS_LEFT_X, AXIS_LEFT_Y, AXIS_LEFT_TRIGGER, AXIS_RIGHT_TRIGGER,
   ticks_ns,
   INIT_AUDIO, open_audio, close_audio, put_audio, queued_frames,
 }
@@ -85,11 +82,14 @@ import front.{
   Prefs, default_prefs, prefs_path, load_prefs, save_prefs, with_recent, without_recent,
   look_uniforms, DISPLAY_SHADER,
   LOOK_PIXELS, LOOK_SCANLINES, LOOK_CRT, fit_size, FIT_INTEGER, FIT_TV, FIT_SQUARE,
+  BUTTONS, BUTTON_BITS, default_keys, default_pad, rebind, is_refused_key, pad_input_name,
+  PAD_INPUTS, LEFT_TRIGGER, RIGHT_TRIGGER,
 }
 import bindings.menubar.{
   menu, item, separator, header, slider, slider_value, submenu, end_submenu, window_menu,
-  install, poll_menu,
-  set_checked, set_enabled,
+  install, poll_menu, app_menu,
+  set_checked, set_enabled, set_title,
+  grid_window, grid_row, grid_cell, grid_note, show_grid, capture_keys, poll_key,
   choose_file, alert,
   COMMAND, CONTROL,
 }
@@ -480,7 +480,11 @@ let run_window = (
     fullscreen: false,
     native: native,
     display: Display { effect: effect, look: look_arg.unwrap_or(prefs.look), fit: fit },
+    listen_column: -1,
+    listen_row: -1,
+    listen_previous: 0,
   }
+  if native { build_settings(session) }
   apply_fit(renderer, session.display.fit)
   var (cpu, bus) = power_up(rom, session.six_button, session.save_path, true)
   // A split image's parts given one by one are not a file Open Recent could reopen.
@@ -511,6 +515,12 @@ struct Session {
   /// How frames are drawn: the look is this run's (a `--display` argument's, until the menu
   /// changes it).
   display: Display,
+  /// The Settings window's button listening for an input — its column (0 the keyboard, 1
+  /// and 2 the gamepads) and row (the pad's button) — or -1 for none; and, listening on a
+  /// gamepad, its inputs held at the last look, so only a new press is heard.
+  listen_column: i64,
+  listen_row: i64,
+  listen_previous: i64,
 }
 
 /// Play until the window closes or ⌘Q: frames run at the console's rate — however many
@@ -551,7 +561,10 @@ let play = (
           if !menu_key && key == KEY_ESCAPE && session.fullscreen {
             toggle_fullscreen(session, window)
           }
-          if !menu_key && key == KEY_F { toggle_fullscreen(session, window) }
+          // F is full screen's only while no pad button has it.
+          if !menu_key && key == KEY_F && !is_pads_key(session.prefs.keys, SCANCODE_F) {
+            toggle_fullscreen(session, window)
+          }
         },
         GamepadAdded(id) => {
           if let Some(pad) = open_gamepad(id) { pads.push(pad) }
@@ -592,6 +605,13 @@ let play = (
             frames_since_save = 0
           }
         }
+      } else if tag == MENU_SETTINGS {
+        show_grid()
+      } else if tag == SETTINGS_CLOSED {
+        stop_listening(session)
+        show_settings(session)
+      } else if tag >= SETTINGS_CELL {
+        on_settings(session, pads, tag)
       } else if tag == MENU_RESET {
         power_on(cpu, bus)
       } else if tag == MENU_SAVE_STATE {
@@ -621,8 +641,13 @@ let play = (
       apply_fit(renderer, applied_fit)
       screen.width = 0
     }
-    bus.pads[0] = keyboard_buttons() | (if pads.len() > 0 { gamepad_buttons(pads[0]) } else { 0 })
-    bus.pads[1] = if pads.len() > 1 { gamepad_buttons(pads[1]) } else { 0 }
+    if session.listen_column >= 0 { listen(session, pads) }
+    // A gamepad being listened to answers the Settings window, not the game.
+    let listening = session.listen_column
+    let port1 = if listening == 1 { 0 } else { port_buttons(pads, 0, session.prefs) }
+    let port2 = if listening == 2 { 0 } else { port_buttons(pads, 1, session.prefs) }
+    bus.pads[0] = keyboard_buttons(session.prefs.keys) | port1
+    bus.pads[1] = port2
     let now = i64(ticks_ns())
     owed += now - last
     last = now
@@ -691,6 +716,8 @@ const FITS: [3]string = #[FIT_INTEGER, FIT_TV, FIT_SQUARE]
 /// whether there is one. Installed again whenever the recent ROMs change: a menu's items are
 /// its shape, which only a new menu bar changes.
 let install_menus = (volume: i64, recent: []string) -> bool => {
+  app_menu()
+  item("Settings…", ",", COMMAND, MENU_SETTINGS)
   menu("File")
   item("Open ROM…", "o", COMMAND, MENU_OPEN)
   submenu("Open Recent")
@@ -741,6 +768,126 @@ let recent_title = pure (recent: []string, i: i64) -> string => {
     }
   }
   name
+}
+
+// ── Settings ─────────────────────────────────────────────────────────────────
+
+const MENU_SETTINGS: i32 = 80
+const SETTINGS_CLOSED: i32 = 81
+/// 100 + 16 × column + row: the Settings window's buttons. Column 0 is the keyboard, 1 and
+/// 2 the gamepads on ports 1 and 2; rows 0 to 11 the pad's buttons in [BUTTONS]' order,
+/// and [RESET_ROW] each column's Reset.
+const SETTINGS_CELL: i32 = 100
+const RESET_ROW: i64 = 12
+const COLUMNS: i64 = 3
+
+/// The Settings window, built once and shown by Settings… (⌘,): a row for each of the
+/// pad's buttons, a column for the keyboard and for each port's gamepad.
+let build_settings = (session: ref Session) -> void => {
+  grid_window("Settings", ["", "Keyboard", "Gamepad 1", "Gamepad 2"], SETTINGS_CLOSED)
+  for row in 0..<BUTTONS.len() {
+    grid_row(BUTTONS[row])
+    for column in 0..<COLUMNS {
+      grid_cell(input_name(session, column, row), cell_tag(column, row))
+    }
+  }
+  grid_row("")
+  for column in 0..<COLUMNS { grid_cell("Reset", cell_tag(column, RESET_ROW)) }
+  grid_note(
+    "Click a button, then press the key — or the button on that port's gamepad — to use for it; Escape cancels. One already in use swaps with it. The left stick always steers, as the d-pad does."
+  )
+}
+
+let cell_tag = pure (column: i64, row: i64) -> i32 =>
+  SETTINGS_CELL + i32(16 * column + row)
+
+/// The key or gamepad input that presses the pad's button `row`, in `column`, by name.
+let input_name = (session: ref Session, column: i64, row: i64) -> string => {
+  if column == 0 { return scancode_name(u32(session.prefs.keys[row])) }
+  pad_input_name(session.prefs.gamepads[column - 1][row])
+}
+
+/// The Settings window's buttons as the maps now are, the one listening pressed in, asking.
+let show_settings = (session: ref Session) -> void => {
+  if !session.native { return }
+  for column in 0..<COLUMNS {
+    for row in 0..<BUTTONS.len() {
+      let tag = cell_tag(column, row)
+      let listening = column == session.listen_column && row == session.listen_row
+      let asking = if column == 0 { "Press a Key…" } else { "Press a Button…" }
+      set_title(tag, if listening { asking } else { input_name(session, column, row) })
+      set_checked(tag, listening)
+    }
+  }
+}
+
+/// A Settings window button pressed: one of the pad's, to listen for the input to press it
+/// with — or to stop listening, if it already was; or a column's Reset.
+let on_settings = (session: mut Session, pads: []Gamepad, tag: i32) -> void => {
+  let column = i64(tag - SETTINGS_CELL) / 16
+  let row = i64(tag - SETTINGS_CELL) % 16
+  let again = column == session.listen_column && row == session.listen_row
+  stop_listening(session)
+  if row == RESET_ROW {
+    if column == 0 {
+      session.prefs.keys = default_keys()
+    } else {
+      session.prefs.gamepads[column - 1] = default_pad()
+    }
+    keep_prefs(session)
+  } else if !again {
+    session.listen_column = column
+    session.listen_row = row
+    // Captured even for a gamepad, so Escape can cancel.
+    capture_keys(true)
+    // What is held already is not an answer, only what is pressed from now on.
+    session.listen_previous = pad_inputs_held(pads, column - 1)
+  }
+  show_settings(session)
+}
+
+let stop_listening = (session: mut Session) -> void => {
+  session.listen_column = -1
+  session.listen_row = -1
+  capture_keys(false)
+}
+
+/// The input being listened for, if it has come — a key captured in the Settings window,
+/// or a gamepad input newly pressed on its port — bound to the button, swapped with any
+/// button that had it. Escape cancels; a key the menus own (⌘, ⌃) is passed over.
+let listen = (session: mut Session, pads: []Gamepad) -> void => {
+  var heard: Maybe<i64> = None
+  for {
+    let Some(scancode) = poll_key() else { break }
+    if scancode == SCANCODE_ESCAPE {
+      stop_listening(session)
+      show_settings(session)
+      return
+    }
+    let key = i64(scancode)
+    if session.listen_column == 0 && heard.is_none() && !is_refused_key(key) {
+      heard = Some(key)
+    }
+  }
+  if session.listen_column > 0 {
+    let held = pad_inputs_held(pads, session.listen_column - 1)
+    let pressed = held & (held ~ session.listen_previous)
+    session.listen_previous = held
+    for i, input in PAD_INPUTS {
+      if heard.is_none() && (pressed & (1 << i)) != 0 { heard = Some(input) }
+    }
+  }
+  let Some(input) = heard else { return }
+  let row = session.listen_row
+  if session.listen_column == 0 {
+    session.prefs.keys = rebind(session.prefs.keys, row, input)
+  } else {
+    let port = session.listen_column - 1
+    session.prefs.gamepads[port] = rebind(session.prefs.gamepads[port], row, input)
+  }
+  keep_prefs(session)
+  stop_listening(session)
+  show_settings(session)
 }
 
 /// A menu item's choice, beyond the three that replace or restart the machine.
@@ -1073,50 +1220,69 @@ let buttons_named = pure (names: string) -> Result<u16, string> => {
   Ok(held)
 }
 
-/// Pad 1's buttons held on the keyboard, by key position — none while ⌘ or ⌃ is held, so a
-/// menu's shortcut (⌘S) does not press a button (S is Y) on its way to the menu.
-let keyboard_buttons = () -> u16 => {
+/// Pad 1's buttons held on the keyboard, by the keys `keys` maps them to (key positions) —
+/// none while ⌘ or ⌃ is held, so a menu's shortcut (⌘S) does not press a button (S is Y) on
+/// its way to the menu.
+let keyboard_buttons = (keys: []i64) -> u16 => {
   var held: u16 = 0
   if (modifiers() & (MOD_LGUI | MOD_RGUI | MOD_LCTRL | MOD_RCTRL)) != 0 { return held }
-  if key_held(SCANCODE_UP) { held = held | PAD_UP }
-  if key_held(SCANCODE_DOWN) { held = held | PAD_DOWN }
-  if key_held(SCANCODE_LEFT) { held = held | PAD_LEFT }
-  if key_held(SCANCODE_RIGHT) { held = held | PAD_RIGHT }
-  if key_held(SCANCODE_Z) { held = held | PAD_A }
-  if key_held(SCANCODE_X) { held = held | PAD_B }
-  if key_held(SCANCODE_C) { held = held | PAD_C }
-  if key_held(SCANCODE_A) { held = held | PAD_X }
-  if key_held(SCANCODE_S) { held = held | PAD_Y }
-  if key_held(SCANCODE_D) { held = held | PAD_Z }
-  if key_held(SCANCODE_RETURN) { held = held | PAD_START }
-  if key_held(SCANCODE_Q) { held = held | PAD_MODE }
+  for i, key in keys {
+    if key_held(u32(key)) { held = held | BUTTON_BITS[i] }
+  }
   held
 }
 
-/// A gamepad's buttons as a Genesis pad's: the d-pad or the left stick past a third of its
-/// travel; West, South and East for A, B and C; the left shoulder, North and the right
-/// shoulder for X, Y and Z; Start, and Back for Mode.
-let gamepad_buttons = (pad: Gamepad) -> u16 => {
+/// Whether a pad button is pressed by the key at `scancode`.
+let is_pads_key = pure (keys: []i64, scancode: u32) -> bool => {
+  for key in keys {
+    if key == i64(scancode) { return true }
+  }
+  false
+}
+
+/// The buttons held on port `port`'s gamepad (0 or 1), by its map; none without one.
+let port_buttons = (pads: []Gamepad, port: i64, prefs: ref Prefs) -> u16 =>
+  if pads.len() > port { gamepad_buttons(pads[port], prefs.gamepads[port]) } else { 0 }
+
+/// A gamepad's buttons as a Genesis pad's, by `inputs` (its map, `front/controls.lyra`) —
+/// and the left stick past a third of its travel for the d-pad, whatever the map.
+let gamepad_buttons = (pad: Gamepad, inputs: []i64) -> u16 => {
+  var held: u16 = 0
+  for i, input in inputs {
+    if pad_input_held(pad, input) { held = held | BUTTON_BITS[i] }
+  }
   let x = i64(gamepad_axis(pad, AXIS_LEFT_X))
   let y = i64(gamepad_axis(pad, AXIS_LEFT_Y))
-  var held: u16 = 0
-  if gamepad_button(pad, BUTTON_DPAD_UP) || y < -STICK { held = held | PAD_UP }
-  if gamepad_button(pad, BUTTON_DPAD_DOWN) || y > STICK { held = held | PAD_DOWN }
-  if gamepad_button(pad, BUTTON_DPAD_LEFT) || x < -STICK { held = held | PAD_LEFT }
-  if gamepad_button(pad, BUTTON_DPAD_RIGHT) || x > STICK { held = held | PAD_RIGHT }
-  if gamepad_button(pad, BUTTON_WEST) { held = held | PAD_A }
-  if gamepad_button(pad, BUTTON_SOUTH) { held = held | PAD_B }
-  if gamepad_button(pad, BUTTON_EAST) { held = held | PAD_C }
-  if gamepad_button(pad, BUTTON_LEFT_SHOULDER) { held = held | PAD_X }
-  if gamepad_button(pad, BUTTON_NORTH) { held = held | PAD_Y }
-  if gamepad_button(pad, BUTTON_RIGHT_SHOULDER) { held = held | PAD_Z }
-  if gamepad_button(pad, BUTTON_START) { held = held | PAD_START }
-  if gamepad_button(pad, BUTTON_BACK) { held = held | PAD_MODE }
+  if y < -STICK { held = held | PAD_UP }
+  if y > STICK { held = held | PAD_DOWN }
+  if x < -STICK { held = held | PAD_LEFT }
+  if x > STICK { held = held | PAD_RIGHT }
   held
 }
 
-/// A third of the stick's travel.
+/// Whether a gamepad input is held: a button pressed, or a trigger pulled halfway.
+let pad_input_held = (pad: Gamepad, input: i64) -> bool => {
+  if input == LEFT_TRIGGER || input == RIGHT_TRIGGER {
+    let axis = if input == LEFT_TRIGGER { AXIS_LEFT_TRIGGER } else { AXIS_RIGHT_TRIGGER }
+    return i64(gamepad_axis(pad, axis)) > TRIGGER
+  }
+  gamepad_button(pad, i32(input))
+}
+
+/// Every one of [PAD_INPUTS] held on port `port`'s gamepad, a bit each in that order; none
+/// without one.
+let pad_inputs_held = (pads: []Gamepad, port: i64) -> i64 => {
+  if port < 0 || pads.len() <= port { return 0 }
+  var held: i64 = 0
+  for i, input in PAD_INPUTS {
+    if pad_input_held(pads[port], input) { held = held | (1 << i) }
+  }
+  held
+}
+
+/// A third of the stick's travel, and half a trigger's.
 const STICK: i64 = 11000
+const TRIGGER: i64 = 16384
 
 /// The gamepads still plugged in, `id` closed.
 let drop_gamepad = (pads: []Gamepad, id: u32) -> []Gamepad => {

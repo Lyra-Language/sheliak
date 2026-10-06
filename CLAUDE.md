@@ -20,7 +20,8 @@ product name.
                             #    vdpcheck, padtest, romtest, prefstest, statetest
 build/sheliak ROM           # play: arrows, Z/X/C = A/B/C, A/S/D = X/Y/Z, Return = Start,
                             #    Q = Mode, F = full screen (Escape leaves it), ⌘Q quits;
-                            #    gamepads on ports 1 and 2; --pads 3 for 3-button pads; no
+                            #    gamepads on ports 1 and 2; Settings… (⌘,) remaps keys and
+                            #    each port's gamepad; --pads 3 for 3-button pads; no
                             #    ROM: macOS asks for one; the menu bar sets the rest, kept
                             #    in the preferences
 SDL_VIDEODRIVER=dummy build/sheliak ROM --frames 600 --screenshot out.bmp   # headless
@@ -238,10 +239,13 @@ Module paths resolve under `src/` (the entry file's directory), so entry points 
 src/sheliak.lyra     the emulator in an SDL window: frames paced to 59.92 Hz, the picture
                      through the DAC's levels, keyboard and gamepads as pads 1 and 2; the
                      macOS menu bar (open, open recent, save/load state, pause, reset, pads,
-                     mute, volume, scale, fit, look), made again when the recent ROMs change
+                     mute, volume, scale, fit, look), made again when the recent ROMs change;
+                     the Settings window (a native grid) that remaps the controls
 src/front/           the front end's pieces (module front):
   prefs.lyra         the preferences, kept between runs as `key = value` lines, and the
                      ten recent ROMs (absolute paths, newest first)
+  controls.lyra      the pad's twelve buttons and what presses them: the keyboard's map
+                     (scancodes) and each port's gamepad map, rebinding by swapping
   display.lyra       the fits (whole numbers, 4:3, square pixels) and the looks (sharp
                      pixels, scanlines, a CRT) with their Metal shader
 src/prefstest.lyra   the preferences file read and written
@@ -396,7 +400,10 @@ pads (3 with `--pads 3`; the protocol matched against BlastEm with nothing held,
 `pads6`; with buttons held, `build/padtest`), frames paced to the console's 59.92 Hz
 whatever the display's rate, ~4.7 ms a frame with sound on an M-series Mac. On macOS, a
 **menu bar** opens a ROM (a native Open panel, or File ▸ Open Recent's last ten, one
-that no longer plays taken off it), saves and loads the game's **state** (beside
+that no longer plays taken off it), **remaps the controls** (Settings…, ⌘,: a native
+window, a button per pad button and column — keyboard, gamepad 1, gamepad 2 — pressed, then
+the key or gamepad button for it, Escape cancelling; one in use swaps; Reset per column;
+the left stick always steers; F stops toggling full screen once a pad button has it), saves and loads the game's **state** (beside
 the ROM as `game.state`), pauses and resets, and sets the pads, the
 window's scale, full screen, mute and a volume slider, the **fit** — whole-number multiples, or as large as
 fits at 4:3 or with square pixels, sampled with SDL's pixel-art mode — and the **look** — sharp pixels, or scanlines or a

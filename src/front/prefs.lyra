@@ -1,7 +1,8 @@
 module front
 //! The player's preferences, kept between runs: the window's scale, full screen, the kind of
-//! pad, the sound's volume and whether it is muted, how the picture looks, and the ROMs
-//! played lately (File ▸ Open Recent).
+//! pad and which keys and gamepad buttons press its buttons (`controls.lyra`), the sound's
+//! volume and whether it is muted, how the picture looks, and the ROMs played lately (File ▸
+//! Open Recent).
 //!
 //! **A text file of `key = value` lines**, the value everything after the first `=` (a path
 //! may hold one), and a `recent` line for each recent ROM, newest first. Read leniently: a
@@ -28,6 +29,9 @@ pub struct Prefs {
   fit: string,
   /// The ROMs played lately, as absolute paths, newest first: at most [MAX_RECENT].
   recent: []string,
+  /// The keyboard's map (pad 1's), and the gamepads' on ports 1 and 2 (`controls.lyra`).
+  keys: []i64,
+  gamepads: [][]i64,
 }
 
 /// How many recent ROMs are kept, as macOS's own Open Recent keeps ten.
@@ -42,6 +46,8 @@ pub let default_prefs = pure () -> Prefs => Prefs {
   look: LOOK_PIXELS,
   fit: FIT_INTEGER,
   recent: [],
+  keys: default_keys(),
+  gamepads: [default_pad(), default_pad()],
 }
 
 /// Preferences from a file's text, each line that says something valid taking effect.
@@ -70,6 +76,11 @@ pub let parse_prefs = pure (text: string) -> Prefs => {
       if value == LOOK_PIXELS || value == LOOK_SCANLINES || value == LOOK_CRT { prefs.look = value }
     } else if key == "fit" {
       if value == FIT_INTEGER || value == FIT_TV || value == FIT_SQUARE { prefs.fit = value }
+    } else if key == "keys" {
+      if let Some(inputs) = parse_keys(value) { prefs.keys = inputs }
+    } else if key == "pad1" || key == "pad2" {
+      let port = if key == "pad1" { 0 } else { 1 }
+      if let Some(inputs) = parse_pad(value) { prefs.gamepads[port] = inputs }
     } else if key == "recent" {
       if value != "" && prefs.recent.len() < MAX_RECENT { prefs.recent.push(value) }
     }
@@ -81,6 +92,10 @@ pub let parse_prefs = pure (text: string) -> Prefs => {
 pub let format_prefs = pure (prefs: ref Prefs) -> string => {
   let pads = if prefs.six_button { 6 } else { 3 }
   var text = "scale = ${prefs.scale}\nfullscreen = ${prefs.fullscreen}\npads = ${pads}\nvolume = ${prefs.volume}\nmuted = ${prefs.muted}\ndisplay = ${prefs.look}\nfit = ${prefs.fit}\n"
+  text = "${text}keys = ${format_map(prefs.keys)}\n"
+  for i, inputs in prefs.gamepads {
+    text = "${text}pad${i + 1} = ${format_map(inputs)}\n"
+  }
   for path in prefs.recent { text = "${text}recent = ${path}\n" }
   text
 }
