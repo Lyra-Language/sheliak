@@ -550,8 +550,7 @@ let play = (
   var fullscreen_owed = session.prefs.fullscreen
   var applied_fit = session.display.fit
   while running {
-    loop {
-      let Some(event) = poll_event() else { break }
+    while let Some(event) = poll_event() {
       match event {
         Quit => { running = false },
         KeyDown(key) => {
@@ -589,8 +588,7 @@ let play = (
         _ => {},
       }
     }
-    loop {
-      let Some(tag) = poll_menu() else { break }
+    while let Some(tag) = poll_menu() {
       let recent = i64(tag - MENU_RECENT - 1)
       if tag == MENU_OPEN || (recent >= 0 && recent < session.prefs.recent.len()) {
         let chosen = if tag == MENU_OPEN {
@@ -857,8 +855,7 @@ let stop_listening = (session: mut Session) -> void => {
 /// button that had it. Escape cancels; a key the menus own (⌘, ⌃) is passed over.
 let listen = (session: mut Session, pads: []Gamepad) -> void => {
   var heard: Maybe<i64> = None
-  loop {
-    let Some(scancode) = poll_key() else { break }
+  while let Some(scancode) = poll_key() {
     if scancode == SCANCODE_ESCAPE {
       stop_listening(session)
       show_settings(session)
