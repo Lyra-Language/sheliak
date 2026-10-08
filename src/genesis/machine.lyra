@@ -23,5 +23,5 @@ pub let power_on = (cpu: mut Cpu, bus: mut GenesisBus) -> void => reset(cpu, bus
 /// its shown frame.
 pub let run_frame = (cpu: mut Cpu, bus: mut GenesisBus) -> void => {
   let target = bus.vdp.frames + 1
-  for bus.vdp.frames < target { step(cpu, bus) }
+  while bus.vdp.frames < target { step(cpu, bus) }
 }

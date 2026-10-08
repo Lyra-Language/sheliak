@@ -217,7 +217,7 @@ pub let write_data = (vdp: mut Vdp, value: u16, now: i64) -> void => {
   end_command(vdp)
   if (vdp.code & 0x20) != 0 && fill_mode(vdp) { vdp.dma_run = false }
   let waited = fifo_full(vdp)
-  for fifo_full(vdp) { step_slot(vdp) }
+  while fifo_full(vdp) { step_slot(vdp) }
   let from = if waited { vdp.clock + slot_clocks(vdp) } else { seen_at(vdp, now) }
   enqueue(vdp, from, value)
   advance(vdp)
@@ -234,7 +234,7 @@ pub let read_data = (vdp: mut Vdp, now: i64) -> u16 => {
   vdp.resume_at = now
   if (vdp.code & 1) != 0 || !readable(vdp.code) { return vdp.prefetch }
   let waited = !vdp.fetched
-  for !vdp.fetched { step_slot(vdp) }
+  while !vdp.fetched { step_slot(vdp) }
   vdp.fetched = false
   let unit = slot_unit(vdp)
   if waited {

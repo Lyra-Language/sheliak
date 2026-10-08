@@ -198,7 +198,7 @@ impl GenesisBus {
   let tick = (self: mut, n: i64) -> void => {
     self.clock += n * CPU_CLOCKS
     self.refresh += n * CPU_CLOCKS
-    for self.refresh >= REFRESH_INTERVAL {
+    while self.refresh >= REFRESH_INTERVAL {
       self.refresh -= REFRESH_INTERVAL
       self.clock += REFRESH_DELAY
     }
@@ -217,7 +217,7 @@ impl GenesisBus {
     run_beam(self.vdp, self.clock)
     self.sound.int_from = self.vdp.z80_int_at
     var cpu = self.z80
-    for self.sound.clock < self.clock { z80_step(cpu, self.sound) }
+    while self.sound.clock < self.clock { z80_step(cpu, self.sound) }
     self.z80 = cpu
   }
 
@@ -288,7 +288,7 @@ impl GenesisBus {
       0 => write_data(self.vdp, value, self.clock),
       1 => {
         if write_control(self.vdp, value, self.clock) {
-          for dma_68k_running(self.vdp) {
+          while dma_68k_running(self.vdp) {
             self.vdp.dma_word = self.peek_word(dma_source(self.vdp) & 0xFFFFFE)
             step_slot(self.vdp)
           }

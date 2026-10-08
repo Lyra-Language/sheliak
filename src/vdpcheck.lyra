@@ -46,7 +46,7 @@ let main = () -> u8 => {
   )
   reset(cpu, bus)
   var steps = 0
-  for cpu.pc != park {
+  while cpu.pc != park {
     if cpu.pc == ERROR_LOOP {
       println("vdpcheck: ${args[1]} took an exception (the vector's loop at 0x1FC)")
       return 1
@@ -59,7 +59,7 @@ let main = () -> u8 => {
     steps += 1
   }
   let settled = bus.vdp.frames + SETTLE_FRAMES
-  for bus.vdp.frames < settled { step(cpu, bus) }
+  while bus.vdp.frames < settled { step(cpu, bus) }
   dump(bus, args[3])
 }
 

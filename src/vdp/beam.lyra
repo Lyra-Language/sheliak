@@ -53,7 +53,7 @@ pub data Phase =
 /// Run the beam to master clock `to`: every slot beginning at or before it begins.
 pub let run_beam = (vdp: mut Vdp, to: i64) -> void => {
   var next = vdp.clock + slot_clocks(vdp)
-  for next <= to {
+  while next <= to {
     vdp.clock = next
     next_slot(vdp)
     next = vdp.clock + slot_clocks(vdp)

@@ -134,7 +134,7 @@ pub let next_part_path = pure (path: string) -> Maybe<string> => {
     return Some(counted_on(path, runes, dot + 1, runes.len()))
   }
   var digits = stem_end
-  for digits > base && is_digit(runes[digits - 1]) { digits -= 1 }
+  while digits > base && is_digit(runes[digits - 1]) { digits -= 1 }
   if digits < stem_end { return Some(counted_on(path, runes, digits, stem_end)) }
   if stem_end == base { return None }
   let c = runes[stem_end - 1]
@@ -183,7 +183,7 @@ let roms_in_archive = pure (
   let by_name = roms.sorted_by((a, b) => names[a] <=> names[b])
   var parts: [][]u8 = [extract(by_name[0])?]
   var name = names[by_name[0]]
-  for parts.len() < by_name.len() && is_split_part(parts[parts.len() - 1]) {
+  while parts.len() < by_name.len() && is_split_part(parts[parts.len() - 1]) {
     let Some(next) = next_part_path(name) else { break }
     var found = false
     for i in by_name {
@@ -233,7 +233,7 @@ let smd_rom = pure (file: []u8) -> []u8 => {
   let size = file.len() - SMD_HEADER
   var rom: []u8 = [0; size]
   var block = 0
-  for block < size {
+  while block < size {
     let length = if size - block < SMD_BLOCK { size - block } else { SMD_BLOCK }
     let part = interleaved(file, SMD_HEADER + block, length)
     for i in 0..<length { rom[block + i] = part[i] }
@@ -423,6 +423,6 @@ let header_long = pure (rom: []u8, at: i64) -> i64 => {
 
 let power_of_two = pure (n: i64) -> i64 => {
   var p: i64 = 1
-  for p < n { p = p * 2 }
+  while p < n { p = p * 2 }
   p
 }

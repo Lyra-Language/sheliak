@@ -122,7 +122,7 @@ let main = () -> u8 => {
   var held: u16 = 0
   var fit_arg: Maybe<string> = None
   var i = 1
-  for i < args.len() {
+  while i < args.len() {
     if args[i] == "--frames" && i + 1 < args.len() {
       frames_only = parse_count(args[i + 1])
       i += 2
@@ -315,7 +315,7 @@ let read_rom_files = (paths: []string) -> Result<[][]u8, string> => {
   }
   if paths.len() > 1 || zipped { return Ok(files) }
   var path = paths[0]
-  for files.len() < MAX_PARTS && is_split_part(files[files.len() - 1]) {
+  while files.len() < MAX_PARTS && is_split_part(files[files.len() - 1]) {
     let Some(next) = next_part_path(path) else {
       return Err("${path} is one part of a split SMD image; give its parts in order")
     }
@@ -549,8 +549,8 @@ let play = (
   // Space of its own. Launched from a terminal, Sheliak becomes active a moment later.
   var fullscreen_owed = session.prefs.fullscreen
   var applied_fit = session.display.fit
-  for running {
-    for {
+  while running {
+    loop {
       let Some(event) = poll_event() else { break }
       match event {
         Quit => { running = false },
@@ -589,7 +589,7 @@ let play = (
         _ => {},
       }
     }
-    for {
+    loop {
       let Some(tag) = poll_menu() else { break }
       let recent = i64(tag - MENU_RECENT - 1)
       if tag == MENU_OPEN || (recent >= 0 && recent < session.prefs.recent.len()) {
@@ -655,7 +655,7 @@ let play = (
     // raced.
     if owed > 4 * FRAME_NS || session.paused { owed = FRAME_NS }
     if !session.paused {
-      for owed >= FRAME_NS {
+      while owed >= FRAME_NS {
         run_frame(cpu, bus)
         owed -= FRAME_NS
         frames_since_save += 1
@@ -857,7 +857,7 @@ let stop_listening = (session: mut Session) -> void => {
 /// button that had it. Escape cancels; a key the menus own (⌘, ⌃) is passed over.
 let listen = (session: mut Session, pads: []Gamepad) -> void => {
   var heard: Maybe<i64> = None
-  for {
+  loop {
     let Some(scancode) = poll_key() else { break }
     if scancode == SCANCODE_ESCAPE {
       stop_listening(session)

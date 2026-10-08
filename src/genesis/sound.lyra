@@ -81,7 +81,7 @@ pub let new_z80_side = pure (rom: []u8) -> Z80Side => Z80Side {
 impl Z80Side {
   /// Run both sound chips on to master clock `to`, keeping their samples.
   pub let run_sound = (self: mut, to: i64) -> void => {
-    for self.ym_clock + YM_CYCLE_CLOCKS <= to {
+    while self.ym_clock + YM_CYCLE_CLOCKS <= to {
       clock_ym(self.ym)
       self.ym_left += self.ym.out_l
       self.ym_right += self.ym.out_r
@@ -93,7 +93,7 @@ impl Z80Side {
       }
       self.ym_clock += YM_CYCLE_CLOCKS
     }
-    for self.psg_clock + PSG_TICK_CLOCKS <= to {
+    while self.psg_clock + PSG_TICK_CLOCKS <= to {
       tick_psg(self.psg)
       var level: i64 = 0
       for channel in 0..<4 { level += channel_level(self.psg, channel) }

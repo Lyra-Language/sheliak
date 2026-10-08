@@ -158,7 +158,7 @@ let divs_cycles = pure (dividend: u32, divisor: u16) -> i64 => {
 let ones_in = pure (v: u16) -> i64 => {
   var ones: i64 = 0
   var rest = v
-  for rest != 0 {
+  while rest != 0 {
     ones += i64(rest & 1)
     rest = rest >> 1
   }

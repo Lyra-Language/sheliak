@@ -56,12 +56,12 @@ let mgd_images = () -> i64 => {
 let mgd_file = pure (image: []u8) -> []u8 => {
   var file: []u8 = []
   var a = 1
-  for a < image.len() {
+  while a < image.len() {
     file.push(image[a])
     a += 2
   }
   a = 0
-  for a < image.len() {
+  while a < image.len() {
     file.push(image[a])
     a += 2
   }
@@ -220,15 +220,15 @@ let smd_file = pure (image: []u8, split: u8) -> []u8 => {
   file[9] = 0xBB
   file[10] = 0x06
   var start = 0
-  for start < image.len() {
+  while start < image.len() {
     let end = if start + 0x4000 < image.len() { start + 0x4000 } else { image.len() }
     var a = start + 1
-    for a < end {
+    while a < end {
       file.push(image[a])
       a += 2
     }
     a = start
-    for a < end {
+    while a < end {
       file.push(image[a])
       a += 2
     }

@@ -37,7 +37,7 @@ let hex = pure (v: u16) -> string => v.to_hex()
 /// Four hex digits.
 let padded = pure (v: u16) -> string => {
   var text = v.to_hex()
-  for text.len() < 4 { text = "0" ++ text }
+  while text.len() < 4 { text = "0" ++ text }
   text
 }
 

@@ -72,7 +72,7 @@ pub let mix_audio = (bus: mut GenesisBus, mixer: mut Mixer) -> []f32 => {
   bus.sound.psg_samples = []
   // An FM sample is six channels, each on the DAC once in 24 cycles at up to 3 × 256.
   var i = 0
-  for i + 1 < fm.len() {
+  while i + 1 < fm.len() {
     resample(mixer.fm, f64(fm[i]) / 6144.0, f64(fm[i + 1]) / 6144.0, mixer.fm_out)
     i += 2
   }
@@ -108,7 +108,7 @@ pub let mix_audio = (bus: mut GenesisBus, mixer: mut Mixer) -> []f32 => {
 /// finished is the average of its span.
 let resample = (r: mut Resampler, l: f64, rr: f64, out: mut []f64) -> void => {
   var remaining = r.in_span
-  for remaining > 0.0 {
+  while remaining > 0.0 {
     let room = r.out_span - r.pos
     let portion = if room < remaining { room } else { remaining }
     r.sum_l += l * portion
