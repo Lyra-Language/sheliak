@@ -90,16 +90,18 @@ pub let genesis_bus = pure (rom: []u8) -> GenesisBus => GenesisBus {
   sound: new_z80_side(rom),
 }
 
-/// The kind of pad in ports 1 and 2: 6-button, or the original 3 (which a few early games
-/// need, misreading a 6-button pad).
-pub let set_pads = (self: mut GenesisBus, six_button: bool) -> void => {
-  self.ports[0] = new_port(six_button)
-  self.ports[1] = new_port(six_button)
-}
+impl GenesisBus {
+  /// The kind of pad in ports 1 and 2: 6-button, or the original 3 (which a few early games
+  /// need, misreading a 6-button pad).
+  pub let set_pads = (self: mut, six_button: bool) -> void => {
+    self.ports[0] = new_port(six_button)
+    self.ports[1] = new_port(six_button)
+  }
 
-/// Run the machine's clock on to master clock `to`, the VDP with it — for a caller that has
-/// nothing for the 68000 to do meanwhile.
-pub let run_vdp_to = (self: mut GenesisBus, to: i64) -> void => run_beam(self.vdp, to)
+  /// Run the machine's clock on to master clock `to`, the VDP with it — for a caller that has
+  /// nothing for the 68000 to do meanwhile.
+  pub let run_vdp_to = (self: mut, to: i64) -> void => run_beam(self.vdp, to)
+}
 
 impl Bus for GenesisBus {
   read_word = (self, addr, fc) => {
@@ -191,114 +193,116 @@ impl Bus for GenesisBus {
   idle = (self, n) => self.tick(i64(n))
 }
 
-/// `n` 68000 cycles pass, and the refreshes due in them; the Z80 runs on to the same time.
-let tick = (self: mut GenesisBus, n: i64) -> void => {
-  self.clock += n * CPU_CLOCKS
-  self.refresh += n * CPU_CLOCKS
-  for self.refresh >= REFRESH_INTERVAL {
-    self.refresh -= REFRESH_INTERVAL
-    self.clock += REFRESH_DELAY
+impl GenesisBus {
+  /// `n` 68000 cycles pass, and the refreshes due in them; the Z80 runs on to the same time.
+  let tick = (self: mut, n: i64) -> void => {
+    self.clock += n * CPU_CLOCKS
+    self.refresh += n * CPU_CLOCKS
+    for self.refresh >= REFRESH_INTERVAL {
+      self.refresh -= REFRESH_INTERVAL
+      self.clock += REFRESH_DELAY
+    }
+    self.run_z80()
   }
-  self.run_z80()
-}
 
-/// Run the Z80 on to the master clock — instruction by instruction, so it may end a little
-/// past it — unless the 68000 holds its bus or its reset line, when its time passes idle.
-/// Its /INT follows the VDP, which is run on first.
-let run_z80 = (self: mut GenesisBus) -> void => {
-  if self.sound.clock >= self.clock { return }
-  if self.sound.in_reset || self.sound.bus_requested {
-    self.sound.clock += round_up(self.clock - self.sound.clock, Z80_CLOCKS)
-    return
+  /// Run the Z80 on to the master clock — instruction by instruction, so it may end a little
+  /// past it — unless the 68000 holds its bus or its reset line, when its time passes idle.
+  /// Its /INT follows the VDP, which is run on first.
+  let run_z80 = (self: mut) -> void => {
+    if self.sound.clock >= self.clock { return }
+    if self.sound.in_reset || self.sound.bus_requested {
+      self.sound.clock += round_up(self.clock - self.sound.clock, Z80_CLOCKS)
+      return
+    }
+    run_beam(self.vdp, self.clock)
+    self.sound.int_from = self.vdp.z80_int_at
+    var cpu = self.z80
+    for self.sound.clock < self.clock { z80_step(cpu, self.sound) }
+    self.z80 = cpu
   }
-  run_beam(self.vdp, self.clock)
-  self.sound.int_from = self.vdp.z80_int_at
-  var cpu = self.z80
-  for self.sound.clock < self.clock { z80_step(cpu, self.sound) }
-  self.z80 = cpu
-}
 
-/// The word at an even address outside the VDP, with no bus cycle: ROM, work RAM, the Z80's
-/// space, the I/O chip (its byte in both halves), the Z80 bus request. Also what a
-/// 68000 → VDP DMA reads, which is why it takes no time here.
-let peek_word = pure (self: ref GenesisBus, a: u32) -> u16 => {
-  if a < 0x400000 {
-    let at = i64(a & 0x3FFFFE)
-    return (u16(cart_read(self.cart, at)) << 8) | u16(cart_read(self.cart, at + 1))
+  /// The word at an even address outside the VDP, with no bus cycle: ROM, work RAM, the Z80's
+  /// space, the I/O chip (its byte in both halves), the Z80 bus request. Also what a
+  /// 68000 → VDP DMA reads, which is why it takes no time here.
+  let peek_word = pure (self: ref, a: u32) -> u16 => {
+    if a < 0x400000 {
+      let at = i64(a & 0x3FFFFE)
+      return (u16(cart_read(self.cart, at)) << 8) | u16(cart_read(self.cart, at + 1))
+    }
+    if a >= 0xE00000 {
+      let at = i64(a & 0xFFFE)
+      return (u16(self.ram[at]) << 8) | u16(self.ram[at + 1])
+    }
+    if a >= 0xA00000 && a < 0xA10000 {
+      return (u16(read_z80_space(self, a)) << 8) | u16(read_z80_space(self, a | 1))
+    }
+    if a >= 0xA10000 && a < 0xA10020 {
+      let byte = read_io(self, a)
+      return (u16(byte) << 8) | u16(byte)
+    }
+    if a == 0xA11100 { return u16(read_bus_request(self)) << 8 }
+    0
   }
-  if a >= 0xE00000 {
-    let at = i64(a & 0xFFFE)
-    return (u16(self.ram[at]) << 8) | u16(self.ram[at + 1])
-  }
-  if a >= 0xA00000 && a < 0xA10000 {
-    return (u16(read_z80_space(self, a)) << 8) | u16(read_z80_space(self, a | 1))
-  }
-  if a >= 0xA10000 && a < 0xA10020 {
-    let byte = read_io(self, a)
-    return (u16(byte) << 8) | u16(byte)
-  }
-  if a == 0xA11100 { return u16(read_bus_request(self)) << 8 }
-  0
-}
 
-/// A byte written outside RAM and the VDP: into the Z80's space, the I/O chip, or the Z80's
-/// bus request and reset lines (A11100 and A11200, bit 0 of the even byte: 1 requests the
-/// bus; 0 holds the Z80 in reset, 1 lets it run). The TMSS register (A14000)
-/// takes its write and changes nothing, as this console has no TMSS.
-let write_other = (self: mut GenesisBus, a: u32, value: u8) -> void => {
-  if a >= 0xA00000 && a < 0xA10000 {
-    write_z80_space(self, a, value)
-  } else if a >= 0xA10000 && a < 0xA10020 {
-    write_io(self, a, value)
-  } else if a >= 0xA130F0 && a < 0xA13100 {
-    cart_register(self.cart, i64(a), value)
-  } else if a == 0xA11100 {
-    let requested = (value & 1) != 0
-    // The Z80 resumes a T-state after its bus is given back (BlastEm's figure).
-    if self.sound.bus_requested && !requested { self.sound.clock += Z80_CLOCKS }
-    self.sound.bus_requested = requested
-  } else if a == 0xA11200 {
-    self.sound.in_reset = (value & 1) == 0
-    if self.sound.in_reset { reset_z80(self.z80) }
+  /// A byte written outside RAM and the VDP: into the Z80's space, the I/O chip, or the Z80's
+  /// bus request and reset lines (A11100 and A11200, bit 0 of the even byte: 1 requests the
+  /// bus; 0 holds the Z80 in reset, 1 lets it run). The TMSS register (A14000)
+  /// takes its write and changes nothing, as this console has no TMSS.
+  let write_other = (self: mut, a: u32, value: u8) -> void => {
+    if a >= 0xA00000 && a < 0xA10000 {
+      write_z80_space(self, a, value)
+    } else if a >= 0xA10000 && a < 0xA10020 {
+      write_io(self, a, value)
+    } else if a >= 0xA130F0 && a < 0xA13100 {
+      cart_register(self.cart, i64(a), value)
+    } else if a == 0xA11100 {
+      let requested = (value & 1) != 0
+      // The Z80 resumes a T-state after its bus is given back (BlastEm's figure).
+      if self.sound.bus_requested && !requested { self.sound.clock += Z80_CLOCKS }
+      self.sound.bus_requested = requested
+    } else if a == 0xA11200 {
+      self.sound.in_reset = (value & 1) == 0
+      if self.sound.in_reset { reset_z80(self.z80) }
+    }
   }
-}
 
-/// A word read from the VDP's ports, the beam caught up first: data (C00000–03), control
-/// (C00004–07), HV counter (C00008–0F).
-let read_vdp = (self: mut GenesisBus, a: u32) -> u16 => {
-  run_beam(self.vdp, self.clock)
-  let word = match (a >> 2) & 7 {
-    0 => read_data(self.vdp, self.clock),
-    1 => read_status(self.vdp, self.open_bus),
-    _ => hv_counter(self.vdp),
+  /// A word read from the VDP's ports, the beam caught up first: data (C00000–03), control
+  /// (C00004–07), HV counter (C00008–0F).
+  let read_vdp = (self: mut, a: u32) -> u16 => {
+    run_beam(self.vdp, self.clock)
+    let word = match (a >> 2) & 7 {
+      0 => read_data(self.vdp, self.clock),
+      1 => read_status(self.vdp, self.open_bus),
+      _ => hv_counter(self.vdp),
+    }
+    self.held_by_vdp()
+    word
   }
-  self.held_by_vdp()
-  word
-}
 
-/// A word written to the VDP's ports, the beam caught up first. A control write may start a
-/// 68000 → VDP transfer, which the bus feeds from its own memory, a word for each slot that
-/// takes one, until it ends.
-let write_vdp = (self: mut GenesisBus, a: u32, value: u16) -> void => {
-  run_beam(self.vdp, self.clock)
-  match (a >> 2) & 7 {
-    0 => write_data(self.vdp, value, self.clock),
-    1 => {
-      if write_control(self.vdp, value, self.clock) {
-        for dma_68k_running(self.vdp) {
-          self.vdp.dma_word = self.peek_word(dma_source(self.vdp) & 0xFFFFFE)
-          step_slot(self.vdp)
+  /// A word written to the VDP's ports, the beam caught up first. A control write may start a
+  /// 68000 → VDP transfer, which the bus feeds from its own memory, a word for each slot that
+  /// takes one, until it ends.
+  let write_vdp = (self: mut, a: u32, value: u16) -> void => {
+    run_beam(self.vdp, self.clock)
+    match (a >> 2) & 7 {
+      0 => write_data(self.vdp, value, self.clock),
+      1 => {
+        if write_control(self.vdp, value, self.clock) {
+          for dma_68k_running(self.vdp) {
+            self.vdp.dma_word = self.peek_word(dma_source(self.vdp) & 0xFFFFFE)
+            step_slot(self.vdp)
+          }
+          dma_68k_done(self.vdp)
         }
-        dma_68k_done(self.vdp)
-      }
-    },
-    _ => {},
+      },
+      _ => {},
+    }
+    self.held_by_vdp()
   }
-  self.held_by_vdp()
-}
 
-/// The 68000 goes on where the VDP let it, in whole cycles.
-let held_by_vdp = (self: mut GenesisBus) -> void => {
-  let until = self.vdp.resume_at
-  if until > self.clock { self.clock += round_up(until - self.clock, CPU_CLOCKS) }
+  /// The 68000 goes on where the VDP let it, in whole cycles.
+  let held_by_vdp = (self: mut) -> void => {
+    let until = self.vdp.resume_at
+    if until > self.clock { self.clock += round_up(until - self.clock, CPU_CLOCKS) }
+  }
 }

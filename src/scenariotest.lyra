@@ -387,13 +387,15 @@ let script_bus = (program: []u16, level: u8, raise_at: i64) -> ScriptBus => {
   bus
 }
 
-let set_long = (self: mut ScriptBus, addr: u32, value: u32) -> void => {
-  self.ram.insert(addr, u16(value >> 16))
-  self.ram.insert(addr + 2, u16(value & 0xFFFF))
-}
+impl ScriptBus {
+  let set_long = (self: mut, addr: u32, value: u32) -> void => {
+    self.ram.insert(addr, u16(value >> 16))
+    self.ram.insert(addr + 2, u16(value & 0xFFFF))
+  }
 
-let word = pure (self: ScriptBus, addr: u32) -> u16 =>
-  self.ram.get(addr & 0xFFFFFE).unwrap_or(0)
+  let word = pure (self, addr: u32) -> u16 =>
+    self.ram.get(addr & 0xFFFFFE).unwrap_or(0)
+}
 
 impl Bus for ScriptBus {
   read_word = (self, addr, fc) => {

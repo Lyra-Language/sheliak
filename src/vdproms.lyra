@@ -1164,337 +1164,339 @@ struct Vector {
 /// Where scene data goes in ROM: after the tables, before the 128 KB boundary table.
 const DATA: u32 = 0x4000
 
-/// Place `bytes` in ROM (word-aligned) and upload them by DMA into the memory `target`
-/// names (1 VRAM, 3 CRAM, 5 VSRAM) at `address`, waiting for it to finish.
-let upload = (self: mut Asm, bytes: []u8, target: i64, address: u32) -> void => {
-  let at = DATA + u32(self.blobs.len())
-  for b in bytes { self.blobs.push(b) }
-  if (self.blobs.len() & 1) != 0 { self.blobs.push(0) }
-  self.dma_68k(at, (bytes.len() + 1) / 2, target, address)
-}
+impl Asm {
+  /// Place `bytes` in ROM (word-aligned) and upload them by DMA into the memory `target`
+  /// names (1 VRAM, 3 CRAM, 5 VSRAM) at `address`, waiting for it to finish.
+  let upload = (self: mut, bytes: []u8, target: i64, address: u32) -> void => {
+    let at = DATA + u32(self.blobs.len())
+    for b in bytes { self.blobs.push(b) }
+    if (self.blobs.len() & 1) != 0 { self.blobs.push(0) }
+    self.dma_68k(at, (bytes.len() + 1) / 2, target, address)
+  }
 
-let w = (self: mut Asm, word: u16) -> void => {
-  self.code.push(u8(word >> 8))
-  self.code.push(u8(word & 0xFF))
-}
+  let w = (self: mut, word: u16) -> void => {
+    self.code.push(u8(word >> 8))
+    self.code.push(u8(word & 0xFF))
+  }
 
-let l = (self: mut Asm, long: u32) -> void => {
-  self.w(u16(long >> 16))
-  self.w(u16(long & 0xFFFF))
-}
+  let l = (self: mut, long: u32) -> void => {
+    self.w(u16(long >> 16))
+    self.w(u16(long & 0xFFFF))
+  }
 
-/// move.w #imm, (xxx).l
-let move_w_imm_abs = (self: mut Asm, imm: u16, addr: u32) -> void => {
-  self.w(0x33FC)
-  self.w(imm)
-  self.l(addr)
-}
+  /// move.w #imm, (xxx).l
+  let move_w_imm_abs = (self: mut, imm: u16, addr: u32) -> void => {
+    self.w(0x33FC)
+    self.w(imm)
+    self.l(addr)
+  }
 
-/// move.l #imm, (xxx).l
-let move_l_imm_abs = (self: mut Asm, imm: u32, addr: u32) -> void => {
-  self.w(0x23FC)
-  self.l(imm)
-  self.l(addr)
-}
+  /// move.l #imm, (xxx).l
+  let move_l_imm_abs = (self: mut, imm: u32, addr: u32) -> void => {
+    self.w(0x23FC)
+    self.l(imm)
+    self.l(addr)
+  }
 
-/// move.b #imm, (xxx).l
-let move_b_imm_abs = (self: mut Asm, imm: u8, addr: u32) -> void => {
-  self.w(0x13FC)
-  self.w(u16(imm))
-  self.l(addr)
-}
+  /// move.b #imm, (xxx).l
+  let move_b_imm_abs = (self: mut, imm: u8, addr: u32) -> void => {
+    self.w(0x13FC)
+    self.w(u16(imm))
+    self.l(addr)
+  }
 
-/// move.b (xxx).l, (xxx).l
-let move_b_abs_abs = (self: mut Asm, from: u32, to: u32) -> void => {
-  self.w(0x13F9)
-  self.l(from)
-  self.l(to)
-}
+  /// move.b (xxx).l, (xxx).l
+  let move_b_abs_abs = (self: mut, from: u32, to: u32) -> void => {
+    self.w(0x13F9)
+    self.l(from)
+    self.l(to)
+  }
 
-/// move.w (xxx).l, (xxx).l
-let move_w_abs_abs = (self: mut Asm, from: u32, to: u32) -> void => {
-  self.w(0x33F9)
-  self.l(from)
-  self.l(to)
-}
+  /// move.w (xxx).l, (xxx).l
+  let move_w_abs_abs = (self: mut, from: u32, to: u32) -> void => {
+    self.w(0x33F9)
+    self.l(from)
+    self.l(to)
+  }
 
-/// A word to the control port.
-let control = (self: mut Asm, word: u16) -> void => self.move_w_imm_abs(word, VDP_CONTROL)
+  /// A word to the control port.
+  let control = (self: mut, word: u16) -> void => self.move_w_imm_abs(word, VDP_CONTROL)
 
-let control_byte = (self: mut Asm, byte: u8) -> void =>
-  self.move_b_imm_abs(byte, VDP_CONTROL)
+  let control_byte = (self: mut, byte: u8) -> void =>
+    self.move_b_imm_abs(byte, VDP_CONTROL)
 
-/// A word to the data port.
-let data = (self: mut Asm, word: u16) -> void => self.move_w_imm_abs(word, VDP_DATA)
+  /// A word to the data port.
+  let data = (self: mut, word: u16) -> void => self.move_w_imm_abs(word, VDP_DATA)
 
-let data_byte = (self: mut Asm, byte: u8) -> void => self.move_b_imm_abs(byte, VDP_DATA)
+  let data_byte = (self: mut, byte: u8) -> void => self.move_b_imm_abs(byte, VDP_DATA)
 
-/// A word from the data port, stored at `to`.
-let read_to = (self: mut Asm, to: u32) -> void => self.move_w_abs_abs(VDP_DATA, to)
+  /// A word from the data port, stored at `to`.
+  let read_to = (self: mut, to: u32) -> void => self.move_w_abs_abs(VDP_DATA, to)
 
-/// Register `r` set to `value`.
-let reg = (self: mut Asm, r: i64, value: i64) -> void =>
-  self.control(u16(0x8000 | ((r & 0x1F) << 8) | (value & 0xFF)))
+  /// Register `r` set to `value`.
+  let reg = (self: mut, r: i64, value: i64) -> void =>
+    self.control(u16(0x8000 | ((r & 0x1F) << 8) | (value & 0xFF)))
 
-/// The command word for code `cd` (6 bits) and a 16-bit address, as one long write.
-let command = (self: mut Asm, cd: i64, address: u32) -> void => {
-  let high_half = u32(((cd & 3) << 14) | i64(address & 0x3FFF))
-  let low_half = u32(((cd >> 2) << 4) | i64((address >> 14) & 3))
-  self.move_l_imm_abs((high_half << 16) | low_half, VDP_CONTROL)
-}
+  /// The command word for code `cd` (6 bits) and a 16-bit address, as one long write.
+  let command = (self: mut, cd: i64, address: u32) -> void => {
+    let high_half = u32(((cd & 3) << 14) | i64(address & 0x3FFF))
+    let low_half = u32(((cd >> 2) << 4) | i64((address >> 14) & 3))
+    self.move_l_imm_abs((high_half << 16) | low_half, VDP_CONTROL)
+  }
 
-/// DMA length, registers 19–20.
-let dma_length = (self: mut Asm, length: i64) -> void => {
-  self.reg(19, length & 0xFF)
-  self.reg(20, (length >> 8) & 0xFF)
-}
+  /// DMA length, registers 19–20.
+  let dma_length = (self: mut, length: i64) -> void => {
+    self.reg(19, length & 0xFF)
+    self.reg(20, (length >> 8) & 0xFF)
+  }
 
-/// A VRAM copy's source byte address, registers 21–22.
-let dma_source_bytes = (self: mut Asm, source: i64) -> void => {
-  self.reg(21, source & 0xFF)
-  self.reg(22, (source >> 8) & 0xFF)
-}
+  /// A VRAM copy's source byte address, registers 21–22.
+  let dma_source_bytes = (self: mut, source: i64) -> void => {
+    self.reg(21, source & 0xFF)
+    self.reg(22, (source >> 8) & 0xFF)
+  }
 
-/// A 68000 → VDP transfer of `words` words from `source` into the memory `target` names
-/// (1 VRAM, 3 CRAM, 5 VSRAM) at `address`.
-let dma_68k = (
-  self: mut Asm,
-  source: u32,
-  words: i64,
-  target: i64,
-  address: u32
-) -> void => {
-  self.dma_length(words)
-  let s = i64(source >> 1)
-  self.reg(21, s & 0xFF)
-  self.reg(22, (s >> 8) & 0xFF)
-  self.reg(23, (s >> 16) & 0x7F)
-  self.command(0x20 | target, address)
-  self.wait_dma()
-}
+  /// A 68000 → VDP transfer of `words` words from `source` into the memory `target` names
+  /// (1 VRAM, 3 CRAM, 5 VSRAM) at `address`.
+  let dma_68k = (
+    self: mut,
+    source: u32,
+    words: i64,
+    target: i64,
+    address: u32
+  ) -> void => {
+    self.dma_length(words)
+    let s = i64(source >> 1)
+    self.reg(21, s & 0xFF)
+    self.reg(22, (s >> 8) & 0xFF)
+    self.reg(23, (s >> 16) & 0x7F)
+    self.command(0x20 | target, address)
+    self.wait_dma()
+  }
 
-/// Wait while the status register says a DMA is running (bit 1), as a program must before
-/// touching the VDP again — a fill or copy runs on while the 68000 does:
-///
-///     loop: move.w $C00004, d0
-///           btst   #1, d0
-///           bne.s  loop
-let wait_dma = (self: mut Asm) -> void => {
-  self.w(0x3039)
-  self.l(VDP_CONTROL)
-  self.w(0x0800)
-  self.w(0x0001)
-  self.w(0x66F4)
-}
+  /// Wait while the status register says a DMA is running (bit 1), as a program must before
+  /// touching the VDP again — a fill or copy runs on while the 68000 does:
+  ///
+  ///     loop: move.w $C00004, d0
+  ///           btst   #1, d0
+  ///           bne.s  loop
+  let wait_dma = (self: mut) -> void => {
+    self.w(0x3039)
+    self.l(VDP_CONTROL)
+    self.w(0x0800)
+    self.w(0x0001)
+    self.w(0x66F4)
+  }
 
-// ── Timing code ──
+  // ── Timing code ──
 
-/// The address the next instruction is encoded at.
-let here = pure (self: Asm) -> u32 => CODE + u32(self.code.len())
+  /// The address the next instruction is encoded at.
+  let here = pure (self) -> u32 => CODE + u32(self.code.len())
 
-/// Exception vector `number` pointed at the next instruction.
-let vector = (self: mut Asm, number: i64) -> void =>
-  self.vectors.push(Vector { number: number, address: self.here() })
+  /// Exception vector `number` pointed at the next instruction.
+  let vector = (self: mut, number: i64) -> void =>
+    self.vectors.push(Vector { number: number, address: self.here() })
 
-/// `bra.w` over what follows, to [end_skip]; returns where its displacement goes.
-let begin_skip = (self: mut Asm) -> i64 => {
-  self.w(0x6000)
-  let at = self.code.len()
-  self.w(0)
-  at
-}
+  /// `bra.w` over what follows, to [end_skip]; returns where its displacement goes.
+  let begin_skip = (self: mut) -> i64 => {
+    self.w(0x6000)
+    let at = self.code.len()
+    self.w(0)
+    at
+  }
 
-/// The branch [begin_skip] made lands here.
-let end_skip = (self: mut Asm, at: i64) -> void => {
-  let displacement = u16(self.code.len() - at)
-  self.code[at] = u8(displacement >> 8)
-  self.code[at + 1] = u8(displacement & 0xFF)
-}
+  /// The branch [begin_skip] made lands here.
+  let end_skip = (self: mut, at: i64) -> void => {
+    let displacement = u16(self.code.len() - at)
+    self.code[at] = u8(displacement >> 8)
+    self.code[at + 1] = u8(displacement & 0xFF)
+  }
 
-/// move.w #value, sr
-let set_sr = (self: mut Asm, value: u16) -> void => {
-  self.w(0x46FC)
-  self.w(value)
-}
+  /// move.w #value, sr
+  let set_sr = (self: mut, value: u16) -> void => {
+    self.w(0x46FC)
+    self.w(value)
+  }
 
-/// lea (xxx).l, An
-let lea = (self: mut Asm, address: u32, an: i64) -> void => {
-  self.w(u16(0x41F9 | (an << 9)))
-  self.l(address)
-}
+  /// lea (xxx).l, An
+  let lea = (self: mut, address: u32, an: i64) -> void => {
+    self.w(u16(0x41F9 | (an << 9)))
+    self.l(address)
+  }
 
-/// 40-cell mode, register 1 as given, a0 at the exact table and a1 at the tolerant one.
-let timing_setup = (self: mut Asm, reg1: i64) -> void => {
-  self.reg(12, 0x81)
-  self.reg(1, reg1)
-  self.lea(RAM + 0x10, 0)
-  self.lea(RAM + 0x80, 1)
-}
+  /// 40-cell mode, register 1 as given, a0 at the exact table and a1 at the tolerant one.
+  let timing_setup = (self: mut, reg1: i64) -> void => {
+    self.reg(12, 0x81)
+    self.reg(1, reg1)
+    self.lea(RAM + 0x10, 0)
+    self.lea(RAM + 0x80, 1)
+  }
 
-/// Wait until status bit `bit` reads `set`:
-///
-///     loop: move.w $C00004, d0
-///           btst   #bit, d0
-///           beq.s  loop          (bne.s, to wait for it clear)
-let wait_status = (self: mut Asm, bit: u16, set: bool) -> void => {
-  self.w(0x3039)
-  self.l(VDP_CONTROL)
-  self.w(0x0800)
-  self.w(bit)
-  self.w(if set { 0x67F4 } else { 0x66F4 })
-}
+  /// Wait until status bit `bit` reads `set`:
+  ///
+  ///     loop: move.w $C00004, d0
+  ///           btst   #bit, d0
+  ///           beq.s  loop          (bne.s, to wait for it clear)
+  let wait_status = (self: mut, bit: u16, set: bool) -> void => {
+    self.w(0x3039)
+    self.l(VDP_CONTROL)
+    self.w(0x0800)
+    self.w(bit)
+    self.w(if set { 0x67F4 } else { 0x66F4 })
+  }
 
-/// Through a V-blank to its end: the beam at the top of the frame, whatever it was doing.
-let sync_to_display = (self: mut Asm) -> void => {
-  self.wait_status(3, true)
-  self.wait_status(3, false)
-}
+  /// Through a V-blank to its end: the beam at the top of the frame, whatever it was doing.
+  let sync_to_display = (self: mut) -> void => {
+    self.wait_status(3, true)
+    self.wait_status(3, false)
+  }
 
-/// The HV counter into d0, then [split_d0].
-let record_hv = (self: mut Asm) -> void => {
-  self.w(0x3039)
-  self.l(VDP_HV)
-  self.split_d0()
-}
+  /// The HV counter into d0, then [split_d0].
+  let record_hv = (self: mut) -> void => {
+    self.w(0x3039)
+    self.l(VDP_HV)
+    self.split_d0()
+  }
 
-/// An HV value in d0 recorded: H to (a1)+, V to (a0)+.
-///
-///     move.b d0, (a1)+ ; lsr.w #8, d0 ; move.b d0, (a0)+
-let split_d0 = (self: mut Asm) -> void => {
-  self.w(0x12C0)
-  self.w(0xE048)
-  self.w(0x10C0)
-}
+  /// An HV value in d0 recorded: H to (a1)+, V to (a0)+.
+  ///
+  ///     move.b d0, (a1)+ ; lsr.w #8, d0 ; move.b d0, (a0)+
+  let split_d0 = (self: mut) -> void => {
+    self.w(0x12C0)
+    self.w(0xE048)
+    self.w(0x10C0)
+  }
 
-/// The status register's low byte to (a0)+: move.b $C00005, (a0)+
-let record_status = (self: mut Asm) -> void => {
-  self.w(0x10F9)
-  self.l(VDP_CONTROL + 1)
-}
+  /// The status register's low byte to (a0)+: move.b $C00005, (a0)+
+  let record_status = (self: mut) -> void => {
+    self.w(0x10F9)
+    self.l(VDP_CONTROL + 1)
+  }
 
-/// Through a V-blank, so the H interrupt counter has been reloaded; then whatever is still
-/// pending taken and recorded out of the way, past the RAM compared (what was raised before
-/// depends on the counter's power-on value, which the emulators need not agree on) — a
-/// `nop` unmasked, as BlastEm's 68000 takes an interrupt one instruction later than
-/// Sheliak's after the mask is lowered (which is right is not yet settled); then,
-/// with a0 and a1 at the tables, wait in STOP until the handlers have moved a0 to `end`, and
-/// mask interrupts again.
-///
-///           move.w #$2000, sr ; nop ; move.w #$2700, sr
-///           lea    tables, a0 ; lea tables, a1
-///           move.w #$2000, sr
-///     loop: stop   #$2000
-///           cmpa.l #end, a0 ; bne.s loop
-///           move.w #$2700, sr
-let wait_for_interrupts = (self: mut Asm, end: u32) -> void => {
-  self.lea(RAM + 0x100, 0)
-  self.lea(RAM + 0x180, 1)
-  self.sync_to_display()
-  self.set_sr(0x2000)
-  self.w(0x4E71)
-  self.set_sr(0x2700)
-  self.lea(RAM + 0x10, 0)
-  self.lea(RAM + 0x80, 1)
-  self.set_sr(0x2000)
-  self.w(0x4E72)
-  self.w(0x2000)
-  self.w(0xB1FC)
-  self.l(end)
-  self.w(0x66F4)
-  self.set_sr(0x2700)
-}
+  /// Through a V-blank, so the H interrupt counter has been reloaded; then whatever is still
+  /// pending taken and recorded out of the way, past the RAM compared (what was raised before
+  /// depends on the counter's power-on value, which the emulators need not agree on) — a
+  /// `nop` unmasked, as BlastEm's 68000 takes an interrupt one instruction later than
+  /// Sheliak's after the mask is lowered (which is right is not yet settled); then,
+  /// with a0 and a1 at the tables, wait in STOP until the handlers have moved a0 to `end`, and
+  /// mask interrupts again.
+  ///
+  ///           move.w #$2000, sr ; nop ; move.w #$2700, sr
+  ///           lea    tables, a0 ; lea tables, a1
+  ///           move.w #$2000, sr
+  ///     loop: stop   #$2000
+  ///           cmpa.l #end, a0 ; bne.s loop
+  ///           move.w #$2700, sr
+  let wait_for_interrupts = (self: mut, end: u32) -> void => {
+    self.lea(RAM + 0x100, 0)
+    self.lea(RAM + 0x180, 1)
+    self.sync_to_display()
+    self.set_sr(0x2000)
+    self.w(0x4E71)
+    self.set_sr(0x2700)
+    self.lea(RAM + 0x10, 0)
+    self.lea(RAM + 0x80, 1)
+    self.set_sr(0x2000)
+    self.w(0x4E72)
+    self.w(0x2000)
+    self.w(0xB1FC)
+    self.l(end)
+    self.w(0x66F4)
+    self.set_sr(0x2700)
+  }
 
-/// A handler for exception `vector`, jumped over by the code before it; see [end_handler].
-let begin_handler = (self: mut Asm, vector: i64) -> i64 => {
-  let over = self.begin_skip()
-  self.vector(vector)
-  over
-}
+  /// A handler for exception `vector`, jumped over by the code before it; see [end_handler].
+  let begin_handler = (self: mut, vector: i64) -> i64 => {
+    let over = self.begin_skip()
+    self.vector(vector)
+    over
+  }
 
-/// The handler ends by recording the HV counter, and returns.
-let end_handler = (self: mut Asm, over: i64) -> void => {
-  self.record_hv()
-  self.w(0x4E73)
-  self.end_skip(over)
-}
+  /// The handler ends by recording the HV counter, and returns.
+  let end_handler = (self: mut, over: i64) -> void => {
+    self.record_hv()
+    self.w(0x4E73)
+    self.end_skip(over)
+  }
 
-/// The handler run once, on the H interrupt of line 30: display and DMA on, register 10
-/// = 30, the H interrupt enabled.
-let run_on_hint = (self: mut Asm) -> void => {
-  self.timing_setup(0x54)
-  self.reg(10, 30)
-  self.reg(0, 0x14)
-  self.wait_for_interrupts(RAM + 0x10 + 1)
-}
+  /// The handler run once, on the H interrupt of line 30: display and DMA on, register 10
+  /// = 30, the H interrupt enabled.
+  let run_on_hint = (self: mut) -> void => {
+    self.timing_setup(0x54)
+    self.reg(10, 30)
+    self.reg(0, 0x14)
+    self.wait_for_interrupts(RAM + 0x10 + 1)
+  }
 
-/// The handler run once, on the V interrupt: display, DMA and the V interrupt on.
-let run_on_vint = (self: mut Asm) -> void => {
-  self.timing_setup(0x74)
-  self.wait_for_interrupts(RAM + 0x10 + 1)
-}
+  /// The handler run once, on the V interrupt: display, DMA and the V interrupt on.
+  let run_on_vint = (self: mut) -> void => {
+    self.timing_setup(0x74)
+    self.wait_for_interrupts(RAM + 0x10 + 1)
+  }
 
-/// `n` words to VRAM at B000 as fast as the 68000 writes them:
-///
-///     lea $C00000, a2 ; n × move.w d1, (a2)
-let burst = (self: mut Asm, n: i64) -> void => {
-  self.command(0x1, 0xB000)
-  self.lea(VDP_DATA, 2)
-  for _ in 0..<n { self.w(0x3481) }
-}
+  /// `n` words to VRAM at B000 as fast as the 68000 writes them:
+  ///
+  ///     lea $C00000, a2 ; n × move.w d1, (a2)
+  let burst = (self: mut, n: i64) -> void => {
+    self.command(0x1, 0xB000)
+    self.lea(VDP_DATA, 2)
+    for _ in 0..<n { self.w(0x3481) }
+  }
 
-/// The display on, the H interrupt at line 150 of every frame (register 10 = 150), and
-/// interrupts unmasked for good.
-let run_every_frame = (self: mut Asm) -> void => {
-  self.reg(10, 150)
-  self.reg(0, 0x14)
-  display_on(self)
-  self.set_sr(0x2000)
-}
+  /// The display on, the H interrupt at line 150 of every frame (register 10 = 150), and
+  /// interrupts unmasked for good.
+  let run_every_frame = (self: mut) -> void => {
+    self.reg(10, 150)
+    self.reg(0, 0x14)
+    display_on(self)
+    self.set_sr(0x2000)
+  }
 
-/// Ask for the Z80's bus and wait until it is granted.
-let take_z80_bus = (self: mut Asm) -> void => {
-  self.move_w_imm_abs(0x0100, 0xA11100)
-  self.wait_z80_bus()
-}
+  /// Ask for the Z80's bus and wait until it is granted.
+  let take_z80_bus = (self: mut) -> void => {
+    self.move_w_imm_abs(0x0100, 0xA11100)
+    self.wait_z80_bus()
+  }
 
-/// Wait for the Z80's bus to be granted: bit 0 of A11100 reads 0.
-///
-///     loop: btst #0, $A11100 ; bne.s loop
-let wait_z80_bus = (self: mut Asm) -> void => {
-  self.w(0x0839)
-  self.w(0x0000)
-  self.l(0xA11100)
-  self.w(0x66F6)
-}
+  /// Wait for the Z80's bus to be granted: bit 0 of A11100 reads 0.
+  ///
+  ///     loop: btst #0, $A11100 ; bne.s loop
+  let wait_z80_bus = (self: mut) -> void => {
+    self.w(0x0839)
+    self.w(0x0000)
+    self.l(0xA11100)
+    self.w(0x66F6)
+  }
 
-/// A YM2612 bank-0 register written from the 68000, as software must: waiting for the busy
-/// flag before each byte.
-///
-///     wait: btst #7, $A04000 ; bne.s wait ; move.b #register, $A04000
-///     wait: btst #7, $A04000 ; bne.s wait ; move.b #value, $A04001
-let ym_write = (self: mut Asm, register: u8, value: u8) -> void => {
-  self.wait_ym()
-  self.move_b_imm_abs(register, 0xA04000)
-  self.wait_ym()
-  self.move_b_imm_abs(value, 0xA04001)
-}
+  /// A YM2612 bank-0 register written from the 68000, as software must: waiting for the busy
+  /// flag before each byte.
+  ///
+  ///     wait: btst #7, $A04000 ; bne.s wait ; move.b #register, $A04000
+  ///     wait: btst #7, $A04000 ; bne.s wait ; move.b #value, $A04001
+  let ym_write = (self: mut, register: u8, value: u8) -> void => {
+    self.wait_ym()
+    self.move_b_imm_abs(register, 0xA04000)
+    self.wait_ym()
+    self.move_b_imm_abs(value, 0xA04001)
+  }
 
-let wait_ym = (self: mut Asm) -> void => {
-  self.w(0x0839)
-  self.w(0x0007)
-  self.l(0xA04000)
-  self.w(0x66F6)
-}
+  let wait_ym = (self: mut) -> void => {
+    self.w(0x0839)
+    self.w(0x0007)
+    self.l(0xA04000)
+    self.w(0x66F6)
+  }
 
-/// Bytes to place in the ROM at `at`.
-let patch = (self: mut Asm, at: i64, bytes: []u8) -> void =>
-  self.patches.push(Patch { at: at, bytes: bytes })
+  /// Bytes to place in the ROM at `at`.
+  let patch = (self: mut, at: i64, bytes: []u8) -> void =>
+    self.patches.push(Patch { at: at, bytes: bytes })
 
-/// Save RAM declared in the header: "RA", the bus flags (F8 the odd bytes), its range.
-let declare_save = (self: mut Asm, flags: u8, start: u32, end: u32) -> void => {
-  self.patch(0x1B0, [0x52, 0x41, flags, 0x20])
-  self.patch(0x1B4, long_bytes(start))
-  self.patch(0x1B8, long_bytes(end))
+  /// Save RAM declared in the header: "RA", the bus flags (F8 the odd bytes), its range.
+  let declare_save = (self: mut, flags: u8, start: u32, end: u32) -> void => {
+    self.patch(0x1B0, [0x52, 0x41, flags, 0x20])
+    self.patch(0x1B4, long_bytes(start))
+    self.patch(0x1B8, long_bytes(end))
+  }
 }
 
 /// A long's four bytes, most significant first.

@@ -78,44 +78,46 @@ pub let new_z80_side = pure (rom: []u8) -> Z80Side => Z80Side {
   ym_right: 0,
 }
 
-/// Run both sound chips on to master clock `to`, keeping their samples.
-pub let run_sound = (self: mut Z80Side, to: i64) -> void => {
-  for self.ym_clock + YM_CYCLE_CLOCKS <= to {
-    clock_ym(self.ym)
-    self.ym_left += self.ym.out_l
-    self.ym_right += self.ym.out_r
-    if self.ym.cycle == 0 {
-      self.fm_samples.push(i32(self.ym_left))
-      self.fm_samples.push(i32(self.ym_right))
-      self.ym_left = 0
-      self.ym_right = 0
+impl Z80Side {
+  /// Run both sound chips on to master clock `to`, keeping their samples.
+  pub let run_sound = (self: mut, to: i64) -> void => {
+    for self.ym_clock + YM_CYCLE_CLOCKS <= to {
+      clock_ym(self.ym)
+      self.ym_left += self.ym.out_l
+      self.ym_right += self.ym.out_r
+      if self.ym.cycle == 0 {
+        self.fm_samples.push(i32(self.ym_left))
+        self.fm_samples.push(i32(self.ym_right))
+        self.ym_left = 0
+        self.ym_right = 0
+      }
+      self.ym_clock += YM_CYCLE_CLOCKS
     }
-    self.ym_clock += YM_CYCLE_CLOCKS
+    for self.psg_clock + PSG_TICK_CLOCKS <= to {
+      tick_psg(self.psg)
+      var level: i64 = 0
+      for channel in 0..<4 { level += channel_level(self.psg, channel) }
+      self.psg_samples.push(i32(level))
+      self.psg_clock += PSG_TICK_CLOCKS
+    }
   }
-  for self.psg_clock + PSG_TICK_CLOCKS <= to {
-    tick_psg(self.psg)
-    var level: i64 = 0
-    for channel in 0..<4 { level += channel_level(self.psg, channel) }
-    self.psg_samples.push(i32(level))
-    self.psg_clock += PSG_TICK_CLOCKS
+
+  /// A byte written to the YM2612's port (0–3) or read from it, the chips run on to `at`.
+  pub let write_fm = (self: mut, at: i64, port: u8, value: u8) -> void => {
+    self.run_sound(at)
+    write_ym(self.ym, port & 3, value)
   }
-}
 
-/// A byte written to the YM2612's port (0–3) or read from it, the chips run on to `at`.
-pub let write_fm = (self: mut Z80Side, at: i64, port: u8, value: u8) -> void => {
-  self.run_sound(at)
-  write_ym(self.ym, port & 3, value)
-}
+  pub let read_fm = (self: mut, at: i64, port: u8) -> u8 => {
+    self.run_sound(at)
+    read_ym(self.ym, port & 3)
+  }
 
-pub let read_fm = (self: mut Z80Side, at: i64, port: u8) -> u8 => {
-  self.run_sound(at)
-  read_ym(self.ym, port & 3)
-}
-
-/// A byte written to the PSG, the chips run on to `at`.
-pub let write_sn = (self: mut Z80Side, at: i64, value: u8) -> void => {
-  self.run_sound(at)
-  write_psg(self.psg, value)
+  /// A byte written to the PSG, the chips run on to `at`.
+  pub let write_sn = (self: mut, at: i64, value: u8) -> void => {
+    self.run_sound(at)
+    write_psg(self.psg, value)
+  }
 }
 
 impl Z80Bus for Z80Side {
@@ -149,30 +151,32 @@ impl Z80Bus for Z80Side {
   }
 }
 
-/// A byte of the Z80's map as it stands: RAM (mirrored at 2000), the bank window. (The
-/// YM2612, which must be run on first, is read by `read`.)
-let peek = pure (self: ref Z80Side, address: u16) -> u8 => {
-  let a = i64(address)
-  if a < 0x4000 { return self.ram[a & 0x1FFF] }
-  if a < 0x6000 { return self.ym.status }
-  if a < 0x8000 { return 0xFF }
-  let target = i64((self.bank << 15) | u32(a & 0x7FFF))
-  if target < 0x400000 && target < self.rom.len() { return self.rom[target] }
-  0xFF
-}
+impl Z80Side {
+  /// A byte of the Z80's map as it stands: RAM (mirrored at 2000), the bank window. (The
+  /// YM2612, which must be run on first, is read by `read`.)
+  let peek = pure (self: ref, address: u16) -> u8 => {
+    let a = i64(address)
+    if a < 0x4000 { return self.ram[a & 0x1FFF] }
+    if a < 0x6000 { return self.ym.status }
+    if a < 0x8000 { return 0xFF }
+    let target = i64((self.bank << 15) | u32(a & 0x7FFF))
+    if target < 0x400000 && target < self.rom.len() { return self.rom[target] }
+    0xFF
+  }
 
-/// A byte written by the Z80: RAM; the YM2612 (4000–5FFF); the bank register (6000–60FF),
-/// which takes bit 0 as the top bit of nine, shifting the rest down; the PSG (7F11 and its
-/// odd neighbours to 7F17).
-let poke = (self: mut Z80Side, address: u16, value: u8) -> void => {
-  let a = i64(address)
-  if a < 0x4000 {
-    self.ram[a & 0x1FFF] = value
-  } else if a < 0x6000 {
-    self.write_fm(self.clock, u8(a & 3), value)
-  } else if a < 0x6100 {
-    self.bank = ((self.bank >> 1) | (u32(value & 1) << 8)) & 0x1FF
-  } else if a >= 0x7F10 && a < 0x7F18 && (a & 1) == 1 {
-      self.write_sn(self.clock, value)
-    }
+  /// A byte written by the Z80: RAM; the YM2612 (4000–5FFF); the bank register (6000–60FF),
+  /// which takes bit 0 as the top bit of nine, shifting the rest down; the PSG (7F11 and its
+  /// odd neighbours to 7F17).
+  let poke = (self: mut, address: u16, value: u8) -> void => {
+    let a = i64(address)
+    if a < 0x4000 {
+      self.ram[a & 0x1FFF] = value
+    } else if a < 0x6000 {
+      self.write_fm(self.clock, u8(a & 3), value)
+    } else if a < 0x6100 {
+      self.bank = ((self.bank >> 1) | (u32(value & 1) << 8)) & 0x1FF
+    } else if a >= 0x7F10 && a < 0x7F18 && (a & 1) == 1 {
+        self.write_sn(self.clock, value)
+      }
+  }
 }

@@ -27,126 +27,134 @@ pub let new_writer = pure () -> Writer => Writer { bytes: [] }
 
 pub let new_reader = pure (bytes: []u8) -> Reader => Reader { bytes: bytes, at: 0, failed: false }
 
-pub let put_u8 = (self: mut Writer, v: u8) -> void => self.bytes.push(v)
+impl Writer {
+  pub let put_u8 = (self: mut, v: u8) -> void => self.bytes.push(v)
 
-pub let put_bool = (self: mut Writer, v: bool) -> void => self.bytes.push(if v { 1 } else { 0 })
+  pub let put_bool = (self: mut, v: bool) -> void => self.bytes.push(if v { 1 } else { 0 })
 
-pub let put_u16 = (self: mut Writer, v: u16) -> void => put_le(self, i64(v), 2)
+  pub let put_u16 = (self: mut, v: u16) -> void => put_le(self, i64(v), 2)
 
-pub let put_u32 = (self: mut Writer, v: u32) -> void => put_le(self, i64(v), 4)
+  pub let put_u32 = (self: mut, v: u32) -> void => put_le(self, i64(v), 4)
 
-pub let put_i16 = (self: mut Writer, v: i16) -> void => put_le(self, i64(v) & 0xFFFF, 2)
+  pub let put_i16 = (self: mut, v: i16) -> void => put_le(self, i64(v) & 0xFFFF, 2)
 
-pub let put_i32 = (self: mut Writer, v: i32) -> void => put_le(self, i64(v) & 0xFFFFFFFF, 4)
+  pub let put_i32 = (self: mut, v: i32) -> void => put_le(self, i64(v) & 0xFFFFFFFF, 4)
 
-/// An `i64` as its low and high 32 bits.
-pub let put_i64 = (self: mut Writer, v: i64) -> void => {
-  put_le(self, v & 0xFFFFFFFF, 4)
-  put_le(self, (v >> 32) & 0xFFFFFFFF, 4)
-}
-
-/// Bytes of any length, the length first.
-pub let put_bytes = (self: mut Writer, values: []u8) -> void => {
-  put_i64(self, values.len())
-  for v in values { self.bytes.push(v) }
-}
-
-pub let put_u16s = (self: mut Writer, values: []u16) -> void => {
-  put_i64(self, values.len())
-  for v in values { put_u16(self, v) }
-}
-
-pub let put_i32s = (self: mut Writer, values: []i32) -> void => {
-  put_i64(self, values.len())
-  for v in values { put_i32(self, v) }
-}
-
-pub let put_bools = (self: mut Writer, values: []bool) -> void => {
-  put_i64(self, values.len())
-  for v in values { put_bool(self, v) }
-}
-
-pub let get_u8 = (self: mut Reader) -> u8 => u8(get_le(self, 1))
-
-pub let get_bool = (self: mut Reader) -> bool => get_le(self, 1) != 0
-
-pub let get_u16 = (self: mut Reader) -> u16 => u16(get_le(self, 2))
-
-pub let get_u32 = (self: mut Reader) -> u32 => u32(get_le(self, 4))
-
-pub let get_i16 = (self: mut Reader) -> i16 => {
-  let raw = get_le(self, 2)
-  i16(if raw >= 0x8000 { raw - 0x10000 } else { raw })
-}
-
-pub let get_i32 = (self: mut Reader) -> i32 => {
-  let raw = get_le(self, 4)
-  i32(if raw >= 0x80000000 { raw - 0x100000000 } else { raw })
-}
-
-pub let get_i64 = (self: mut Reader) -> i64 => {
-  let low = get_le(self, 4)
-  let raw_high = get_le(self, 4)
-  let high = if raw_high >= 0x80000000 { raw_high - 0x100000000 } else { raw_high }
-  high * 0x100000000 + low
-}
-
-/// Bytes written by [put_bytes]. `expect` is the length the field must have (-1 for any):
-/// a state whose memories are another size is not this machine's.
-pub let get_bytes = (self: mut Reader, expect: i64) -> []u8 => {
-  let n = get_length(self, expect)
-  var values: []u8 = [0; n]
-  for i in 0..<n { values[i] = get_u8(self) }
-  values
-}
-
-pub let get_u16s = (self: mut Reader, expect: i64) -> []u16 => {
-  let n = get_length(self, expect)
-  var values: []u16 = [0; n]
-  for i in 0..<n { values[i] = get_u16(self) }
-  values
-}
-
-pub let get_i32s = (self: mut Reader, expect: i64) -> []i32 => {
-  let n = get_length(self, expect)
-  var values: []i32 = [0; n]
-  for i in 0..<n { values[i] = get_i32(self) }
-  values
-}
-
-pub let get_bools = (self: mut Reader, expect: i64) -> []bool => {
-  let n = get_length(self, expect)
-  var values: []bool = [false; n]
-  for i in 0..<n { values[i] = get_bool(self) }
-  values
-}
-
-/// Whether every field was there and nothing is left over: a state cut short, or longer
-/// than this Sheliak writes, is not one to trust.
-pub let finish = pure (self: ref Reader) -> bool => !self.failed && self.at == self.bytes.len()
-
-/// A length, refused (and read as 0) where it is not the one expected, or could not fit
-/// in what is left.
-let get_length = (self: mut Reader, expect: i64) -> i64 => {
-  let n = get_i64(self)
-  if n < 0 || n > self.bytes.len() - self.at || (expect >= 0 && n != expect) {
-    self.failed = true
-    return 0
+  /// An `i64` as its low and high 32 bits.
+  pub let put_i64 = (self: mut, v: i64) -> void => {
+    put_le(self, v & 0xFFFFFFFF, 4)
+    put_le(self, (v >> 32) & 0xFFFFFFFF, 4)
   }
-  n
-}
 
-let put_le = (self: mut Writer, v: i64, size: i64) -> void => {
-  for i in 0..<size { self.bytes.push(u8((v >> (8 * i)) & 0xFF)) }
-}
-
-let get_le = (self: mut Reader, size: i64) -> i64 => {
-  if self.at + size > self.bytes.len() {
-    self.failed = true
-    return 0
+  /// Bytes of any length, the length first.
+  pub let put_bytes = (self: mut, values: []u8) -> void => {
+    put_i64(self, values.len())
+    for v in values { self.bytes.push(v) }
   }
-  var v: i64 = 0
-  for i in 0..<size { v = v | (i64(self.bytes[self.at + i]) << (8 * i)) }
-  self.at += size
-  v
+
+  pub let put_u16s = (self: mut, values: []u16) -> void => {
+    put_i64(self, values.len())
+    for v in values { put_u16(self, v) }
+  }
+
+  pub let put_i32s = (self: mut, values: []i32) -> void => {
+    put_i64(self, values.len())
+    for v in values { put_i32(self, v) }
+  }
+
+  pub let put_bools = (self: mut, values: []bool) -> void => {
+    put_i64(self, values.len())
+    for v in values { put_bool(self, v) }
+  }
+}
+
+impl Reader {
+  pub let get_u8 = (self: mut) -> u8 => u8(get_le(self, 1))
+
+  pub let get_bool = (self: mut) -> bool => get_le(self, 1) != 0
+
+  pub let get_u16 = (self: mut) -> u16 => u16(get_le(self, 2))
+
+  pub let get_u32 = (self: mut) -> u32 => u32(get_le(self, 4))
+
+  pub let get_i16 = (self: mut) -> i16 => {
+    let raw = get_le(self, 2)
+    i16(if raw >= 0x8000 { raw - 0x10000 } else { raw })
+  }
+
+  pub let get_i32 = (self: mut) -> i32 => {
+    let raw = get_le(self, 4)
+    i32(if raw >= 0x80000000 { raw - 0x100000000 } else { raw })
+  }
+
+  pub let get_i64 = (self: mut) -> i64 => {
+    let low = get_le(self, 4)
+    let raw_high = get_le(self, 4)
+    let high = if raw_high >= 0x80000000 { raw_high - 0x100000000 } else { raw_high }
+    high * 0x100000000 + low
+  }
+
+  /// Bytes written by [put_bytes]. `expect` is the length the field must have (-1 for any):
+  /// a state whose memories are another size is not this machine's.
+  pub let get_bytes = (self: mut, expect: i64) -> []u8 => {
+    let n = get_length(self, expect)
+    var values: []u8 = [0; n]
+    for i in 0..<n { values[i] = get_u8(self) }
+    values
+  }
+
+  pub let get_u16s = (self: mut, expect: i64) -> []u16 => {
+    let n = get_length(self, expect)
+    var values: []u16 = [0; n]
+    for i in 0..<n { values[i] = get_u16(self) }
+    values
+  }
+
+  pub let get_i32s = (self: mut, expect: i64) -> []i32 => {
+    let n = get_length(self, expect)
+    var values: []i32 = [0; n]
+    for i in 0..<n { values[i] = get_i32(self) }
+    values
+  }
+
+  pub let get_bools = (self: mut, expect: i64) -> []bool => {
+    let n = get_length(self, expect)
+    var values: []bool = [false; n]
+    for i in 0..<n { values[i] = get_bool(self) }
+    values
+  }
+
+  /// Whether every field was there and nothing is left over: a state cut short, or longer
+  /// than this Sheliak writes, is not one to trust.
+  pub let finish = pure (self: ref) -> bool => !self.failed && self.at == self.bytes.len()
+
+  /// A length, refused (and read as 0) where it is not the one expected, or could not fit
+  /// in what is left.
+  let get_length = (self: mut, expect: i64) -> i64 => {
+    let n = get_i64(self)
+    if n < 0 || n > self.bytes.len() - self.at || (expect >= 0 && n != expect) {
+      self.failed = true
+      return 0
+    }
+    n
+  }
+}
+
+impl Writer {
+  let put_le = (self: mut, v: i64, size: i64) -> void => {
+    for i in 0..<size { self.bytes.push(u8((v >> (8 * i)) & 0xFF)) }
+  }
+}
+
+impl Reader {
+  let get_le = (self: mut, size: i64) -> i64 => {
+    if self.at + size > self.bytes.len() {
+      self.failed = true
+      return 0
+    }
+    var v: i64 = 0
+    for i in 0..<size { v = v | (i64(self.bytes[self.at + i]) << (8 * i)) }
+    self.at += size
+    v
+  }
 }

@@ -206,21 +206,23 @@ impl Bus for TestBus {
   }
 }
 
-/// The byte at `addr` (24-bit bus), or 0 where the test left RAM unset.
-let byte = pure (self: TestBus, addr: u32) -> u8 =>
-  self.ram.get(addr & 0xFFFFFF).unwrap_or(0)
+impl TestBus {
+  /// The byte at `addr` (24-bit bus), or 0 where the test left RAM unset.
+  let byte = pure (self, addr: u32) -> u8 =>
+    self.ram.get(addr & 0xFFFFFF).unwrap_or(0)
 
-/// Log one 4-cycle access.
-let access = (
-  self: mut TestBus,
-  kind: string,
-  fc: u8,
-  addr: u32,
-  width: string,
-  value: u32
-) -> void => {
-  self.log.push("${kind} 4 ${fc} ${addr & 0xFFFFFF} ${width} ${value}")
-  self.cycles += 4
+  /// Log one 4-cycle access.
+  let access = (
+    self: mut,
+    kind: string,
+    fc: u8,
+    addr: u32,
+    width: string,
+    value: u32
+  ) -> void => {
+    self.log.push("${kind} 4 ${fc} ${addr & 0xFFFFFF} ${width} ${value}")
+    self.cycles += 4
+  }
 }
 
 /// One transaction from the file, spelled as [TestBus] logs it.
