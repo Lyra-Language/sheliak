@@ -4,7 +4,7 @@
 //   build/psgtest < script     script lines: "w HEX" writes a byte, "t N" runs N ticks
 
 import std.io.{ read_stdin }
-import psg.{ Psg, new_psg, write_psg, tick_psg }
+import std.chips.sn76489.{ Psg, new_psg }
 
 let main = () -> void => {
   var chip = new_psg()
@@ -13,11 +13,11 @@ let main = () -> void => {
     if text.len() < 3 { continue }
     let value = parse_hex(text.slice(2, text.len()))
     if text.starts_with("w") {
-      write_psg(chip, u8(value & 0xFF))
+      chip.write(u8(value & 0xFF))
       continue
     }
     for _ in 0..<value {
-      tick_psg(chip)
+      chip.tick()
       println(state(chip))
     }
   }

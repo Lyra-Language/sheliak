@@ -8,7 +8,7 @@
 // one's two outputs summed over its 24 cycles; "r PORT" reads the status; "t" prints the ROMs.
 
 import std.io.{ read_stdin }
-import ym2612.{ new_ym2612, write_ym, read_ym, clock_ym }
+import std.chips.ym2612.{ new_ym2612 }
 
 let main = () -> void => {
   var ym = new_ym2612()
@@ -16,23 +16,23 @@ let main = () -> void => {
     let words = line.trim().split(" ")
     if words.len() == 0 || words[0] == "" { continue }
     match words[0] {
-      "w" => write_ym(ym, u8(parse(words[1], 10)), u8(parse(words[2], 16))),
+      "w" => ym.write(u8(parse(words[1], 10)), u8(parse(words[2], 16))),
       "c" => {
-        for _ in 0..<parse(words[1], 10) { clock_ym(ym) }
+        for _ in 0..<parse(words[1], 10) { ym.clock() }
       },
       "s" => {
         for _ in 0..<parse(words[1], 10) {
           var left: i64 = 0
           var right: i64 = 0
           for _ in 0..<24 {
-            clock_ym(ym)
+            ym.clock()
             left += ym.out_l
             right += ym.out_r
           }
           println("${left} ${right}")
         }
       },
-      "r" => println("status ${two_hex(read_ym(ym, u8(parse(words[1], 10))))}"),
+      "r" => println("status ${two_hex(ym.read(u8(parse(words[1], 10))))}"),
       "t" => {
         for i, v in ym.logsin { println("logsin ${i} ${v}") }
         for i, v in ym.exp { println("exp ${i} ${v}") }

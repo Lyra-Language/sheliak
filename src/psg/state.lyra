@@ -5,6 +5,7 @@ module psg
 //! these, in the same place, or a saved state loses it. `build/statetest` catches one
 //! missed: a machine loaded from a state must equal the one saved.
 
+import std.chips.sn76489.{ Psg }
 import snapshot.{
   Writer, Reader, put_u8, put_bool, put_u16, get_u8, get_bool, get_u16,
 }

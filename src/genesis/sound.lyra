@@ -19,8 +19,8 @@ module genesis
 //! for 2,573 master clocks (BlastEm's measured ~171 Z80 clocks).
 
 import z80.{ Z80Bus }
-import psg.{ Psg, new_psg, write_psg, tick_psg, channel_level }
-import ym2612.{ Ym2612, new_ym2612, write_ym, read_ym, clock_ym }
+import std.chips.sn76489.{ Psg, new_psg }
+import std.chips.ym2612.{ Ym2612, new_ym2612 }
 
 /// Master clocks per Z80 T-state, and how long the VDP holds the Z80's /INT.
 pub const Z80_CLOCKS: i64 = 15
@@ -82,7 +82,7 @@ impl Z80Side {
   /// Run both sound chips on to master clock `to`, keeping their samples.
   pub let run_sound = (self: mut, to: i64) -> void => {
     while self.ym_clock + YM_CYCLE_CLOCKS <= to {
-      clock_ym(self.ym)
+      self.ym.clock()
       self.ym_left += self.ym.out_l
       self.ym_right += self.ym.out_r
       if self.ym.cycle == 0 {
@@ -94,9 +94,9 @@ impl Z80Side {
       self.ym_clock += YM_CYCLE_CLOCKS
     }
     while self.psg_clock + PSG_TICK_CLOCKS <= to {
-      tick_psg(self.psg)
+      self.psg.tick()
       var level: i64 = 0
-      for channel in 0..<4 { level += channel_level(self.psg, channel) }
+      for channel in 0..<4 { level += self.psg.channel_level(channel) }
       self.psg_samples.push(i32(level))
       self.psg_clock += PSG_TICK_CLOCKS
     }
@@ -105,18 +105,18 @@ impl Z80Side {
   /// A byte written to the YM2612's port (0–3) or read from it, the chips run on to `at`.
   pub let write_fm = (self: mut, at: i64, port: u8, value: u8) -> void => {
     self.run_sound(at)
-    write_ym(self.ym, port & 3, value)
+    self.ym.write(port & 3, value)
   }
 
   pub let read_fm = (self: mut, at: i64, port: u8) -> u8 => {
     self.run_sound(at)
-    read_ym(self.ym, port & 3)
+    self.ym.read(port & 3)
   }
 
   /// A byte written to the PSG, the chips run on to `at`.
   pub let write_sn = (self: mut, at: i64, value: u8) -> void => {
     self.run_sound(at)
-    write_psg(self.psg, value)
+    self.psg.write(value)
   }
 }
 

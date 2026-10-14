@@ -201,6 +201,12 @@ frame-at-a-time shortcuts from the start:
   the chip's). It must match Nuked's output sample for sample, bit for bit, on random
   scripts of every register (the LSI test registers aside). The chip type is the YM2612
   (the ladder effect), status read on port 0.
+- **The sound chips live in Lyra's std** (`std.chips.ym2612`, `std.chips.sn76489`, MIT),
+  so Vega's sound editor and `std.game`'s games play the same chips — and **these oracle
+  tests are theirs**: `tests/ym.sh` and `tests/psg.sh` hold the std modules to Nuked-OPN2
+  and BlastEm, so a change to either chip is run against them here before it lands. What
+  is Sheliak's own stays here: each chip's part of a save state (`src/psg/state.lyra`,
+  `src/ym2612/state.lyra`), the bus around them and the Genesis's analog stage.
 - **The PSG's oracle is BlastEm's `psg.c`**, built into `tests/oracles/psg_blastem.c` from the
   pinned BlastEm tree: its state compared tick by tick. Where SMS Power's hardware tests
   and BlastEm part (a data byte to a latched volume or noise register), Sheliak follows the
@@ -287,12 +293,12 @@ src/z80/             the Z80 (module z80):
   prefixed.lyra      CB, DD CB / FD CB, ED (block instructions and their repeat flags)
   alu.lyra           arithmetic and the flags, bits 5 and 3 included
   state.lyra         the Z80's part of a save state
-src/psg/psg.lyra     the SN76489 (module psg): tone and noise channels, the Sega LFSR
-src/psg/state.lyra   its part of a save state
-src/ym2612/ym2612.lyra  the YM2612 (module ym2612), cycle by cycle: the register file,
-                     phase and envelope generators, SSG-EG, LFO, operators and algorithms,
-                     channel accumulation, the multiplexed 9-bit DAC and its ladder, timers
-src/ym2612/state.lyra  its part of a save state (all but its ROM tables)
+src/psg/state.lyra   the SN76489's part of a save state (the chip is std.chips.sn76489:
+                     tone and noise channels, the Sega LFSR)
+src/ym2612/state.lyra  the YM2612's part of a save state, all but its ROM tables (the chip is
+                     std.chips.ym2612, cycle by cycle: the register file, phase and envelope
+                     generators, SSG-EG, LFO, operators and algorithms, channel
+                     accumulation, the multiplexed 9-bit DAC and its ladder, timers)
 src/vdp/             the VDP (module vdp):
   vdp.lyra           memories, registers, the control and data ports, status, DMA's start
   slots.lyra         the access slots: which slots are the 68000's, the FIFO, reads fetched
@@ -312,7 +318,7 @@ src/genesis/         the machine (module genesis):
                      are recognised by
   sound.lyra         the Z80's side: its RAM, the bank window onto the cartridge, its clock
                      and /INT (from the VDP); the YM2612 and PSG, clocked, their samples
-  audio.lyra         the analog stage: both chips resampled by area, mixed, filtered
+  audio.lyra         the analog stage: both chips resampled by area (std.chips.resample), mixed, filtered
   io.lyra            the I/O chip: 3- and 6-button pads (TH-multiplexed; the 6-button's
                      edge count, timeout and power-on rise); the Z80's RAM and bus request
                      as the 68000 sees them
