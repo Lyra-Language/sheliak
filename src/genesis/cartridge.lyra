@@ -151,7 +151,7 @@ pub let roms_in_zip = pure (archive: []u8) -> Result<[][]u8, string> => {
 }
 
 /// The ROM files a 7z archive holds, as [roms_in_zip] finds them in a zip.
-pub let roms_in_7z = (archive: []u8) -> Result<[][]u8, string> => {
+pub let roms_in_7z = pure (archive: []u8) -> Result<[][]u8, string> => {
   let contents = open_7z(archive)?
   let files = contents.entries.filter((e) => !e.directory)
   roms_in_archive(files.map((e) => e.name), (i) => extract_7z(contents, files[i]))
@@ -159,7 +159,7 @@ pub let roms_in_7z = (archive: []u8) -> Result<[][]u8, string> => {
 
 /// The ROM files a RAR 5 archive holds, as [roms_in_zip] finds them in a zip. Links, which
 /// RAR can store, are no ROM.
-pub let roms_in_rar = (archive: []u8) -> Result<[][]u8, string> => {
+pub let roms_in_rar = pure (archive: []u8) -> Result<[][]u8, string> => {
   let contents = open_rar(archive)?
   let files = contents.entries.filter((e) => !e.directory && !e.link)
   roms_in_archive(files.map((e) => e.name), (i) => extract_rar(contents, files[i]))

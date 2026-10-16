@@ -365,7 +365,7 @@ struct ScriptBus {
   raise_at: i64,
 }
 
-let script_bus = (program: []u16, level: u8, raise_at: i64) -> ScriptBus => {
+let script_bus = pure (program: []u16, level: u8, raise_at: i64) -> ScriptBus => {
   var bus = ScriptBus {
     ram: hashmap_new::<u32, u16>(),
     log: [],

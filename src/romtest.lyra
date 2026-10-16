@@ -160,7 +160,7 @@ let expect_zip = (name: string, archive: []u8, want: []u8) -> i64 => match roms_
 
 /// A zip archive of these entries, stored uncompressed: each one's local header and bytes,
 /// then the central directory and its end record.
-let zip_file = (entries: [](string, []u8)) -> []u8 => {
+let zip_file = pure (entries: [](string, []u8)) -> []u8 => {
   var out: []u8 = []
   var directory: []u8 = []
   for entry in entries {

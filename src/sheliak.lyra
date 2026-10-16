@@ -1091,7 +1091,7 @@ let beside_rom = pure (path: string, extension: string) -> string => {
 }
 
 /// Stereo samples, -1 to 1, as a 16-bit PCM WAV file at the audio rate.
-let wav_file = (samples: []f32) -> []u8 => {
+let wav_file = pure (samples: []f32) -> []u8 => {
   let data_bytes = samples.len() * 2
   var bytes: []u8 = []
   for c in "RIFF" { bytes.push(u8(i64(c))) }

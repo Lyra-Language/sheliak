@@ -1089,7 +1089,7 @@ let words_to_bytes = pure (words: []u16) -> []u8 => {
 // ── A cartridge ──────────────────────────────────────────────────────────────
 
 /// The ROM image: vectors, header, the code at CODE, the DMA tables, zero padding.
-let rom = (a: Asm) -> []u8 => {
+let rom = pure (a: Asm) -> []u8 => {
   var image: []u8 = [0; a.size]
   put_long(image, 0, 0x00FFFE00)
   put_long(image, 4, CODE)

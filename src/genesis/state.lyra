@@ -27,7 +27,7 @@ import snapshot.{
 }
 
 /// The machine as a save state.
-pub let save_state = (cpu: ref Cpu, bus: ref GenesisBus) -> []u8 => {
+pub let save_state = pure (cpu: ref Cpu, bus: ref GenesisBus) -> []u8 => {
   var w = new_writer()
   for b in STATE_MAGIC { put_u8(w, b) }
   put_u16(w, STATE_VERSION)
@@ -39,7 +39,10 @@ pub let save_state = (cpu: ref Cpu, bus: ref GenesisBus) -> []u8 => {
 
 /// A machine from a save state and the ROM image it was saved with — or why not: not a
 /// state, a state of another version, of another game, or damaged.
-pub let load_state = (state: []u8, rom: []u8) -> Result<(Cpu, GenesisBus), string> => {
+pub let load_state = pure (
+  state: []u8,
+  rom: []u8
+) -> Result<(Cpu, GenesisBus), string> => {
   var r = new_reader(state)
   for b in STATE_MAGIC {
     if get_u8(r) != b { return Err("not a Sheliak save state") }

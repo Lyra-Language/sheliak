@@ -365,7 +365,7 @@ let vram_entry = pure (vdp: ref Vdp, address: i64) -> u16 => {
 /// the list's order is sprite priority. At most 20 sprites and 320 pixels of them a line in
 /// 40-cell mode (16 and 256 in 32-cell), and 80 sprites in the list (64). A sprite at
 /// x = 0 masks the rest of the line's sprites once another sprite has been found on it.
-let sprite_line = (vdp: ref Vdp, y: i64, width: i64) -> []Dot => {
+let sprite_line = pure (vdp: ref Vdp, y: i64, width: i64) -> []Dot => {
   var dots: []Dot = [clear_dot; width]
   let wide = h40(vdp)
   let max_list = if wide { 80 } else { 64 }
