@@ -978,7 +978,7 @@ let draw_shadow_blank = (a: mut Asm) -> void => {
 
 /// A name table with each row's second entry made a copy of its first.
 let first_columns_alike = pure (table: []u8, columns: i64) -> []u8 => {
-  var out = table
+  var out = [...table]
   for r in 0..<(table.len() / (columns * 2)) {
     let at = r * columns * 2
     out[at + 2] = table[at]
