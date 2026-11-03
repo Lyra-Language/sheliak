@@ -1,9 +1,11 @@
 // smscheck — a Master System or Game Gear ROM run with no window, for Vega's checks: the tested
 // Z80 on a bus with the cartridge, RAM, the pad and the mode 4 VDP as far as a sprite showcase
-// goes. Not yet the console: no window, no sound, no line interrupts, and no scrolling.
+// goes. Not yet the console: no window, no sound, and no line interrupts.
 //
-//   build/smscheck ROM --frames N [--hold right,up,1,2] --ppm OUT [--work on]
+//   build/smscheck ROM --frames N [--hold right,up,1,2] --ppm OUT [--work on] [--profile OUT]
 //
+// `--profile OUT` writes the T-states each address took, one `address T-states` a line, to read
+// with `lyrac`'s map (LYRA_Z80_MAP) for where a frame goes.
 // `--work on` says the most T-states any frame's work took, from the status read that saw the
 // frame flag to the next status read: for a game that waits on the flag, not one interrupted.
 // Its last frame goes to OUT, 256×192, or the Game Gear's 160×144 window for a ROM named `.gg`.
@@ -11,7 +13,7 @@
 // write in the active display too soon after the last (26 T-states) is a failure, printed,
 // and exits 1 — what a real console would show as garbage or nothing.
 
-import std.io.{ read_bytes, write_bytes }
+import std.io.{ read_bytes, write_bytes, write_file }
 import z80.{ Z80Cpu, Z80Bus, new_z80, step }
 
 /// 228 T-states a line, 262 lines a frame, NTSC; the V-blank flag is raised at line 192.
@@ -23,19 +25,21 @@ const WRITE_GAP_T: i64 = 26
 let main = () -> u8 => {
   let a = program_args()
   if a.len() < 2 {
-    println("smscheck ROM --frames N [--hold right,up,1,2] --ppm OUT [--work on]")
+    println("smscheck ROM --frames N [--hold right,up,1,2] --ppm OUT [--work on] [--profile OUT]")
     return 2
   }
   var frames = 60
   var ppm = ""
   var pad: u8 = 0xFF
   var work = false
+  var profile = ""
   var i = 2
   while i + 1 < a.len() {
     if a[i] == "--frames" { frames = a[i + 1].parse_i64().unwrap_or(60) }
     if a[i] == "--ppm" { ppm = a[i + 1] }
     if a[i] == "--hold" { pad = held(a[i + 1]) }
     if a[i] == "--work" { work = a[i + 1] == "on" }
+    if a[i] == "--profile" { profile = a[i + 1] }
     i += 2
   }
   let Some(rom) = read_bytes(a[1]) else {
@@ -46,8 +50,13 @@ let main = () -> u8 => {
   var cpu = new_z80()
   var next_blank = ACTIVE_LINES * LINE_T
   var shown = 0
+  // T-states by the address of the instruction that took them, when asked.
+  var spent: []i64 = if profile.len() > 0 { [0; 65536] } else { [] }
   while shown < frames && bus.problem == "" {
+    let pc = i64(cpu.pc)
+    let before = bus.t
     step(cpu, bus)
+    if profile.len() > 0 { spent[pc] += bus.t - before }
     if bus.t >= next_blank {
       bus.status = bus.status | 0x80
       next_blank += FRAME_T
@@ -58,7 +67,17 @@ let main = () -> u8 => {
     println("smscheck: ${bus.problem}")
     return 1
   }
-  if work { println("most work in a frame: ${bus.most_work} T-states of ${FRAME_T}") }
+  if profile.len() > 0 {
+    var lines: []string = []
+    for at, t in spent {
+      if t > 0 { lines.push("${at} ${t}") }
+    }
+    if !write_file(profile, lines.join("\n")) {
+      println("smscheck: cannot write ${profile}")
+      return 1
+    }
+  }
+  if work { println("most work in a frame: ${bus.most_work} T-states of ${FRAME_T}, ${bus.all_work / bus.frames_timed.max(1)} on average") }
   if ppm != "" && !write_bytes(ppm, bus.frame_ppm()) {
     println("smscheck: cannot write ${ppm}")
     return 1
@@ -101,6 +120,8 @@ struct Sms {
   frame_started: i64 = 0,
   frames_seen: i64 = 0,
   most_work: i64 = 0,
+  frames_timed: i64 = 0,
+  all_work: i64 = 0,
   t: i64 = 0,
   last_write_t: i64 = -1000,
   problem: string = "",
@@ -134,16 +155,21 @@ impl Z80Bus for Sms {
     if low == 0x81 {
       let was = self.status
       self.status = 0
-      // A frame's work: from the read that sees the flag to the next read, its next wait.
+      // A frame's work: from the read that saw the flag to the next read, its next wait's. A
+      // frame that overran finds the flag at once, so that read ends one and starts the next.
+      if self.frame_started > 0 {
+        // The first frames set the game up, so are not its frames.
+        if self.frames_seen > 2 {
+          self.most_work = self.most_work.max(self.t - self.frame_started)
+          self.frames_timed += 1
+          self.all_work += self.t - self.frame_started
+        }
+        self.frame_started = 0
+      }
       if was & 0x80 != 0 {
         self.frame_started = self.t
         self.frames_seen += 1
-      } else if self.frame_started > 0 {
-        // The first frames set the game up, so are not its frames.
-        if self.frames_seen > 2 { self.most_work = self.most_work.max(self.t - self.frame_started) }
-        self.frame_started = 0
       }
-      self.control_second = false
       return was
     }
     if low == 0xC0 { return self.pad }
@@ -252,7 +278,6 @@ impl Sms {
   /// the name table's; the whole of it the backdrop with the display off.
   let frame_pixels = (self: mut) -> []u32 => {
     if (self.registers[0] & 0x04) == 0 { self.fail("not in mode 4") }
-    if self.registers[8] != 0 || self.registers[9] != 0 { self.fail("scrolling") }
     if (self.registers[1] & 0x01) != 0 { self.fail("zoomed sprites") }
     let backdrop = self.color(16 + (i64(self.registers[7]) & 15))
     var out: []u32 = [backdrop; 256 * 192]
@@ -270,14 +295,21 @@ impl Sms {
         let top = if raw >= 0xE0 { raw - 256 + 1 } else { raw + 1 }
         if line >= top && line < top + sprite_height && sprites.len() < 8 { sprites.push(s) }
       }
+      // The plane's own place for this line: register 9 scrolls it up, wrapping at its 28 rows,
+      // and register 8 right, wrapping at its 32 columns.
+      let plane_y = (line + i64(self.registers[9])) % 224
       for x in 0..<256 {
-        let cell = names + 2 * ((line / 8) * 32 + x / 8)
+        let plane_x = (x - i64(self.registers[8]) + 256) % 256
+        let cell = names + 2 * ((plane_y / 8) * 32 + plane_x / 8)
         let word = i64(self.vram[cell]) | (i64(self.vram[cell + 1]) << 8)
-        let tile_x = if (word & 0x200) != 0 { 7 - x % 8 } else { x % 8 }
-        let tile_y = if (word & 0x400) != 0 { 7 - line % 8 } else { line % 8 }
+        let tile_x = if (word & 0x200) != 0 { 7 - plane_x % 8 } else { plane_x % 8 }
+        let tile_y = if (word & 0x400) != 0 { 7 - plane_y % 8 } else { plane_y % 8 }
         let bg = self.tile_pixel(word & 0x1FF, tile_x, tile_y)
         let bg_palette = if (word & 0x800) != 0 { 16 } else { 0 }
         var shown = self.color(bg_palette + bg)
+        // Register 0's blanked left column, which hides the seam of scrolling.
+        let masked = x < 8 && (self.registers[0] & 0x20) != 0
+        if masked { shown = backdrop }
         for s in sprites {
           let raw = i64(self.vram[table + s])
           let top = if raw >= 0xE0 { raw - 256 + 1 } else { raw + 1 }
@@ -288,7 +320,7 @@ impl Sms {
           let row = line - top
           let v = self.tile_pixel(pattern + tile + row / 8, x - left, row % 8)
           if v != 0 {
-            if (word & 0x1000) == 0 || bg == 0 { shown = self.color(16 + v) }
+            if !masked && ((word & 0x1000) == 0 || bg == 0) { shown = self.color(16 + v) }
             break
           }
         }
