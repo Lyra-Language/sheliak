@@ -46,6 +46,12 @@ tests/scenarios.sh          # interrupt, STOP and trace scenarios on a scripted 
 tests/vdp.sh                # VDP test ROMs on Sheliak and BlastEm, compared (needs SDL2)
 tests/vdp.sh fill copy      # just these
 build/padtest               # the pads, buttons held, through the bus
+build/z80run PROGRAM         # a flat binary on the Z80 core, then its registers and T-states: what
+                            #    lyra/tools/llvm-z80/test runs the Z80 backend's output on
+build/smscheck ROM --frames N [--hold right,up] --ppm OUT
+                            # a Master System or Game Gear (.gg) ROM with no window, for Vega's
+                            #    checks: the Z80, a mode 4 VDP without scrolling or interrupts;
+                            #    fails on what a console would garble, as a VDP write too soon
 build/romtest               # ROM files read: raw, SMD, split SMD, MGD, zipped; part names
 build/prefstest             # the preferences file read (leniently) and written
 tests/state.sh [ROM…]       # save states: loaded equal to saved, then in lockstep; the test

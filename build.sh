@@ -7,7 +7,7 @@
 #                           # (vdproms, vdpcheck), the pad, ROM file and preferences
 #                           # tests (padtest, romtest, prefstest), the save-state test
 #                           # (statetest) and the Z80's
-#                           # (z80test, z80scenarios)
+#                           # (z80test, z80scenarios), and smscheck
 #
 # Uses the sibling compiler, ../lyra/build/lyrac (run ../lyra/build.sh first), whose
 # install layout puts `std/` and `bindings/` beside it. Override with $LYRAC.
@@ -33,6 +33,8 @@ mkdir -p "$ROOT/build"
 "$LYRAC" build -o "$ROOT/build/statetest" "$ROOT/src/statetest.lyra"
 "$LYRAC" build -o "$ROOT/build/z80test" "$ROOT/src/z80test.lyra"
 "$LYRAC" build -o "$ROOT/build/z80scenarios" "$ROOT/src/z80scenarios.lyra"
+"$LYRAC" build -o "$ROOT/build/smscheck" "$ROOT/src/smscheck.lyra"
+"$LYRAC" build -o "$ROOT/build/z80run" "$ROOT/src/z80run.lyra"
 "$LYRAC" build -o "$ROOT/build/psgtest" "$ROOT/src/psgtest.lyra"
 "$LYRAC" build -o "$ROOT/build/ymtest" "$ROOT/src/ymtest.lyra"
 "$LYRAC" build -o "$ROOT/build/sheliak" "$ROOT/src/sheliak.lyra"

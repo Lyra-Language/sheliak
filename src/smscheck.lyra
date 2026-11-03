@@ -1,0 +1,296 @@
+// smscheck — a Master System or Game Gear ROM run with no window, for Vega's checks: the tested
+// Z80 on a bus with the cartridge, RAM, the pad and the mode 4 VDP as far as a sprite showcase
+// goes. Not yet the console: no window, no sound, no line interrupts, and no scrolling.
+//
+//   build/smscheck ROM --frames N [--hold right,up] --ppm OUT
+//
+// Its last frame goes to OUT, 256×192, or the Game Gear's 160×144 window for a ROM named `.gg`.
+// **It is strict**: a write to ROM, an unknown port, a mode it does not draw, or a VDP data
+// write in the active display too soon after the last (26 T-states) is a failure, printed,
+// and exits 1 — what a real console would show as garbage or nothing.
+
+import std.io.{ read_bytes, write_bytes }
+import z80.{ Z80Cpu, Z80Bus, new_z80, step }
+
+/// 228 T-states a line, 262 lines a frame, NTSC; the V-blank flag is raised at line 192.
+const LINE_T: i64 = 228
+const FRAME_T: i64 = 228 * 262
+const ACTIVE_LINES: i64 = 192
+const WRITE_GAP_T: i64 = 26
+
+let main = () -> u8 => {
+  let a = program_args()
+  if a.len() < 2 {
+    println("smscheck ROM --frames N [--hold right,up] --ppm OUT")
+    return 2
+  }
+  var frames = 60
+  var ppm = ""
+  var pad: u8 = 0xFF
+  var i = 2
+  while i + 1 < a.len() {
+    if a[i] == "--frames" { frames = a[i + 1].parse_i64().unwrap_or(60) }
+    if a[i] == "--ppm" { ppm = a[i + 1] }
+    if a[i] == "--hold" { pad = held(a[i + 1]) }
+    i += 2
+  }
+  let Some(rom) = read_bytes(a[1]) else {
+    println("smscheck: cannot read ${a[1]}")
+    return 1
+  }
+  var bus = Sms { rom: rom, gg: a[1].ends_with(".gg"), pad: pad }
+  var cpu = new_z80()
+  var next_blank = ACTIVE_LINES * LINE_T
+  var shown = 0
+  while shown < frames && bus.problem == "" {
+    step(cpu, bus)
+    if bus.t >= next_blank {
+      bus.status = bus.status | 0x80
+      next_blank += FRAME_T
+      shown += 1
+    }
+  }
+  if bus.problem != "" {
+    println("smscheck: ${bus.problem}")
+    return 1
+  }
+  if ppm != "" && !write_bytes(ppm, bus.frame_ppm()) {
+    println("smscheck: cannot write ${ppm}")
+    return 1
+  }
+  0
+}
+
+/// Pad 1's port with `names` held: a bit reads 0 while its button is.
+let held = pure (names: string) -> u8 => {
+  var pad: u8 = 0xFF
+  for name in names.split(",") {
+    if name == "up" { pad = pad & 0xFE }
+    if name == "down" { pad = pad & 0xFD }
+    if name == "left" { pad = pad & 0xFB }
+    if name == "right" { pad = pad & 0xF7 }
+  }
+  pad
+}
+
+/// The console around the Z80.
+struct Sms {
+  rom: []u8,
+  gg: bool,
+  pad: u8,
+  ram: []u8 = [0; 0x2000],
+  banks: []i64 = [0, 1, 2],
+  vram: []u8 = [0; 0x4000],
+  /// A colour's byte, or on the Game Gear its two.
+  cram: []u8 = [0; 64],
+  cram_low: u8 = 0,
+  registers: []u8 = [0; 16],
+  /// The control port's first byte, when the second is awaited.
+  control_low: u8 = 0,
+  control_second: bool = false,
+  address: i64 = 0,
+  code: i64 = 0,
+  status: u8 = 0,
+  t: i64 = 0,
+  last_write_t: i64 = -1000,
+  problem: string = "",
+}
+
+impl Z80Bus for Sms {
+  fetch = (self, address) => {
+    self.t += 4
+    self.memory(address)
+  }
+  read = (self, address) => {
+    self.t += 3
+    self.memory(address)
+  }
+  write = (self, address, value) => {
+    self.t += 3
+    let at = i64(address)
+    if at < 0xC000 {
+      self.fail("a write to ROM at ${u16(at).to_hex()}")
+      return
+    }
+    self.ram[at & 0x1FFF] = value
+    if at >= 0xFFFC {
+      if at == 0xFFFC && value != 0 { self.fail("cartridge RAM mapped") }
+      if at >= 0xFFFD { self.banks[at - 0xFFFD] = i64(value) }
+    }
+  }
+  input = (self, port) => {
+    self.t += 4
+    let low = i64(port) & 0xC1
+    if low == 0x81 {
+      let was = self.status
+      self.status = 0
+      self.control_second = false
+      return was
+    }
+    if low == 0xC0 { return self.pad }
+    if low == 0xC1 { return 0xFF }
+    self.fail("a read of port ${port.to_hex()}")
+    0xFF
+  }
+  output = (self, port, value) => {
+    self.t += 4
+    let low = i64(port) & 0xC1
+    if low == 0x40 || low == 0x41 { return }
+    if low == 0x80 {
+      self.data_write(value)
+      return
+    }
+    if low == 0x81 {
+      self.control_write(value)
+      return
+    }
+    self.fail("a write to port ${port.to_hex()}")
+  }
+  idle = (self, n) => { self.t += n }
+  interrupt_line = pure (self) => false
+  acknowledge = (self) => {
+    self.t += 6
+    0xFF
+  }
+}
+
+impl Sms {
+  let fail = (self: mut, why: string) -> void => {
+    if self.problem == "" { self.problem = why }
+  }
+
+  let memory = pure (self: ref, address: u16) -> u8 => {
+    let at = i64(address)
+    if at >= 0xC000 { return self.ram[at & 0x1FFF] }
+    // The first KB is never banked.
+    let bank = if at < 0x400 { 0 } else { self.banks[at >> 14] }
+    self.rom[((bank << 14) | (at & 0x3FFF)) % self.rom.len()]
+  }
+
+  let control_write = (self: mut, value: u8) -> void => {
+    if !self.control_second {
+      self.control_low = value
+      self.control_second = true
+      return
+    }
+    self.control_second = false
+    self.code = i64(value) >> 6
+    self.address = i64(self.control_low) | ((i64(value) & 0x3F) << 8)
+    if self.code == 2 { self.registers[i64(value) & 0x0F] = self.control_low }
+    if self.code == 0 { self.fail("a read of VRAM, which this does not model") }
+  }
+
+  let data_write = (self: mut, value: u8) -> void => {
+    self.control_second = false
+    let line = (self.t / LINE_T) % 262
+    let display = (self.registers[1] & 0x40) != 0
+    if display && line < ACTIVE_LINES && self.t - self.last_write_t < WRITE_GAP_T {
+      self.fail("VDP writes ${self.t - self.last_write_t} T-states apart on line ${line}")
+    }
+    self.last_write_t = self.t
+    if self.code == 3 {
+      if self.gg {
+        let at = self.address & 0x3F
+        if at & 1 == 0 {
+          self.cram_low = value
+        } else {
+          self.cram[at - 1] = self.cram_low
+          self.cram[at] = value
+        }
+      } else {
+        self.cram[self.address & 0x1F] = value
+      }
+    } else {
+      self.vram[self.address] = value
+    }
+    self.address = (self.address + 1) & 0x3FFF
+  }
+
+  /// Colour `n` of CRAM as 0xRRGGBB.
+  let color = pure (self: ref, n: i64) -> u32 => {
+    if self.gg {
+      let low = u32(self.cram[2 * n])
+      let high = u32(self.cram[2 * n + 1])
+      return ((low & 0x0F) * 17 << 16) | ((low >> 4) * 17 << 8) | ((high & 0x0F) * 17)
+    }
+    let c = u32(self.cram[n])
+    ((c & 3) * 85 << 16) | (((c >> 2) & 3) * 85 << 8) | (((c >> 4) & 3) * 85)
+  }
+
+  /// The colour index, 0–15, of a tile's pixel.
+  let tile_pixel = pure (self: ref, tile: i64, x: i64, y: i64) -> i64 => {
+    let at = tile * 32 + y * 4
+    let bit = 7 - x
+    var value = 0
+    for plane in 0..<4 {
+      value = value | (((i64(self.vram[(at + plane) & 0x3FFF]) >> bit) & 1) << plane)
+    }
+    value
+  }
+
+  /// The frame: each pixel the first of the line's first eight sprites to have one there, or
+  /// the name table's; the whole of it the backdrop with the display off.
+  let frame_pixels = (self: mut) -> []u32 => {
+    if (self.registers[0] & 0x04) == 0 { self.fail("not in mode 4") }
+    if self.registers[8] != 0 || self.registers[9] != 0 { self.fail("scrolling") }
+    if (self.registers[1] & 0x01) != 0 { self.fail("zoomed sprites") }
+    let backdrop = self.color(16 + (i64(self.registers[7]) & 15))
+    var out: []u32 = [backdrop; 256 * 192]
+    if (self.registers[1] & 0x40) == 0 { return out }
+    let names = (i64(self.registers[2]) & 0x0E) << 10
+    let table = (i64(self.registers[5]) & 0x7E) << 7
+    let pattern = if (self.registers[6] & 0x04) != 0 { 256 } else { 0 }
+    let tall = (self.registers[1] & 0x02) != 0
+    let sprite_height = if tall { 16 } else { 8 }
+    for line in 0..<192 {
+      var sprites: []i64 = []
+      for s in 0..<64 {
+        let raw = i64(self.vram[table + s])
+        if raw == 0xD0 { break }
+        let top = if raw >= 0xE0 { raw - 256 + 1 } else { raw + 1 }
+        if line >= top && line < top + sprite_height && sprites.len() < 8 { sprites.push(s) }
+      }
+      for x in 0..<256 {
+        let cell = names + 2 * ((line / 8) * 32 + x / 8)
+        let word = i64(self.vram[cell]) | (i64(self.vram[cell + 1]) << 8)
+        let tile_x = if (word & 0x200) != 0 { 7 - x % 8 } else { x % 8 }
+        let tile_y = if (word & 0x400) != 0 { 7 - line % 8 } else { line % 8 }
+        let bg = self.tile_pixel(word & 0x1FF, tile_x, tile_y)
+        let bg_palette = if (word & 0x800) != 0 { 16 } else { 0 }
+        var shown = self.color(bg_palette + bg)
+        for s in sprites {
+          let raw = i64(self.vram[table + s])
+          let top = if raw >= 0xE0 { raw - 256 + 1 } else { raw + 1 }
+          let left = i64(self.vram[table + 128 + 2 * s])
+          if x < left || x >= left + 8 { continue }
+          var tile = i64(self.vram[table + 129 + 2 * s])
+          if tall { tile = tile & 0xFE }
+          let row = line - top
+          let v = self.tile_pixel(pattern + tile + row / 8, x - left, row % 8)
+          if v != 0 {
+            if (word & 0x1000) == 0 || bg == 0 { shown = self.color(16 + v) }
+            break
+          }
+        }
+        out[line * 256 + x] = shown
+      }
+    }
+    out
+  }
+
+  /// The frame as a binary PPM: the Game Gear's window of it, on a Game Gear.
+  let frame_ppm = (self: mut) -> []u8 => {
+    let pixels = self.frame_pixels()
+    let (left, top, width, height) = if self.gg { (48, 24, 160, 144) } else { (0, 0, 256, 192) }
+    var out = "P6\n${width} ${height}\n255\n".encode_utf8()
+    for y in 0..<height {
+      for x in 0..<width {
+        let p = pixels[(top + y) * 256 + left + x]
+        out.push(u8(p >> 16))
+        out.push(u8((p >> 8) & 0xFF))
+        out.push(u8(p & 0xFF))
+      }
+    }
+    out
+  }
+}

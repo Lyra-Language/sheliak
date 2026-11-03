@@ -1,0 +1,62 @@
+//! A flat binary run on the Z80 core, for testing what the compiler makes for the Z80
+//! (`lyra/tools/llvm-z80/test/run.py`): 64 KB of RAM, the binary at 0, run from 0 until it
+//! halts or runs out of T-states; then the registers and how long it took.
+//!
+//!     z80run PROGRAM
+
+import std.io.{ read_bytes }
+import z80.{ Z80Bus, new_z80, step }
+
+/// Long enough for any test, short enough to end one that never halts.
+const LIMIT: i64 = 200000000
+
+let main = () -> u8 => {
+  let a = program_args()
+  if a.len() != 2 {
+    println("z80run PROGRAM")
+    return 2
+  }
+  let Some(program) = read_bytes(a[1]) else {
+    println("z80run: cannot read ${a[1]}")
+    return 2
+  }
+  var bus = Memory { ram: [0; 65536], t: 0 }
+  for i, byte in program { bus.ram[i] = byte }
+  var cpu = new_z80()
+  cpu.pc = 0
+  while !cpu.halted && bus.t < LIMIT { step(cpu, bus) }
+  let bc = i64(cpu.b) * 256 + i64(cpu.c)
+  let de = i64(cpu.d) * 256 + i64(cpu.e)
+  let hl = i64(cpu.h) * 256 + i64(cpu.l)
+  let halted = if cpu.halted { 1 } else { 0 }
+  println("a=${cpu.a} bc=${bc} de=${de} hl=${hl} sp=${cpu.sp} t=${bus.t} halted=${halted}")
+  0
+}
+
+struct Memory {
+  ram: []u8,
+  t: i64,
+}
+
+impl Z80Bus for Memory {
+  fetch = (self, address) => {
+    self.t += 4
+    self.ram[i64(address)]
+  }
+  read = (self, address) => {
+    self.t += 3
+    self.ram[i64(address)]
+  }
+  write = (self, address, value) => {
+    self.ram[i64(address)] = value
+    self.t += 3
+  }
+  input = (self, port) => {
+    self.t += 4
+    0xFF
+  }
+  output = (self, port, value) => { self.t += 4 }
+  idle = (self, n) => { self.t += n }
+  interrupt_line = pure (self) => false
+  acknowledge = pure (self) => 0xFF
+}
