@@ -52,6 +52,8 @@ build/smscheck ROM --frames N [--hold right,up,1,2] --ppm OUT [--work on] [--pro
                             # a Master System or Game Gear (.gg) ROM with no window, for Vega's
                             #    checks: the Z80, a mode 4 VDP without scrolling or interrupts;
                             #    fails on what a console would garble, as a VDP write too soon
+                            #    `--work on`: the most and average T-states of a game's frame, and
+                            #    how many of the screen's frames the game kept up with
 build/romtest               # ROM files read: raw, SMD, split SMD, MGD, zipped; part names
 build/prefstest             # the preferences file read (leniently) and written
 tests/state.sh [ROM…]       # save states: loaded equal to saved, then in lockstep; the test

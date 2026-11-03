@@ -8,7 +8,8 @@
 // with `lyrac`'s map (LYRA_Z80_MAP) for where a frame goes.
 // `--psg OUT` writes each byte the PSG was given, a line each, in decimal.
 // `--work on` says the most T-states any frame's work took, from the status read that saw the
-// frame flag to the next status read: for a game that waits on the flag, not one interrupted.
+// frame flag to the next status read, for a game that waits on the flag, not one interrupted;
+// their average; and how many of the screen's frames the game kept up with.
 // Its last frame goes to OUT, 256×192, or the Game Gear's 160×144 window for a ROM named `.gg`.
 // **It is strict**: a write to ROM, an unknown port, a mode it does not draw, or a VDP data
 // write in the active display too soon after the last (26 T-states) is a failure, printed,
@@ -85,7 +86,10 @@ let main = () -> u8 => {
       return 1
     }
   }
-  if work { println("most work in a frame: ${bus.most_work} T-states of ${FRAME_T}, ${bus.all_work / bus.frames_timed.max(1)} on average") }
+  if work {
+    println("most work in a frame: ${bus.most_work} T-states of ${FRAME_T}, ${bus.all_work / bus.frames_timed.max(1)} on average")
+    println("the game's frames: ${bus.frames_timed} in ${frames} of the screen's")
+  }
   if ppm != "" && !write_bytes(ppm, bus.frame_ppm()) {
     println("smscheck: cannot write ${ppm}")
     return 1
@@ -170,8 +174,9 @@ impl Z80Bus for Sms {
       // A frame's work: from the read that saw the flag to the next read, its next wait's. A
       // frame that overran finds the flag at once, so that read ends one and starts the next.
       if self.frame_started > 0 {
-        // The first frames set the game up, so are not its frames.
-        if self.frames_seen > 2 {
+        // The first frames set the game up, so are not its frames. Nor is the moment between a
+        // wait's first read, which saw the flag of a frame that overran, and its next.
+        if self.frames_seen > 2 && self.t - self.frame_started > 64 {
           self.most_work = self.most_work.max(self.t - self.frame_started)
           self.frames_timed += 1
           self.all_work += self.t - self.frame_started
