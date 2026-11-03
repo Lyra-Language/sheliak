@@ -12,7 +12,7 @@
 // four idle cycles, the frame, the vector, the handler — 34 cycles. Prints a line per
 // failure and a summary; exits 1 on any.
 
-import std.collections.{ HashMap, hashmap_new }
+import std.collections.{ HashMap }
 import m68k.{ Bus, Cpu, step, cpu_with, Outcome }
 
 const CODE: u32 = 0x1000
@@ -367,7 +367,7 @@ struct ScriptBus {
 
 let script_bus = pure (program: []u16, level: u8, raise_at: i64) -> ScriptBus => {
   var bus = ScriptBus {
-    ram: hashmap_new::<u32, u16>(),
+    ram: HashMap.new::<u32, u16>(),
     log: [],
     cycles: 0,
     level: level,

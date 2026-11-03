@@ -15,7 +15,7 @@
 
 import std.io.{ read_stdin }
 import std.json.{ parse_json, JsonValue }
-import std.collections.{ HashMap, hashmap_new }
+import std.collections.{ HashMap }
 import m68k.{ Bus, Cpu, step, cpu_with, usp, ssp }
 
 const SHOWN_FAILURES: i64 = 5
@@ -78,7 +78,7 @@ let run = (test: JsonValue) -> Verdict => {
   let initial = test.field("initial").unwrap_or(JsonNull)
   let final = test.field("final").unwrap_or(JsonNull)
   var cpu = load_cpu(initial)
-  var bus = TestBus { ram: hashmap_new::<u32, u8>(), log: [], cycles: 0 }
+  var bus = TestBus { ram: HashMap.new::<u32, u8>(), log: [], cycles: 0 }
   for pair in initial.field("ram").unwrap_or(JsonNull).elements() {
     bus.ram.insert(u32(number(pair, 0)), u8(number(pair, 1)))
   }
