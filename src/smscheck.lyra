@@ -2,7 +2,7 @@
 // Z80 on a bus with the cartridge, RAM, the pad and the mode 4 VDP as far as a sprite showcase
 // goes. Not yet the console: no window, no sound, no line interrupts, and no scrolling.
 //
-//   build/smscheck ROM --frames N [--hold right,up] --ppm OUT [--work on]
+//   build/smscheck ROM --frames N [--hold right,up,1,2] --ppm OUT [--work on]
 //
 // `--work on` says the most T-states any frame's work took, from the status read that saw the
 // frame flag to the next status read: for a game that waits on the flag, not one interrupted.
@@ -23,7 +23,7 @@ const WRITE_GAP_T: i64 = 26
 let main = () -> u8 => {
   let a = program_args()
   if a.len() < 2 {
-    println("smscheck ROM --frames N [--hold right,up] --ppm OUT [--work on]")
+    println("smscheck ROM --frames N [--hold right,up,1,2] --ppm OUT [--work on]")
     return 2
   }
   var frames = 60
@@ -74,6 +74,8 @@ let held = pure (names: string) -> u8 => {
     if name == "down" { pad = pad & 0xFD }
     if name == "left" { pad = pad & 0xFB }
     if name == "right" { pad = pad & 0xF7 }
+    if name == "1" { pad = pad & 0xEF }
+    if name == "2" { pad = pad & 0xDF }
   }
   pad
 }
