@@ -2,10 +2,11 @@
 //! (`lyra/tools/llvm-z80/test/run.py`): 64 KB of RAM, the binary at 0, run from 0 until it
 //! halts or runs out of T-states; then the registers and how long it took.
 //!
-//!     z80run PROGRAM [trace]
+//!     z80run PROGRAM [trace | reports]
 //!
 //! With `trace`, each byte written to a port is printed as it is, for comparing a program's
-//! whole output with what the same program prints on the host.
+//! whole output with what the same program prints on the host. With `reports`, only those to
+//! port 0x7E. A status read answers 0xFF, so a game that waits for a frame never waits.
 
 import std.io.{ read_bytes }
 import z80.{ Z80Bus, new_z80, step }
@@ -16,14 +17,14 @@ const LIMIT: i64 = 200000000
 let main = () -> u8 => {
   let a = program_args()
   if a.len() < 2 {
-    println("z80run PROGRAM [trace]")
+    println("z80run PROGRAM [trace | reports]")
     return 2
   }
   let Some(program) = read_bytes(a[1]) else {
     println("z80run: cannot read ${a[1]}")
     return 2
   }
-  var bus = Memory { ram: [0; 65536], t: 0, last_out: 0, trace: a.len() > 2 }
+  var bus = Memory { ram: [0; 65536], t: 0, last_out: 0, trace: a.len() > 2 && a[2] == "trace", reports: a.len() > 2 && a[2] == "reports" }
   for i, byte in program { bus.ram[i] = byte }
   var cpu = new_z80()
   cpu.pc = 0
@@ -41,6 +42,7 @@ struct Memory {
   t: i64,
   last_out: u8,
   trace: bool,
+  reports: bool,
 }
 
 impl Z80Bus for Memory {
@@ -64,6 +66,9 @@ impl Z80Bus for Memory {
     self.t += 4
     self.last_out = value
     if self.trace { println("${value}") }
+    // Port 0x7E is the PSG's on a console; with `ports` only what goes there is printed, so a
+    // program under test can report through it past its VDP writes.
+    if self.reports && (i64(port) & 0xFF) == 0x7E { println("${value}") }
   }
   idle = (self, n) => { self.t += n }
   interrupt_line = pure (self) => false
