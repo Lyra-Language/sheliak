@@ -48,7 +48,7 @@ tests/vdp.sh fill copy      # just these
 build/padtest               # the pads, buttons held, through the bus
 build/z80run PROGRAM         # a flat binary on the Z80 core, then its registers and T-states: what
                             #    lyra/tools/llvm-z80/test runs the Z80 backend's output on
-build/smscheck ROM --frames N [--hold right,up] --ppm OUT
+build/smscheck ROM --frames N [--hold right,up] --ppm OUT [--work on]
                             # a Master System or Game Gear (.gg) ROM with no window, for Vega's
                             #    checks: the Z80, a mode 4 VDP without scrolling or interrupts;
                             #    fails on what a console would garble, as a VDP write too soon

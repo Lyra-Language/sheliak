@@ -2,8 +2,10 @@
 // Z80 on a bus with the cartridge, RAM, the pad and the mode 4 VDP as far as a sprite showcase
 // goes. Not yet the console: no window, no sound, no line interrupts, and no scrolling.
 //
-//   build/smscheck ROM --frames N [--hold right,up] --ppm OUT
+//   build/smscheck ROM --frames N [--hold right,up] --ppm OUT [--work on]
 //
+// `--work on` says the most T-states any frame's work took, from the status read that saw the
+// frame flag to the next status read: for a game that waits on the flag, not one interrupted.
 // Its last frame goes to OUT, 256×192, or the Game Gear's 160×144 window for a ROM named `.gg`.
 // **It is strict**: a write to ROM, an unknown port, a mode it does not draw, or a VDP data
 // write in the active display too soon after the last (26 T-states) is a failure, printed,
@@ -21,17 +23,19 @@ const WRITE_GAP_T: i64 = 26
 let main = () -> u8 => {
   let a = program_args()
   if a.len() < 2 {
-    println("smscheck ROM --frames N [--hold right,up] --ppm OUT")
+    println("smscheck ROM --frames N [--hold right,up] --ppm OUT [--work on]")
     return 2
   }
   var frames = 60
   var ppm = ""
   var pad: u8 = 0xFF
+  var work = false
   var i = 2
   while i + 1 < a.len() {
     if a[i] == "--frames" { frames = a[i + 1].parse_i64().unwrap_or(60) }
     if a[i] == "--ppm" { ppm = a[i + 1] }
     if a[i] == "--hold" { pad = held(a[i + 1]) }
+    if a[i] == "--work" { work = a[i + 1] == "on" }
     i += 2
   }
   let Some(rom) = read_bytes(a[1]) else {
@@ -54,6 +58,7 @@ let main = () -> u8 => {
     println("smscheck: ${bus.problem}")
     return 1
   }
+  if work { println("most work in a frame: ${bus.most_work} T-states of ${FRAME_T}") }
   if ppm != "" && !write_bytes(ppm, bus.frame_ppm()) {
     println("smscheck: cannot write ${ppm}")
     return 1
@@ -91,6 +96,9 @@ struct Sms {
   address: i64 = 0,
   code: i64 = 0,
   status: u8 = 0,
+  frame_started: i64 = 0,
+  frames_seen: i64 = 0,
+  most_work: i64 = 0,
   t: i64 = 0,
   last_write_t: i64 = -1000,
   problem: string = "",
@@ -124,6 +132,15 @@ impl Z80Bus for Sms {
     if low == 0x81 {
       let was = self.status
       self.status = 0
+      // A frame's work: from the read that sees the flag to the next read, its next wait.
+      if was & 0x80 != 0 {
+        self.frame_started = self.t
+        self.frames_seen += 1
+      } else if self.frame_started > 0 {
+        // The first frames set the game up, so are not its frames.
+        if self.frames_seen > 2 { self.most_work = self.most_work.max(self.t - self.frame_started) }
+        self.frame_started = 0
+      }
       self.control_second = false
       return was
     }
@@ -147,7 +164,8 @@ impl Z80Bus for Sms {
     self.fail("a write to port ${port.to_hex()}")
   }
   idle = (self, n) => { self.t += n }
-  interrupt_line = pure (self) => false
+  // The frame flag, while register 1 asks for it; reading the status clears both.
+  interrupt_line = pure (self) => self.status & 0x80 != 0 && self.registers[1] & 0x20 != 0
   acknowledge = (self) => {
     self.t += 6
     0xFF
