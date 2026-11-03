@@ -2,10 +2,11 @@
 // Z80 on a bus with the cartridge, RAM, the pad and the mode 4 VDP as far as a sprite showcase
 // goes. Not yet the console: no window, no sound, and no line interrupts.
 //
-//   build/smscheck ROM --frames N [--hold right,up,1,2] --ppm OUT [--work on] [--profile OUT]
+//   build/smscheck ROM --frames N [--hold right,up,1,2] --ppm OUT [--work on] [--profile OUT] [--psg OUT]
 //
 // `--profile OUT` writes the T-states each address took, one `address T-states` a line, to read
 // with `lyrac`'s map (LYRA_Z80_MAP) for where a frame goes.
+// `--psg OUT` writes each byte the PSG was given, a line each, in decimal.
 // `--work on` says the most T-states any frame's work took, from the status read that saw the
 // frame flag to the next status read: for a game that waits on the flag, not one interrupted.
 // Its last frame goes to OUT, 256×192, or the Game Gear's 160×144 window for a ROM named `.gg`.
@@ -25,7 +26,7 @@ const WRITE_GAP_T: i64 = 26
 let main = () -> u8 => {
   let a = program_args()
   if a.len() < 2 {
-    println("smscheck ROM --frames N [--hold right,up,1,2] --ppm OUT [--work on] [--profile OUT]")
+    println("smscheck ROM --frames N [--hold right,up,1,2] --ppm OUT [--work on] [--profile OUT] [--psg OUT]")
     return 2
   }
   var frames = 60
@@ -33,6 +34,7 @@ let main = () -> u8 => {
   var pad: u8 = 0xFF
   var work = false
   var profile = ""
+  var psg = ""
   var i = 2
   while i + 1 < a.len() {
     if a[i] == "--frames" { frames = a[i + 1].parse_i64().unwrap_or(60) }
@@ -40,6 +42,7 @@ let main = () -> u8 => {
     if a[i] == "--hold" { pad = held(a[i + 1]) }
     if a[i] == "--work" { work = a[i + 1] == "on" }
     if a[i] == "--profile" { profile = a[i + 1] }
+    if a[i] == "--psg" { psg = a[i + 1] }
     i += 2
   }
   let Some(rom) = read_bytes(a[1]) else {
@@ -54,6 +57,7 @@ let main = () -> u8 => {
   var spent: []i64 = if profile.len() > 0 { [0; 65536] } else { [] }
   while shown < frames && bus.problem == "" {
     let pc = i64(cpu.pc)
+    bus.at = pc
     let before = bus.t
     step(cpu, bus)
     if profile.len() > 0 { spent[pc] += bus.t - before }
@@ -65,6 +69,10 @@ let main = () -> u8 => {
   }
   if bus.problem != "" {
     println("smscheck: ${bus.problem}")
+    return 1
+  }
+  if psg.len() > 0 && !write_file(psg, bus.psg.join("\n")) {
+    println("smscheck: cannot write ${psg}")
     return 1
   }
   if profile.len() > 0 {
@@ -121,6 +129,10 @@ struct Sms {
   frames_seen: i64 = 0,
   most_work: i64 = 0,
   frames_timed: i64 = 0,
+  /// The address of the instruction running, for saying where a failure came from.
+  at: i64 = 0,
+  /// Every byte written to the PSG, in order, for `--psg`.
+  psg: []string = [],
   all_work: i64 = 0,
   t: i64 = 0,
   last_write_t: i64 = -1000,
@@ -180,7 +192,10 @@ impl Z80Bus for Sms {
   output = (self, port, value) => {
     self.t += 4
     let low = i64(port) & 0xC1
-    if low == 0x40 || low == 0x41 { return }
+    if low == 0x40 || low == 0x41 {
+      self.psg.push("${value}")
+      return
+    }
     if low == 0x80 {
       self.data_write(value)
       return
@@ -202,7 +217,7 @@ impl Z80Bus for Sms {
 
 impl Sms {
   let fail = (self: mut, why: string) -> void => {
-    if self.problem == "" { self.problem = why }
+    if self.problem == "" { self.problem = "${why}, by the instruction at ${self.at} (T-state ${self.t})" }
   }
 
   let memory = pure (self: ref, address: u16) -> u8 => {
