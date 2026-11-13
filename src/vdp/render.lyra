@@ -142,7 +142,7 @@ let active_lines = pure (vdp: ref Vdp) -> i64 =>
 
 /// The pixel the layers make, by priority (and, in shadow/highlight mode, intensity).
 let compose = pure (
-  vdp: Vdp,
+  vdp: ref Vdp,
   s: Dot,
   a: Dot,
   b: Dot,
@@ -412,7 +412,7 @@ let sprite_line = pure (vdp: ref Vdp, y: i64, width: i64) -> []Dot => {
 /// column by column (tile + column × height + row), flipped as its attributes say; at most
 /// `budget` of its pixels drawn, the line's remaining sprite pixels.
 let draw_sprite = (
-  vdp: Vdp,
+  vdp: ref Vdp,
   dots: mut []Dot,
   row: i64,
   left: i64,

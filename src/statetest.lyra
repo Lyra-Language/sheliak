@@ -87,7 +87,7 @@ let lockstep = (
   cpu: mut Cpu,
   bus: mut GenesisBus,
   other_cpu: Cpu,
-  other_bus: GenesisBus,
+  other_bus: ref GenesisBus,
   frames: i64
 ) -> i64 => {
   var cpu2 = other_cpu

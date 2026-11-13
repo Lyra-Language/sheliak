@@ -64,7 +64,7 @@ let main = () -> u8 => {
 }
 
 /// The VDP's state and the start of work RAM, as files.
-let dump = (bus: GenesisBus, out: string) -> u8 => {
+let dump = (bus: ref GenesisBus, out: string) -> u8 => {
   if !create_dir_all(out) { return 1 }
   let v = bus.vdp
   var cram: []u8 = []
