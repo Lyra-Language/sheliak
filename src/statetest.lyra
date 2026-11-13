@@ -8,6 +8,7 @@
 //                                       verdict; exits 1 on any
 
 import std.io.{ read_bytes }
+import std.collections.{ parse_strict }
 import m68k.{ Cpu }
 import genesis.{
   GenesisBus, genesis_bus, new_cpu, power_on, run_frame, new_mixer, mix_audio, save_state,
@@ -16,19 +17,25 @@ import genesis.{
 import vdp.{ shown_frame }
 
 let main = () -> u8 => {
-  let args = program_args()
-  var frames: i64 = 300
-  var first_rom = 1
-  if args.len() > 2 && args[1] == "--frames" {
-    frames = args[2].parse_i64().unwrap_or(300)
-    first_rom = 3
+  let usage = "usage: statetest [--frames N] ROM…"
+  let args = match parse_strict(program_args(), [], ["--frames"]) {
+    Ok(parsed) => parsed,
+    Err(why) => {
+      println("statetest: ${why}")
+      println(usage)
+      return 2
+    },
   }
-  if args.len() <= first_rom {
-    println("usage: statetest [--frames N] ROM…")
+  let frames = args
+    .value("--frames")
+    .map((n) => n.parse_i64().unwrap_or(300))
+    .unwrap_or(300)
+  if args.positional.len() == 0 {
+    println(usage)
     return 2
   }
   var failed = 0
-  for path in args.slice(first_rom, args.len()) {
+  for path in args.positional {
     let Some(rom) = read_bytes(path) else {
       println("${path}: cannot read")
       failed += 1

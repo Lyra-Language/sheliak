@@ -16,6 +16,7 @@
 // and exits 1 — what a real console would show as garbage or nothing.
 
 import std.io.{ read_bytes, write_bytes, write_file }
+import std.collections.{ parse_strict }
 import z80.{ Z80Cpu, Z80Bus, new_z80, step }
 
 /// 228 T-states a line, 262 lines a frame, NTSC; the V-blank flag is raised at line 192.
@@ -25,32 +26,40 @@ const ACTIVE_LINES: i64 = 192
 const WRITE_GAP_T: i64 = 26
 
 let main = () -> u8 => {
-  let a = program_args()
-  if a.len() < 2 {
-    println("smscheck ROM --frames N [--hold right,up,1,2] --ppm OUT [--work on] [--profile OUT] [--psg OUT]")
+  let usage = "smscheck ROM --frames N [--hold right,up,1,2] --ppm OUT [--work on] [--profile OUT] [--psg OUT]"
+  // The ROM anywhere among the flags, each declared: one misspelt or left without its value
+  // is refused, where it was ignored and the check ran without it.
+  let args = match parse_strict(
+    program_args(),
+    [],
+    ["--frames", "--ppm", "--hold", "--work", "--profile", "--psg"]
+  ) {
+    Ok(parsed) => parsed,
+    Err(why) => {
+      println("smscheck: ${why}")
+      println(usage)
+      return 2
+    },
+  }
+  if args.positional.len() != 1 {
+    println(usage)
     return 2
   }
-  var frames = 60
-  var ppm = ""
-  var pad: u8 = 0xFF
-  var work = false
-  var profile = ""
-  var psg = ""
-  var i = 2
-  while i + 1 < a.len() {
-    if a[i] == "--frames" { frames = a[i + 1].parse_i64().unwrap_or(60) }
-    if a[i] == "--ppm" { ppm = a[i + 1] }
-    if a[i] == "--hold" { pad = held(a[i + 1]) }
-    if a[i] == "--work" { work = a[i + 1] == "on" }
-    if a[i] == "--profile" { profile = a[i + 1] }
-    if a[i] == "--psg" { psg = a[i + 1] }
-    i += 2
-  }
-  let Some(rom) = read_bytes(a[1]) else {
-    println("smscheck: cannot read ${a[1]}")
+  let path = args.positional[0]
+  let frames = args
+    .value("--frames")
+    .map((n) => n.parse_i64().unwrap_or(60))
+    .unwrap_or(60)
+  let ppm = args.value("--ppm").unwrap_or("")
+  let pad = args.value("--hold").map((buttons) => held(buttons)).unwrap_or(0xFF)
+  let work = args.value("--work") == Some("on")
+  let profile = args.value("--profile").unwrap_or("")
+  let psg = args.value("--psg").unwrap_or("")
+  let Some(rom) = read_bytes(path) else {
+    println("smscheck: cannot read ${path}")
     return 1
   }
-  var bus = Sms { rom: rom, gg: a[1].ends_with(".gg"), pad: pad }
+  var bus = Sms { rom: rom, gg: path.ends_with(".gg"), pad: pad }
   var cpu = new_z80()
   var next_blank = ACTIVE_LINES * LINE_T
   var shown = 0
