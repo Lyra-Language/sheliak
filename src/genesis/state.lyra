@@ -64,7 +64,7 @@ pub let load_state = pure (
 const STATE_MAGIC: [8]u8 = #[0x53, 0x48, 0x4C, 0x4B, 0x53, 0x54, 0x41, 0x54]
 
 /// The format's version: one more whenever a chip's state gains, loses or reorders a field.
-const STATE_VERSION: u16 = 1
+const STATE_VERSION: u16 = 2
 
 let save_bus = (w: mut Writer, bus: ref GenesisBus) -> void => {
   save_cartridge(w, bus.cart)
@@ -75,6 +75,8 @@ let save_bus = (w: mut Writer, bus: ref GenesisBus) -> void => {
   put_u16(w, bus.open_bus)
   for port in bus.ports { save_port(w, port) }
   for v in bus.pads { put_u16(w, v) }
+  put_i64(w, bus.status_reads)
+  put_i64(w, bus.writes)
   save_z80(w, bus.z80)
   save_z80_side(w, bus.sound)
 }
@@ -88,6 +90,8 @@ let load_bus = (r: mut Reader, bus: mut GenesisBus) -> void => {
   bus.open_bus = get_u16(r)
   for i in 0..<3 { load_port(r, bus.ports[i]) }
   for i in 0..<2 { bus.pads[i] = get_u16(r) }
+  bus.status_reads = get_i64(r)
+  bus.writes = get_i64(r)
   load_z80(r, bus.z80)
   load_z80_side(r, bus.sound)
 }

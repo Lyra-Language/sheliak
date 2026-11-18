@@ -60,6 +60,11 @@ pub struct GenesisBus {
   /// players' do; [set_pads] changes that.
   ports: [3]Port,
   pads: [2]u16,
+  /// Reads of the VDP's status register, and writes by the 68000 anywhere, since power-on:
+  /// how a profiler tells the 68000 waiting for the vertical blank from working
+  /// (`measure.lyra`).
+  status_reads: i64,
+  writes: i64,
   /// The Z80, and what it is wired to — run on at every 68000 bus cycle ([run_z80]).
   z80: Z80Cpu,
   sound: Z80Side,
@@ -86,6 +91,8 @@ pub let genesis_bus = pure (rom: []u8) -> GenesisBus => GenesisBus {
   open_bus: 0,
   ports: #[new_port(true), new_port(true), new_port(false)],
   pads: #[0, 0],
+  status_reads: 0,
+  writes: 0,
   z80: new_z80(),
   sound: new_z80_side(rom),
 }
@@ -128,6 +135,7 @@ impl Bus for GenesisBus {
   write_word = (self, addr, fc, value) => {
     let a = addr & 0xFFFFFF
     self.tick(4)
+    self.writes += 1
     if a >= 0xE00000 {
       let at = i64(a & 0xFFFE)
       self.ram[at] = u8(value >> 8)
@@ -151,6 +159,7 @@ impl Bus for GenesisBus {
     // A byte written is on both halves of the data bus.
     let word = (u16(value) << 8) | u16(value)
     self.tick(4)
+    self.writes += 1
     if a >= 0xE00000 {
       self.ram[i64(a & 0xFFFF)] = value
     } else if a < 0x400000 {
@@ -272,7 +281,10 @@ impl GenesisBus {
     run_beam(self.vdp, self.clock)
     let word = match (a >> 2) & 7 {
       0 => read_data(self.vdp, self.clock),
-      1 => read_status(self.vdp, self.open_bus),
+      1 => {
+        self.status_reads += 1
+        read_status(self.vdp, self.open_bus)
+      },
       _ => hv_counter(self.vdp),
     }
     self.held_by_vdp()

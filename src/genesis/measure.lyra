@@ -1,0 +1,163 @@
+module genesis
+//! A frame measured as it runs, for a profiler: how much of it the 68000 worked, how many
+//! bytes DMA moved, and how crowded the sprites were — and the last frames' measures as the
+//! text `--stats` writes (Vega's Profiler panel reads it while the game plays).
+//!
+//! **Working is not waiting.** A game waits for the vertical blank in a loop that reads
+//! something until it changes: the VDP's status register (`std.genesis.vdp.wait_vblank`), or
+//! a count in RAM its vertical-blank handler bumps (Vega's games). A turn of such a loop makes
+//! no progress — the 68000 comes back to an instruction a few clocks later with every
+//! register as it was and nothing written — and the clocks between are waited; so are two
+//! status reads by one instruction a few clocks apart (a status bit like H-blank's can change
+//! a register between turns), and clocks stopped by STOP. All else is worked — a
+//! vertical-blank handler included, which a wait's last turn runs inside but which writes,
+//! and is far longer than a turn ([POLL_GAP]). A frame worked whole is one the game did not
+//! finish within: it shows a frame late.
+//!
+//! **The file**, rewritten whole every [STATS_EVERY] frames, so a reader sees at most half a
+//! second's lag: `sheliak stats 1`, a line `limits CLOCKS SPRITES` (master clocks a frame,
+//! sprites the VDP draws a line), a line a frame — `WORKED DMA MOST CROWDED`, oldest first,
+//! the last [STATS_KEPT] — and `end N`, the frames run; a file without its `end` line is
+//! one being written, for the reader to pass over.
+
+import m68k.{ Cpu, step }
+
+/// One frame's measure.
+pub struct FrameCost {
+  /// Master clocks the frame took, and those the 68000 worked.
+  clocks: i64,
+  worked: i64,
+  /// Bytes DMA moved.
+  dma: i64,
+  /// The most sprites wanting one line, and the lines with more than the VDP draws.
+  most_sprites: i64,
+  crowded: i64,
+}
+
+/// What a measure carries from frame to frame, as a wait's turns run across a frame's end:
+/// the last status read (the instruction and the clock); the last [RECENT] instructions
+/// begun (where, when, the writes so far, the registers' signature), the next at `next`;
+/// and the frames measured.
+pub struct Meter {
+  poll_pc: u32,
+  poll_clock: i64,
+  recent_pc: [8]u32,
+  recent_clock: [8]i64,
+  recent_writes: [8]i64,
+  recent_regs: [8]u64,
+  next: i64,
+  frames: []FrameCost,
+  run: i64,
+}
+
+/// A meter with nothing measured.
+pub let new_meter = pure () -> Meter => Meter {
+  poll_pc: 0xFFFFFFFF,
+  poll_clock: 0,
+  recent_pc: #[0xFFFFFFFF; 8],
+  recent_clock: #[0; 8],
+  recent_writes: #[0; 8],
+  recent_regs: #[0; 8],
+  next: 0,
+  frames: [],
+  run: 0,
+}
+
+/// The instructions a turn of a wait loop may be: its last [RECENT] are looked back over.
+pub const RECENT: i64 = 8
+
+/// The longest turn still counted as waiting — an instruction come back to, or its status
+/// read repeated: a wait loop's is some 30 of the 68000's cycles (210 master clocks).
+pub const POLL_GAP: i64 = 1000
+
+/// Frames between two writes of the file, and the frames it holds.
+pub const STATS_EVERY: i64 = 30
+pub const STATS_KEPT: i64 = 600
+
+/// [run_frame], measured: the frame's cost kept in `meter` (the last [STATS_KEPT]).
+pub let measured_frame = (
+  cpu: mut Cpu,
+  bus: mut GenesisBus,
+  meter: mut Meter
+) -> FrameCost => {
+  let target = bus.vdp.frames + 1
+  let start = bus.clock
+  bus.vdp.counting = true
+  bus.vdp.dma_bytes = 0
+  bus.vdp.most_sprites = 0
+  bus.vdp.crowded_lines = 0
+  var waited: i64 = 0
+  while bus.vdp.frames < target {
+    let pc = cpu.pc
+    let before = bus.clock
+    if cpu.stopped {
+      step(cpu, bus)
+      waited += bus.clock - before
+      continue
+    }
+    let regs = signature(cpu)
+    var turned = false
+    for k in 0..<RECENT {
+      if meter.recent_pc[k] == pc && meter.recent_regs[k] == regs && meter.recent_writes[k] == bus.writes {
+        let gap = before - meter.recent_clock[k]
+        if gap <= POLL_GAP {
+          waited += gap.min(before - start)
+          turned = true
+        }
+      }
+    }
+    if turned {
+      // A turn counted once: the instructions before it are forgotten.
+      for k in 0..<RECENT { meter.recent_pc[k] = 0xFFFFFFFF }
+    }
+    let at = meter.next
+    meter.recent_pc[at] = pc
+    meter.recent_clock[at] = before
+    meter.recent_writes[at] = bus.writes
+    meter.recent_regs[at] = regs
+    meter.next = (at + 1) % RECENT
+    let reads = bus.status_reads
+    step(cpu, bus)
+    if bus.status_reads != reads {
+      let gap = bus.clock - meter.poll_clock
+      if !turned && pc == meter.poll_pc && gap <= POLL_GAP { waited += gap.min(bus.clock - start) }
+      meter.poll_pc = pc
+      meter.poll_clock = bus.clock
+    }
+  }
+  let clocks = bus.clock - start
+  let cost = FrameCost {
+    clocks: clocks,
+    worked: (clocks - waited).max(0),
+    dma: bus.vdp.dma_bytes,
+    most_sprites: bus.vdp.most_sprites,
+    crowded: bus.vdp.crowded_lines,
+  }
+  meter.frames.push(cost)
+  if meter.frames.len() > STATS_KEPT {
+    meter.frames = meter.frames.slice(meter.frames.len() - STATS_KEPT, meter.frames.len())
+  }
+  meter.run += 1
+  cost
+}
+
+/// The 68000's registers and status word, as one number: equal for a turn that changed
+/// none of them.
+let signature = pure (cpu: ref Cpu) -> u64 => {
+  var h: u64 = u64(cpu.sr)
+  for v in cpu.d { h = h.wrapping_mul(1000003).wrapping_add(u64(v)) }
+  for v in cpu.a { h = h.wrapping_mul(1000003).wrapping_add(u64(v)) }
+  h
+}
+
+/// The meter's frames as the file `--stats` writes, for a VDP drawing `sprites` a line.
+pub let stats_text = pure (meter: ref Meter, sprites: i64) -> string => {
+  let clocks = if meter.frames.len() > 0 { meter.frames[meter.frames.len() - 1].clocks } else { FRAME_CLOCKS }
+  var lines = ["sheliak stats 1", "limits ${clocks} ${sprites}"]
+  for f in meter.frames { lines.push("${f.worked} ${f.dma} ${f.most_sprites} ${f.crowded}") }
+  lines.push("end ${meter.run}")
+  lines.join("\n") ++ "\n"
+}
+
+/// Master clocks in an NTSC frame: 262 lines of 3,420.
+pub const FRAME_CLOCKS: i64 = 896040

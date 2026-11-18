@@ -4,7 +4,7 @@
 //   build/sheliak [ROM [PART …]] [--pads 3]            play (no ROM: macOS asks for one)
 //   build/sheliak ROM --frames N [--screenshot FILE] [--ppm FILE] [--wav FILE] [--save]
 //                     [--display pixels|scanlines|crt] [--fit integer|tv|square]
-//                     [--hold up,right,a,…] [--hold2 …]
+//                     [--hold up,right,a,…] [--hold2 …] [--stats FILE]
 //                                                      run N frames and quit, saving the
 //                                                      last: as SDL drew the window (BMP),
 //                                                      and as the texels sent to it (PPM,
@@ -14,6 +14,12 @@
 //                                                      SDL_VIDEODRIVER=dummy; --hold
 //                                                      keeps pad 1's buttons named
 //                                                      held throughout, --hold2 pad 2's
+//   build/sheliak ROM --stats FILE                     play, and keep what each frame
+//                                                      cost in FILE (also headless):
+//                                                      the 68000's work, DMA's bytes,
+//                                                      sprites a line — rewritten every
+//                                                      half second, for Vega's Profiler
+//                                                      (genesis/measure.lyra)
 //
 // The pads are 6-button, as most players' are; `--pads 3` makes them the original 3-button
 // pad, which a few early games need (they misread a 6-button one).
@@ -48,7 +54,7 @@
 // another ROM — BlastEm's `save.sram` format, a byte per byte of RAM. Headless runs read and
 // write it only when given `--save`.
 
-import std.io.{ read_bytes, write_bytes }
+import std.io.{ read_bytes, write_bytes, write_file }
 import std.collections.{ parse_strict }
 import std.zip.{ is_zip }
 import std.sevenzip.{ is_7z }
@@ -74,11 +80,12 @@ import bindings.sdl3.{
 import m68k.{ Cpu }
 import genesis.{
   GenesisBus, genesis_bus, new_cpu, power_on, run_frame, new_mixer, mix_audio,
+  Meter, new_meter, measured_frame, stats_text, STATS_EVERY,
   rom_image, roms_in_zip, roms_in_7z, roms_in_rar, save_state, load_state, is_split_part, next_part_path, save_bytes, load_save, set_pads,
   PAD_UP, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_A, PAD_B, PAD_C, PAD_START,
   PAD_X, PAD_Y, PAD_Z, PAD_MODE,
 }
-import vdp.{ Frame, shown_frame }
+import vdp.{ Frame, shown_frame, sprites_a_line }
 import front.{
   Prefs, default_prefs, prefs_path, load_prefs, save_prefs, with_recent, without_recent,
   look_uniforms, DISPLAY_SHADER,
@@ -126,6 +133,7 @@ let main = () -> u8 => {
       "--save-state",
       "--load-state",
       "--wav",
+      "--stats",
     ]
   ) {
     Ok(parsed) => parsed,
@@ -142,6 +150,7 @@ let main = () -> u8 => {
   let screenshot = args.value("--screenshot").unwrap_or("")
   let ppm = args.value("--ppm").unwrap_or("")
   let wav = args.value("--wav").unwrap_or("")
+  let stats = args.value("--stats").unwrap_or("")
   let headless_save = args.has("--save")
   let state_out = args.value("--save-state").unwrap_or("")
   let state_in = args.value("--load-state").unwrap_or("")
@@ -216,9 +225,9 @@ let main = () -> u8 => {
     if display.look != LOOK_PIXELS && effect.is_none() {
       println("sheliak: no GPU shader here, so the picture is sharp pixels")
     }
-    run_headless(paths, pads_arg.unwrap_or(true), renderer, display, frames_only, screenshot, ppm, wav, headless_save, held, state_in, state_out)
+    run_headless(paths, pads_arg.unwrap_or(true), renderer, display, frames_only, screenshot, ppm, wav, headless_save, held, state_in, state_out, stats)
   } else {
-    run_window(paths, pads_arg, look_arg, fit, prefs, prefs_file, renderer, window, effect)
+    run_window(paths, pads_arg, look_arg, fit, prefs, prefs_file, renderer, window, effect, stats)
   }
   if let Some(e) = effect { destroy_effect(e) }
   destroy_renderer(renderer)
@@ -227,7 +236,7 @@ let main = () -> u8 => {
   status
 }
 
-const USAGE: string = "usage: sheliak ROM [PART …] [--pads 3] [--display pixels|scanlines|crt] [--fit integer|tv|square] [--frames N] [--screenshot FILE] [--ppm FILE] [--wav FILE] [--save] [--hold BUTTONS] [--hold2 BUTTONS]"
+const USAGE: string = "usage: sheliak ROM [PART …] [--pads 3] [--display pixels|scanlines|crt] [--fit integer|tv|square] [--frames N] [--screenshot FILE] [--ppm FILE] [--wav FILE] [--save] [--hold BUTTONS] [--hold2 BUTTONS] [--stats FILE]"
 
 /// How frames are drawn: through the display shader, where there is one, in a look; and
 /// across the logical screen of a fit.
@@ -335,7 +344,8 @@ let run_headless = (
   saving: bool,
   held: [2]u16,
   state_in: string,
-  state_out: string
+  state_out: string,
+  stats: string
 ) -> u8 => {
   let rom = match load_rom(paths) {
     Ok(image) => image,
@@ -364,7 +374,7 @@ let run_headless = (
   }
   bus.pads[0] = held[0]
   bus.pads[1] = held[1]
-  let status = run_frames(cpu, bus, renderer, display, frames, screenshot, ppm, wav)
+  let status = run_frames(cpu, bus, renderer, display, frames, screenshot, ppm, wav, stats)
   if state_out != "" && !write_bytes(state_out, save_state(cpu, bus)) {
     println("sheliak: cannot write ${state_out}")
     return 1
@@ -381,16 +391,27 @@ let run_frames = (
   frames: i64,
   screenshot: string,
   ppm: string,
-  wav: string
+  wav: string,
+  stats: string
 ) -> u8 => {
   var mixer = new_mixer(AUDIO_RATE)
   var sound: []f32 = []
+  var meter = new_meter()
   for _ in 0..<frames {
-    run_frame(cpu, bus)
+    if stats == "" {
+      run_frame(cpu, bus)
+    } else {
+      let _ = measured_frame(cpu, bus, meter)
+      if meter.run % STATS_EVERY == 0 { keep_stats(meter, bus, stats) }
+    }
     let samples = mix_audio(bus, mixer)
     if wav != "" {
       for v in samples { sound.push(v) }
     }
+  }
+  if stats != "" && !write_file(stats, stats_text(meter, sprites_a_line(bus.vdp))) {
+    println("sheliak: cannot write ${stats}")
+    return 1
   }
   if wav != "" && !write_bytes(wav, wav_file(sound)) {
     println("sheliak: cannot write ${wav}")
@@ -411,6 +432,14 @@ let run_frames = (
     return 1
   }
   0
+}
+
+/// The frames `meter` measured written to `path` as `--stats` keeps them; a file that
+/// cannot be written is said once a write, and the game goes on.
+let keep_stats = (meter: ref Meter, bus: ref GenesisBus, path: string) -> void => {
+  if !write_file(path, stats_text(meter, sprites_a_line(bus.vdp))) {
+    println("sheliak: cannot write ${path}")
+  }
 }
 
 /// The screen's texels as a binary PPM, red, green, blue a pixel.
@@ -436,7 +465,8 @@ let run_window = (
   prefs_file: Maybe<string>,
   renderer: Renderer,
   window: Window,
-  effect: Maybe<Effect>
+  effect: Maybe<Effect>,
+  stats: string
 ) -> u8 => {
   let native = install_menus(prefs.volume, prefs.recent)
   var rom_paths = paths
@@ -474,6 +504,7 @@ let run_window = (
     listen_column: -1,
     listen_row: -1,
     listen_previous: 0,
+    stats_path: stats,
   }
   if native { build_settings(session) }
   apply_fit(renderer, session.display.fit)
@@ -512,6 +543,8 @@ struct Session {
   listen_column: i64,
   listen_row: i64,
   listen_previous: i64,
+  /// Where each frame's cost is kept (`--stats`), or "" for nowhere.
+  stats_path: string,
 }
 
 /// Play until the window closes or ⌘Q: frames run at the console's rate — however many
@@ -526,6 +559,7 @@ let play = (
   window: Window
 ) -> void => {
   var frames_since_save: i64 = 0
+  var meter = new_meter()
   var screen = new_screen()
   var mixer = new_mixer(AUDIO_RATE)
   // No audio device (or none SDL can open) is no sound, not no emulator.
@@ -592,6 +626,7 @@ let play = (
             cpu = new_cpu
             bus = new_bus
             frames_since_save = 0
+            meter = new_meter()
           }
         }
       } else if tag == MENU_SETTINGS {
@@ -645,7 +680,12 @@ let play = (
     if owed > 4 * FRAME_NS || session.paused { owed = FRAME_NS }
     if !session.paused {
       while owed >= FRAME_NS {
-        run_frame(cpu, bus)
+        if session.stats_path == "" {
+          run_frame(cpu, bus)
+        } else {
+          let _ = measured_frame(cpu, bus, meter)
+          if meter.run % STATS_EVERY == 0 { keep_stats(meter, bus, session.stats_path) }
+        }
         owed -= FRAME_NS
         frames_since_save += 1
       }

@@ -54,6 +54,10 @@ pub let save_vdp = (w: mut Writer, vdp: ref Vdp) -> void => {
   put_i64(w, vdp.shown.height)
   put_u16s(w, vdp.shown.pixels)
   put_i64(w, vdp.frames)
+  put_bool(w, vdp.counting)
+  put_i64(w, vdp.dma_bytes)
+  put_i64(w, vdp.most_sprites)
+  put_i64(w, vdp.crowded_lines)
 }
 
 pub let load_vdp = (r: mut Reader, vdp: mut Vdp) -> void => {
@@ -99,6 +103,10 @@ pub let load_vdp = (r: mut Reader, vdp: mut Vdp) -> void => {
   vdp.shown.height = get_i64(r)
   vdp.shown.pixels = get_u16s(r, -1)
   vdp.frames = get_i64(r)
+  vdp.counting = get_bool(r)
+  vdp.dma_bytes = get_i64(r)
+  vdp.most_sprites = get_i64(r)
+  vdp.crowded_lines = get_i64(r)
 }
 
 let save_fifo_entry = (w: mut Writer, entry: ref FifoEntry) -> void => {

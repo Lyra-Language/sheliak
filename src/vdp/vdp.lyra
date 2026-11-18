@@ -114,6 +114,15 @@ pub struct Vdp {
   /// The last frame completed, and how many have been.
   shown: Frame,
   frames: i64,
+  /// What a profiler counts while [counting] is on, which the front end reads and zeroes a
+  /// frame at a time: the bytes DMA moved (a word a unit of a 68000 transfer, a byte of a
+  /// fill or a copy), the most sprites that wanted one line, and the lines whose sprites
+  /// were more than the VDP draws (20 a line in 40-cell mode, 16 in 32; or more pixels of
+  /// them than the line is wide).
+  counting: bool,
+  dma_bytes: i64,
+  most_sprites: i64,
+  crowded_lines: i64,
 }
 
 /// A VDP at power-on: memories and registers zero, the FIFO empty, the beam at the top of an
@@ -159,6 +168,10 @@ pub let new_vdp = pure () -> Vdp => Vdp {
   drawing_width: 320,
   shown: Frame { width: 320, height: 224, pixels: [0; 320 * 224] },
   frames: 0,
+  counting: false,
+  dma_bytes: 0,
+  most_sprites: 0,
+  crowded_lines: 0,
 }
 
 // ── The ports ────────────────────────────────────────────────────────────────
@@ -323,6 +336,7 @@ pub let dma_68k_done = (vdp: mut Vdp) -> void => { vdp.resume_at = vdp.clock + s
 /// the length counts down; at zero the DMA ends, and CD5 and CD4 with it. A length of zero
 /// counts 65,536.
 let advance_dma = (vdp: mut Vdp) -> void => {
+  if vdp.counting { vdp.dma_bytes += if transfer_mode(vdp) { 2 } else { 1 } }
   let next = ((u16(vdp.regs[22]) << 8) | u16(vdp.regs[21])).wrapping_add(1)
   vdp.regs[21] = u8(next & 0xFF)
   vdp.regs[22] = u8(next >> 8)

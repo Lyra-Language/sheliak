@@ -66,7 +66,10 @@ let render_slot = (vdp: mut Vdp) -> void => {
     if s == (if wide { 163 } else { 131 }) {
       let next = i64((vdp.vcounter + 1) & 0x1FF)
       let width = screen_width(vdp)
-      if next < active_lines(vdp) { vdp.sprites_next = sprite_line(vdp, next, width) }
+      if next < active_lines(vdp) {
+        vdp.sprites_next = sprite_line(vdp, next, width)
+        if vdp.counting { count_sprites(vdp, next, width) }
+      }
     } else if s == 244 {
       let y = i64(vdp.vcounter)
       vdp.line_hscroll[0] = horizontal_scroll(vdp, y, 0)
@@ -350,6 +353,9 @@ let window_base = pure (vdp: ref Vdp) -> i64 => {
 }
 
 /// 40-cell mode: register 12's RS0 and RS1 (bits 0 and 7).
+/// The sprites the VDP draws on a line: 20 in 40-cell mode, 16 in 32.
+pub let sprites_a_line = pure (vdp: ref Vdp) -> i64 => if h40(vdp) { 20 } else { 16 }
+
 let h40 = pure (vdp: ref Vdp) -> bool => (vdp.regs[12] & 0x81) != 0
 
 /// The VRAM word at an even byte address, wrapping at 64 KB.
@@ -406,6 +412,32 @@ let sprite_line = pure (vdp: ref Vdp, y: i64, width: i64) -> []Dot => {
     if link == 0 || link >= max_list { break }
   }
   dots
+}
+
+/// A profiler's count of line `y`'s sprites: every one in the list that wants the line, past
+/// the VDP's limits too — the most a line, and the line counted crowded if they are more than
+/// the VDP draws, or wider than the line.
+let count_sprites = (vdp: mut Vdp, y: i64, width: i64) -> void => {
+  let wide = h40(vdp)
+  let max_list = if wide { 80 } else { 64 }
+  let max_line = if wide { 20 } else { 16 }
+  let base = i64(vdp.regs[5] & (if wide { 0x7E } else { 0x7F })) << 9
+  var link = 0
+  var found = 0
+  var pixels = 0
+  for _ in 0..<max_list {
+    let at = base + link * 8
+    let top = i64(vram_entry(vdp, at) & 0x1FF) - 128
+    let size = vdp.vram[(at + 2) & 0xFFFF]
+    if y >= top && y < top + (i64(size & 3) + 1) * 8 {
+      found += 1
+      pixels += (i64((size >> 2) & 3) + 1) * 8
+    }
+    link = i64(vdp.vram[(at + 3) & 0xFFFF] & 0x7F)
+    if link == 0 || link >= max_list { break }
+  }
+  vdp.most_sprites = vdp.most_sprites.max(found)
+  if found > max_line || pixels > width { vdp.crowded_lines += 1 }
 }
 
 /// One sprite's row `row` (from its top) drawn at screen x `left`, its cells arranged

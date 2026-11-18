@@ -31,6 +31,11 @@ SDL_VIDEODRIVER=dummy build/sheliak ROM --frames 600 --screenshot out.bmp   # he
                             #    --display crt / --fit tv, without the dummy driver: the
                             #    shader's or the fit's frame; --load-state FILE before,
                             #    --save-state FILE after)
+build/sheliak ROM --stats FILE   # play (or headless) keeping each frame's cost: the 68000's
+                            #    work (not waiting for the vertical blank), DMA's bytes,
+                            #    the most sprites a line and the lines past the limit —
+                            #    the last 600 frames, rewritten every 30; Vega's Profiler
+                            #    panel reads it (genesis/measure.lyra has the format)
 tests/fetch.sh              # SingleStepTests 68000 suite -> build/deps/680x0 (~200 MB, once)
 tests/cpu.sh                # every 68000 test file (~1M tests, ~17 s)
 tests/cpu.sh MOVE.l DIVS    # just these
@@ -321,6 +326,10 @@ src/vdp/             the VDP (module vdp):
   state.lyra         the VDP's part of a save state
 src/genesis/         the machine (module genesis):
   machine.lyra       power on, and run a frame
+  measure.lyra       a frame measured (`--stats`): waiting told from working — an instruction
+                     reached again a few clocks on with every register the same and nothing
+                     written, a status read repeated by one instruction, STOP — DMA's bytes
+                     and the sprites a line (the VDP's counters, `counting`), and the file
   cartridge.lyra     the ROM file read (raw, SMD, split SMD, MGD, zip, 7z, RAR 5); the ROM
                      (mirrored), save RAM, the Sega SRAM and SSF2 mappers, the header they
                      are recognised by
