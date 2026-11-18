@@ -54,7 +54,7 @@
 // another ROM — BlastEm's `save.sram` format, a byte per byte of RAM. Headless runs read and
 // write it only when given `--save`.
 
-import std.io.{ read_bytes, write_bytes, write_file }
+import std.io.{ read_bytes, write_bytes, write_file, read_file }
 import std.collections.{ parse_strict }
 import std.zip.{ is_zip }
 import std.sevenzip.{ is_7z }
@@ -80,7 +80,7 @@ import bindings.sdl3.{
 import m68k.{ Cpu }
 import genesis.{
   GenesisBus, genesis_bus, new_cpu, power_on, run_frame, new_mixer, mix_audio,
-  Meter, new_meter, measured_frame, stats_text, STATS_EVERY,
+  Meter, new_meter, measured_frame, stats_text, STATS_EVERY, Symbols, read_symbols, meter_with,
   rom_image, roms_in_zip, roms_in_7z, roms_in_rar, save_state, load_state, is_split_part, next_part_path, save_bytes, load_save, set_pads,
   PAD_UP, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_A, PAD_B, PAD_C, PAD_START,
   PAD_X, PAD_Y, PAD_Z, PAD_MODE,
@@ -374,7 +374,7 @@ let run_headless = (
   }
   bus.pads[0] = held[0]
   bus.pads[1] = held[1]
-  let status = run_frames(cpu, bus, renderer, display, frames, screenshot, ppm, wav, stats)
+  let status = run_frames(cpu, bus, renderer, display, frames, screenshot, ppm, wav, stats, symbols_for(paths[0]))
   if state_out != "" && !write_bytes(state_out, save_state(cpu, bus)) {
     println("sheliak: cannot write ${state_out}")
     return 1
@@ -392,11 +392,12 @@ let run_frames = (
   screenshot: string,
   ppm: string,
   wav: string,
-  stats: string
+  stats: string,
+  symbols: Symbols
 ) -> u8 => {
   var mixer = new_mixer(AUDIO_RATE)
   var sound: []f32 = []
-  var meter = new_meter()
+  var meter = meter_with(symbols)
   for _ in 0..<frames {
     if stats == "" {
       run_frame(cpu, bus)
@@ -432,6 +433,13 @@ let run_frames = (
     return 1
   }
   0
+}
+
+/// The functions of the ROM at `rom`, from the symbol map `lyrac build` writes beside it
+/// (`<rom>.sym`), for `--stats` to charge each one's time to; none without one.
+let symbols_for = (rom: string) -> Symbols => match read_file("${rom}.sym") {
+  Some(text) => read_symbols(text),
+  None => Symbols {},
 }
 
 /// The frames `meter` measured written to `path` as `--stats` keeps them; a file that
@@ -559,7 +567,7 @@ let play = (
   window: Window
 ) -> void => {
   var frames_since_save: i64 = 0
-  var meter = new_meter()
+  var meter = if session.stats_path == "" { new_meter() } else { meter_with(symbols_for(session.rom_path)) }
   var screen = new_screen()
   var mixer = new_mixer(AUDIO_RATE)
   // No audio device (or none SDL can open) is no sound, not no emulator.
@@ -626,7 +634,7 @@ let play = (
             cpu = new_cpu
             bus = new_bus
             frames_since_save = 0
-            meter = new_meter()
+            meter = if session.stats_path == "" { new_meter() } else { meter_with(symbols_for(path)) }
           }
         }
       } else if tag == MENU_SETTINGS {

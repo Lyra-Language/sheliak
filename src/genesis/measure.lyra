@@ -15,10 +15,17 @@ module genesis
 //! finish within: it shows a frame late.
 //!
 //! **The file**, rewritten whole every [STATS_EVERY] frames, so a reader sees at most half a
-//! second's lag: `sheliak stats 1`, a line `limits CLOCKS SPRITES` (master clocks a frame,
+//! second's lag: `sheliak stats 2`, a line `limits CLOCKS SPRITES` (master clocks a frame,
 //! sprites the VDP draws a line), a line a frame — `WORKED DMA MOST CROWDED`, oldest first,
-//! the last [STATS_KEPT] — and `end N`, the frames run; a file without its `end` line is
+//! the last [STATS_KEPT] — then, where the ROM's symbol map was found, a line a function,
+//! `function CLOCKS NAME`, the clocks it worked over those frames, the busiest first, the
+//! first [FUNCTIONS_SHOWN] — and `end N`, the frames run; a file without its `end` line is
 //! one being written, for the reader to pass over.
+//!
+//! **By function**: each instruction's clocks are charged to the function holding its address
+//! ([function_of], by the map `lyrac build` writes beside a ROM, `<rom>.sym`), and a wait
+//! loop's turns taken back off it — so a function's clocks are what it worked, an interrupt
+//! handler's its own, and the waiting no one's.
 
 import m68k.{ Cpu, step }
 
@@ -48,6 +55,21 @@ pub struct Meter {
   next: i64,
   frames: []FrameCost,
   run: i64,
+  /// The ROM's functions, when its symbol map was found ([read_symbols]); the clocks each
+  /// worked in the frame under way (one more, last, for those outside any); and each kept
+  /// frame's, as (function, clocks) pairs, aligned with `frames`.
+  symbols: Symbols = Symbols {},
+  charging: []i64 = [],
+  charges: [][](i64, i64) = [],
+}
+
+/// A ROM's functions by address, as `lyrac build` writes them beside it (`<rom>.sym`: a line
+/// a function, `ADDRESS SIZE NAME`, the address in hex): where each starts and ends, and its
+/// name.
+pub struct Symbols {
+  starts: []u32 = [],
+  ends: []u32 = [],
+  names: []string = [],
 }
 
 /// A meter with nothing measured.
@@ -65,6 +87,53 @@ pub let new_meter = pure () -> Meter => Meter {
 
 /// The instructions a turn of a wait loop may be: its last [RECENT] are looked back over.
 pub const RECENT: i64 = 8
+
+/// A symbol map's text read: its functions by address, a line not one passed over.
+pub let read_symbols = pure (text: string) -> Symbols => {
+  var out = Symbols {}
+  for line in text.lines() {
+    let fields = line.split(" ")
+    if fields.len() < 3 { continue }
+    let Some(start) = hex_number(fields[0]) else { continue }
+    let Some(size) = fields[1].parse_i64() else { continue }
+    out.starts.push(start)
+    out.ends.push(start + u32(size.max(0)))
+    out.names.push(fields.slice(2, fields.len()).join(" "))
+  }
+  out
+}
+
+/// The meter with `symbols` to charge each instruction's clocks to its function by.
+pub let meter_with = pure (symbols: Symbols) -> Meter => Meter {
+  new_meter() | symbols: symbols, charging: [0; symbols.names.len() + 1],
+}
+
+/// The function holding address `pc`, by its place in `symbols`; one past the last for none.
+pub let function_of = pure (symbols: ref Symbols, pc: u32) -> i64 => {
+  let n = symbols.starts.len()
+  var low = 0
+  var high = n
+  // The last function starting at or before pc.
+  while low < high {
+    let middle = (low + high) / 2
+    if symbols.starts[middle] <= pc { low = middle + 1 } else { high = middle }
+  }
+  let k = low - 1
+  if k >= 0 && pc < symbols.ends[k] { k } else { n }
+}
+
+/// `text` as a hexadecimal number, if it is one.
+let hex_number = pure (text: string) -> Maybe<u32> => {
+  if text.len() == 0 { return None }
+  var n: u32 = 0
+  for r in text.to_runes() {
+    let c = i64(r)
+    let d = if c >= 48 && c <= 57 { c - 48 } else if c >= 97 && c <= 102 { c - 87 } else if c >= 65 && c <= 70 { c - 55 } else { -1 }
+    if d < 0 { return None }
+    n = n * 16 + u32(d)
+  }
+  Some(n)
+}
 
 /// The longest turn still counted as waiting — an instruction come back to, or its status
 /// read repeated: a wait loop's is some 30 of the 68000's cycles (210 master clocks).
@@ -87,6 +156,7 @@ pub let measured_frame = (
   bus.vdp.most_sprites = 0
   bus.vdp.crowded_lines = 0
   var waited: i64 = 0
+  let charging = meter.charging.len() > 0
   while bus.vdp.frames < target {
     let pc = cpu.pc
     let before = bus.clock
@@ -103,6 +173,8 @@ pub let measured_frame = (
         if gap <= POLL_GAP {
           waited += gap.min(before - start)
           turned = true
+          // The turn waited, not worked: its clocks off the loop's function.
+          if charging { meter.charging[function_of(meter.symbols, pc)] -= gap }
         }
       }
     }
@@ -118,9 +190,13 @@ pub let measured_frame = (
     meter.next = (at + 1) % RECENT
     let reads = bus.status_reads
     step(cpu, bus)
+    if charging { meter.charging[function_of(meter.symbols, pc)] += bus.clock - before }
     if bus.status_reads != reads {
       let gap = bus.clock - meter.poll_clock
-      if !turned && pc == meter.poll_pc && gap <= POLL_GAP { waited += gap.min(bus.clock - start) }
+      if !turned && pc == meter.poll_pc && gap <= POLL_GAP {
+        waited += gap.min(bus.clock - start)
+        if charging { meter.charging[function_of(meter.symbols, pc)] -= gap }
+      }
       meter.poll_pc = pc
       meter.poll_clock = bus.clock
     }
@@ -134,6 +210,22 @@ pub let measured_frame = (
     crowded: bus.vdp.crowded_lines,
   }
   meter.frames.push(cost)
+  if charging {
+    var spent: [](i64, i64) = []
+    for k in 0..<meter.charging.len() {
+      if meter.charging[k] != 0 {
+        spent.push((k, meter.charging[k]))
+        meter.charging[k] = 0
+      }
+    }
+    meter.charges.push(spent)
+    if meter.charges.len() > STATS_KEPT {
+      meter.charges = meter.charges.slice(
+        meter.charges.len() - STATS_KEPT,
+        meter.charges.len()
+      )
+    }
+  }
   if meter.frames.len() > STATS_KEPT {
     meter.frames = meter.frames.slice(meter.frames.len() - STATS_KEPT, meter.frames.len())
   }
@@ -153,11 +245,28 @@ let signature = pure (cpu: ref Cpu) -> u64 => {
 /// The meter's frames as the file `--stats` writes, for a VDP drawing `sprites` a line.
 pub let stats_text = pure (meter: ref Meter, sprites: i64) -> string => {
   let clocks = if meter.frames.len() > 0 { meter.frames[meter.frames.len() - 1].clocks } else { FRAME_CLOCKS }
-  var lines = ["sheliak stats 1", "limits ${clocks} ${sprites}"]
+  var lines = ["sheliak stats 2", "limits ${clocks} ${sprites}"]
   for f in meter.frames { lines.push("${f.worked} ${f.dma} ${f.most_sprites} ${f.crowded}") }
+  // Each function's work over the frames kept, most first, the first FUNCTIONS_SHOWN.
+  if meter.charging.len() > 0 {
+    var totals: []i64 = [0; meter.charging.len()]
+    for spent in meter.charges {
+      for (k, spent_clocks) in spent { totals[k] += spent_clocks }
+    }
+    let summed = [t in totals | t]
+    var order = [k in 0..<summed.len() | summed[k] > 0 | k]
+    order.sort_by(pure (a, b) => summed[b].compare(summed[a]))
+    let n = meter.symbols.names.len()
+    for k in order.slice(0, order.len().min(FUNCTIONS_SHOWN)) {
+      lines.push("function ${summed[k]} ${if k < n { meter.symbols.names[k] } else { "(outside any function)" }}")
+    }
+  }
   lines.push("end ${meter.run}")
   lines.join("\n") ++ "\n"
 }
+
+/// The functions the file names, the busiest first.
+pub const FUNCTIONS_SHOWN: i64 = 60
 
 /// Master clocks in an NTSC frame: 262 lines of 3,420.
 pub const FRAME_CLOCKS: i64 = 896040

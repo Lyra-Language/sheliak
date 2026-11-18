@@ -34,8 +34,10 @@ SDL_VIDEODRIVER=dummy build/sheliak ROM --frames 600 --screenshot out.bmp   # he
 build/sheliak ROM --stats FILE   # play (or headless) keeping each frame's cost: the 68000's
                             #    work (not waiting for the vertical blank), DMA's bytes,
                             #    the most sprites a line and the lines past the limit —
-                            #    the last 600 frames, rewritten every 30; Vega's Profiler
-                            #    panel reads it (genesis/measure.lyra has the format)
+                            #    the last 600 frames, rewritten every 30; with the ROM's
+                            #    symbol map beside it (<rom>.sym, lyrac writes it), each
+                            #    function's work too; Vega's Profiler panel reads it
+                            #    (genesis/measure.lyra has the format)
 tests/fetch.sh              # SingleStepTests 68000 suite -> build/deps/680x0 (~200 MB, once)
 tests/cpu.sh                # every 68000 test file (~1M tests, ~17 s)
 tests/cpu.sh MOVE.l DIVS    # just these
